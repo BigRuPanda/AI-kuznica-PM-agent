@@ -37,7 +37,7 @@ export function SavedChart({id,author,suggested,onSave,preview=false}:{id:string
   const {calc,error}=useCalculation(id),[board,setBoard]=useState('Скорость оплаты'),[state,setState]=useState(''),[open,setOpen]=useState(false),listId=useId();
   if(!calc||calc.op!=='build_chart')return <p>{error||'Загружается график…'}</p>;
   const content=<div className="saved-chart"><small>{segmentNames[calc.context.segment]} · на {dayDate(calc.launch,calc.context.day)}</small>
-    <CustomChart chart={calc.result} launch={calc.launch} day={calc.context.day} showTitle={!preview}/><a href={calcHref(id)} target={preview?'_blank':undefined} rel={preview?'noreferrer':undefined}>Источник расчёта ↗</a>
+    <CustomChart calcId={calc.id} version={calc.context.version} chart={calc.result} launch={calc.launch} day={calc.context.day} showTitle={!preview}/><a href={calcHref(id)} target={preview?'_blank':undefined} rel={preview?'noreferrer':undefined}>Источник расчёта ↗</a>
     {author&&<form onSubmit={async e=>{e.preventDefault();if(state==='Сохранение…')return;setState('Сохранение…');try{await api('boards',{calc:id,name:board,releaseId:calc.context.releaseId,author});setState('Сохранено');onSave?.();}catch(ex){setState((ex as Error).message);}}}>
     <label>Дашборд релиза<input value={board} onChange={e=>{setBoard(e.target.value);setState('');}} list={listId} required maxLength={100}/></label>
     <datalist id={listId}>{suggested?.map(s=><option key={s}>{s}</option>)}</datalist>
@@ -54,7 +54,7 @@ export function CalculationPage({id}:{id:string}){
   return <main className="proof-page"><a href={'#release/'+calc.context.releaseId}>← К релизу {calc.context.releaseId}</a><h1>Сохранённый расчёт</h1>
     <p>{segmentNames[calc.context.segment]} · срез на {dayDate(calc.launch,calc.context.day)} · версия данных {calc.context.version.slice(0,10)}</p>
     {calc.op!=='interval'&&<p className="muted">До запуска {dayDate(calc.launch,-7)} – {dayDate(calc.launch,0)} · {calc.context.day?'после запуска '+dayDate(calc.launch,0)+' – '+dayDate(calc.launch,Math.min(calc.context.day,7)):'срез на момент запуска'}</p>}
-    {calc.op==='build_chart'&&<CustomChart chart={calc.result} launch={calc.launch} day={calc.context.day}/>}
+    {calc.op==='build_chart'&&<CustomChart calcId={calc.id} version={calc.context.version} chart={calc.result} launch={calc.launch} day={calc.context.day}/>}
     {calc.op==='compare_metric'&&<><h2>{calc.result.title}</h2><p>{calc.result.formula}</p><p>{calc.result.reason}</p><Comparisons series={calc.result.series} unit={calc.result.unit} metric={calc.context.metric}/></>}
     {calc.op==='breakdown'&&Object.entries(calc.result).map(([k,c])=><section key={k}><h2>{segmentNames[k as keyof typeof segmentNames]}</h2><p>{c.title} · {c.formula} {c.reason}</p><Comparisons series={c.series} unit={c.unit} metric={calc.context.metric}/></section>)}
     {calc.op==='funnel'&&<><h2>Шаги воронки</h2><p>{calc.result.definition}</p>{calc.result.missing.length>0&&<p>Нужны {calc.result.missing.join(', ')}</p>}{calc.result.steps.map(s=><p key={s.period}>{s.period==='before'?'До':'После'} · начали {s.checkout} → выставили счёт {s.invoiced} → оплатили {s.paid}</p>)}</>}

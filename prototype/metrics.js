@@ -74,9 +74,7 @@
     }
     return { before: calc(-7, 0), after: calc(0, 7), days, daily: days.map(d => calc(d, d + 1)) };
   }
-  function snapshot(release, segment, asOf, firstDay = -7) {
-    const orders = release.orders.filter(order => segment === 'all' || order[0] === segment);
-    const days = Array.from({ length: Math.max(0,asOf-firstDay) }, (_, i) => i + firstDay);
+  function partition(orders, asOf) {
     const groups = {old:[], new:[], unknown:[]};
     const firstSeen = {old:Infinity, new:Infinity};
     for (const order of orders) {
@@ -87,6 +85,12 @@
         firstSeen[version] = Math.min(firstSeen[version],observed);
       } else groups.unknown.push(order);
     }
+    return {groups,firstSeen};
+  }
+  function snapshot(release, segment, asOf, firstDay = -7) {
+    const orders = release.orders.filter(order => segment === 'all' || order[0] === segment);
+    const days = Array.from({ length: Math.max(0,asOf-firstDay) }, (_, i) => i + firstDay);
+    const {groups,firstSeen}=partition(orders,asOf);
     const result = series(orders, days, asOf);
     result.hasVersion = groups.old.length + groups.new.length > 0;
     result.byVersion = {
@@ -96,5 +100,5 @@
     };
     return result;
   }
-  globalThis.releaseMetrics = { DAY, metrics, calculate, snapshot };
+  globalThis.releaseMetrics = { DAY, metrics, calculate, snapshot, partition };
 })();

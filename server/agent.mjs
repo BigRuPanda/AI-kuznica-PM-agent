@@ -43,8 +43,8 @@ export async function providerCall(env,messages,tools,choice='auto',send=fetch){
   if(target.protocol!=='https:'&&!(target.protocol==='http:'&&['localhost','127.0.0.1','[::1]'].includes(target.hostname)))throw Error('Для удалённого API модели требуется HTTPS.');
   let response;
   try{response=await send(target,{method:'POST',redirect:'error',signal:AbortSignal.timeout(60000),headers:{'Content-Type':'application/json',...(env.LLM_API_KEY?{Authorization:'Bearer '+env.LLM_API_KEY}:{})},
-    body:JSON.stringify({model:env.LLM_MODEL,messages,tools,tool_choice:choice})});}catch{throw Error('Модель недоступна. Проверьте подключение и параметры .env.');}
-  if(!response.ok)throw Error('Провайдер модели вернул HTTP '+response.status+'.');
+    body:JSON.stringify({model:env.LLM_MODEL,messages,tools,tool_choice:choice})});}catch{throw Object.assign(Error('Модель недоступна. Проверьте подключение и параметры .env.'),{retryable:true});}
+  if(!response.ok)throw Object.assign(Error('Провайдер модели вернул HTTP '+response.status+'.'),{status:response.status});
   const data=await response.json(),reply=data.choices?.[0]?.message;
   if(!reply)throw Error('Модель вернула пустой ответ.');return {...reply,usage:{input:data.usage?.prompt_tokens,output:data.usage?.completion_tokens}};
 }

@@ -1,0 +1,139 @@
+.range-widget {
+  margin: 10px 0;
+  color: #35423c;
+}
+.range-plot {
+  position: relative;
+}
+.range-plot svg {
+  display: block;
+  width: 100%;
+  height: clamp(155px, 19vw, 250px);
+  touch-action: pan-y;
+  user-select: none;
+  -webkit-user-select: none;
+  cursor: crosshair;
+}
+.range-plot svg:focus-visible {
+  outline: 2px solid #477768;
+  outline-offset: 2px;
+}
+.range-plot svg text {
+  fill: #526159;
+  font:
+    11px system-ui,
+    sans-serif;
+}
+.range-legend,
+.range-buttons,
+.range-dates {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.range-legend button,
+.range-dates button,
+.range-buttons button {
+  font: inherit;
+  font-size: 0.8rem;
+  padding: 4px 8px;
+}
+.range-legend button[aria-pressed='false'] {
+  opacity: 0.5;
+  text-decoration: line-through;
+}
+.range-legend i,
+.range-tip i {
+  display: inline-block;
+  width: 10px;
+  height: 3px;
+  margin-right: 5px;
+  vertical-align: middle;
+}
+.range-legend small {
+  font-size: 0.72rem;
+}
+.range-tip {
+  position: absolute;
+  top: 0;
+  z-index: 2;
+  max-width: min(82%, 390px);
+  background: #fffffff5;
+  color: #293a32;
+  padding: 8px 11px;
+  border: 1px solid #cdd7cf;
+  border-radius: 7px;
+  box-shadow: 0 4px 14px #213c3020;
+  font-size: 0.76rem;
+  pointer-events: none;
+}
+.range-tip.end {
+  right: 0;
+}
+.range-tip.start {
+  left: 0;
+}
+.range-controls {
+  display: grid;
+  gap: 6px;
+}
+.range-dates input[type='date'] {
+  font-size: 0.78rem;
+  min-width: 0;
+  max-width: 145px;
+  padding: 3px;
+}
+.range-dates button[aria-pressed='true'] {
+  background: #e1eee7;
+}
+.range-buttons {
+  justify-content: flex-start;
+}
+.range-attachment {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: #284f40;
+  padding: 6px 9px;
+  background: #eaf2ec;
+  border-radius: 6px;
+  font-size: 0.83rem;
+  overflow-wrap: anywhere;
+}
+.range-result table {
+  border-collapse: collapse;
+  width: 100%;
+}
+.range-result th,
+.range-result td {
+  padding: 6px;
+  text-align: left;
+  border-bottom: 1px solid #dde4dd;
+}
+.range-result {
+  overflow-x: auto;
+}
+.tool-receipt {
+  margin-top: 8px;
+  display: grid;
+  gap: 4px;
+  border-left: 2px solid #597665;
+  padding-left: 8px;
+}
+.range-controls small {
+  color: #59695f;
+}
+.range-controls button.primary {
+  background: #903229;
+  color: white;
+}
+@media (max-width: 730px) {
+  .range-plot svg text {
+    font-size: 18px;
+  }
+  .range-tip {
+    font-size: 0.76rem;
+    max-width: 94%;
+  }
+}

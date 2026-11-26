@@ -47,10 +47,11 @@ export async function geminiCall(env,messages,tools,choice,send,credentials=auth
   }
   const url=developer?'https://generativelanguage.googleapis.com/v1beta/models/'+model+':generateContent':
     'https://'+host+'/v1/'+prefix+'publishers/google/models/'+model+':generateContent';
+  const body=JSON.stringify(geminiRequest(messages,tools,choice));
   let res;
-  try{res=await send(url,{method:'POST',headers,redirect:'error',signal:AbortSignal.timeout(60000),body:JSON.stringify(geminiRequest(messages,tools,choice))});}
-  catch{throw Error('Не удалось связаться с Google Cloud.');}
-  if(!res.ok)throw Error('Google вернул HTTP '+res.status+'. '+({400:'Проверьте параметры модели и тип ключа.',401:'Проверьте аутентификацию.',403:developer?'Проверьте доступ ключа к Gemini API и модели.':'Проверьте биллинг, включение API и право aiplatform.endpoints.predict.',404:'Проверьте доступность ID модели.',429:'Исчерпана квота запросов.'}[res.status]||'Повторите запрос позже.'));
+  try{res=await send(url,{method:'POST',headers,redirect:'error',signal:AbortSignal.timeout(60000),body});}
+  catch{throw Object.assign(Error('Не удалось связаться с Google Cloud.'),{retryable:true});}
+  if(!res.ok)throw Object.assign(Error('Google вернул HTTP '+res.status+'. '+({400:'Проверьте параметры модели и тип ключа.',401:'Проверьте аутентификацию.',403:developer?'Проверьте доступ ключа к Gemini API и модели.':'Проверьте биллинг, включение API и право aiplatform.endpoints.predict.',404:'Проверьте доступность ID модели.',429:'Исчерпана квота запросов.'}[res.status]||'Повторите запрос позже.')),{status:res.status});
   const response=await res.json(),parts=response.candidates?.[0]?.content?.parts;
   if(!parts?.length)throw Error('Gemini вернула пустой ответ.');
   return {role:'assistant',usage:{input:response.usageMetadata?.promptTokenCount,output:response.usageMetadata?.totalTokenCount!=null?response.usageMetadata.totalTokenCount-(response.usageMetadata.promptTokenCount||0):undefined},content:parts.filter(p=>p.text&&!p.thought).map(p=>p.text).join('\n'),googleParts:parts,

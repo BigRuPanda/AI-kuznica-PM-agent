@@ -20,7 +20,7 @@ export function MetricCard({card:c,report:r,select}:{card:Card;report:Report;sel
   return <article className={'card '+(mark?'important':'')}><div className="metric-head"><h3>{c.title}</h3>
     <PeriodSummary before={{...before,sample:metricSample(before,c.metric)}} after={{...after,sample:metricSample(after,c.metric)}} unit={c.unit} launch={r.release.launch} day={r.context.day} status={c.status}/></div>
     {Object.keys(c.series).length===1&&<small>Нет данных о версии интерфейса</small>}
-    <Trend days={r.days} launch={r.release.launch} unit={c.unit} title={c.title} series={Object.fromEntries(Object.entries(c.series).map(([k,v])=>[k,v.daily]))} marks={notes} onInspect={select} rate={c.metric<2} unknown={c.unknown.daily} metric={c.metric}/>
+    <Trend days={r.days} launch={r.release.launch} unit={c.unit} title={c.title} series={Object.fromEntries(Object.entries(c.series).map(([k,v])=>[k,v.daily]))} marks={notes} onInspect={select} rate={c.metric<2} unknown={c.unknown.daily} metric={c.metric} completed={r.completed} pick={async(series,ranges)=>{const saved=await api<{id:string}>('compare',{...r.context,metric:c.metric});return {label:'',selection:{source:'release',calcId:saved.id,version:r.context.version,metric:String(c.metric),series,ranges}};}}/>
     {versions&&<div className="version-result"><span className="period-label">После запуска по первому показу</span>
       {['old','new'].map(k=>{const p=c.series[k].after;return <span key={k}>{lines[k].title} · <b>{fmt(p.value,c.unit)}</b> · {metricSample(p,c.metric)}</span>;})}
       {c.both.length>0&&<small>Видели обе версии · {fmt(c.both.length)}. Учтены по первому показу.</small>}</div>}
@@ -39,9 +39,9 @@ export function ChartSummary({chart,launch,day}:{chart:Derived;launch:number;day
   return <><PeriodSummary before={{...before,sample:eventSample(before.n,spec?.end)}} after={{...after,sample:eventSample(after.n,spec?.end)}} unit={chart.unit} launch={launch} day={day} status={chart.status}/>
     {chart.status==='preliminary'&&day>=7&&<small>Источник пока не подтвердил полноту этих семи суток.</small>}</>;
 }
-export function CustomChart({chart,launch,day,showTitle=true}:{chart:Derived;launch:number;day:number;showTitle?:boolean}){
+export function CustomChart({chart,launch,day,showTitle=true,calcId,version}:{chart:Derived;launch:number;day:number;showTitle?:boolean;calcId?:string;version?:string}){
   return <section className="custom">{showTitle&&<h3>{chart.title}</h3>}
     <ChartSummary chart={chart} launch={launch} day={day}/>
-    <Trend series={{all:chart.daily}} days={chart.days} launch={launch} unit={chart.unit} title={chart.title} sampleEvent={chart.spec?.end}/>
+    <Trend series={{all:chart.daily}} days={chart.days} launch={launch} unit={chart.unit} title={chart.title} sampleEvent={chart.spec?.end} pick={calcId?(series,ranges)=>({label:'',selection:{source:'release',calcId,version,metric:'derived',series,ranges}}):undefined}/>
     <p>{chart.formula}</p></section>;
 }

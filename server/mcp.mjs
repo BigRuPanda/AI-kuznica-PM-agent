@@ -1,3 +1,4 @@
+import {initRanges} from './chart-ranges.mjs';
 import {McpServer} from '@modelcontextprotocol/sdk/server/mcp.js';
 import {StdioServerTransport} from '@modelcontextprotocol/sdk/server/stdio.js';
 import {openStore} from './store.mjs';
@@ -12,7 +13,7 @@ const accounts=access?openAccounts(join(dirname(base),'accounts.sqlite')):null;
 const actor=accounts?.bearer(access);
 if(access&&!actor)throw Error('Недействительный персональный ключ MCP');
 const store=openStore(actor?workspacePath(base,actor.space):base),server=new McpServer({name:'release-analytics',version:'2.0.0'});
-if(actor)teamTools(server,store,actor);
+if(actor){initRanges(store.db);teamTools(server,store,actor);}
 const scope=process.env.RELEASE_MCP_CONTEXT?JSON.parse(process.env.RELEASE_MCP_CONTEXT):null;
 for(const [key,[description,inputSchema]] of Object.entries(operations)){
   server.registerTool(key,{description,inputSchema},async input=>{

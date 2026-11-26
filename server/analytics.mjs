@@ -58,7 +58,7 @@ function summary(a,i){
 export const eventFields={checkout:[1,'начала оформления','checkout_started'],invoice:[2,'выставления счёта','invoice_issued'],
   payment:[3,'оплаты','payment_received'],due:[5,'срока продления','subscription_due'],renewal:[6,'продления','subscription_renewed']};
 const statistics={median:'Медиана',mean:'Среднее',p90:'90-й процентиль',sum:'Сумма',count:'Количество'};
-export function derive(a,spec){
+export function derive(a,spec,interval){
   if(!spec||!Object.hasOwn(statistics,spec.stat)||!Object.hasOwn(eventFields,spec.end))throw Error('Нужны поддерживаемые событие и агрегат.');
   const {field,stat,start,end}=spec;
   if(field==='duration'){
@@ -70,13 +70,14 @@ export function derive(a,spec){
   const needed=[eventFields[end][2],...(field==='duration'?[eventFields[start][2]]:field==='amount'?['amount_rub']:[])];
   const absent=required(a.v,needed);if(absent.length)throw Error('Для графика отсутствуют '+absent.join(', '));
   if(a.context.segment!=='all'&&!a.v.columns.includes('customer_segment'))throw Error('Нужно поле customer_segment.');
-  const points=a.days.map(()=>[]),before=[],after=[];
+  const points=a.days.map(()=>[]),before=[],after=[],selected=[];
   for(const o of a.orders){
     if(a.context.segment!=='all'&&o[0]!==a.context.segment)continue;
     const t=o[eventFields[end][0]];if(!Number.isFinite(t)||t>=a.context.day*DAY)continue;
     const day=Math.floor(t/DAY);
     let x=1;if(field==='duration'){const begin=o[eventFields[start][0]];if(!Number.isFinite(begin)||begin>t)continue;x=(t-begin)/DAY;}
     else if(field==='amount')x=o[4];
+    if(interval&&day>=interval.from&&day<interval.to)selected.push(x);
     points[day-a.first]?.push(x);if(day>=-7&&day<0)before.push(x);if(day>=0&&day<7)after.push(x);
   }
   function statOf(arr){
@@ -87,6 +88,7 @@ export function derive(a,spec){
     const sorted=arr.sort((x,y)=>x-y),idx=(n-1)*(stat==='p90'?.9:.5),lo=Math.floor(idx);
     return {value:sorted[lo]+(sorted[Math.ceil(idx)]-sorted[lo])*(idx-lo),n};
   }
+  if(interval)return statOf(selected);
   return {title,unit,spec:{title,stat,field,start:field==='duration'?start:null,end},days:a.days,daily:points.map(statOf),before:statOf(before),after:a.context.day?statOf(after):{value:null,n:0},
     formula:statistics[stat]+' '+(field==='duration'?'времени от '+eventFields[start][1]+' до '+eventFields[end][1]+' среди записей с обоими событиями':field==='amount'?'сумм оплат':'событий '+eventFields[end][1])+'. Группировка по дате '+eventFields[end][1]+'.'};
 }
@@ -124,7 +126,7 @@ export function page(store,input){
         overview+=' В каждом сегменте конверсия сохранилась. Доля новых клиентов изменилась с '+format(grouped[0].d/pre.d*100,0)+' до '+format(later[0].d/post.d*100,0)+'.';
     }
   }
-  return {release:a.rel,context:a.context,last:a.last,days:a.days,cards:a.cards,overview,
+  return {release:a.rel,completed:a.v.completed,context:a.context,last:a.last,days:a.days,cards:a.cards,overview,
     report:report&&report.day<=a.context.day?report:null,
     notes:store.db.prepare('SELECT body FROM notes WHERE release=?').all(a.rel.id).map(r=>JSON.parse(r.body)).filter(n=>n.version===a.v.id&&n.observedDay<=a.context.day&&(a.context.segment==='all'||n.segment==='all'||n.segment===a.context.segment))};
 }

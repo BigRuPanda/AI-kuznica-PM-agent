@@ -1,3 +1,7 @@
+import { RangeResult } from './range-result';
+import { rangeLabel, RangeChart, DAY } from './range-chart';
+import type { Attachment } from './range-chart';
+import { SavedChart } from './calculations';
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { createRoot } from 'react-dom/client';
 import { post, jump, num } from './team-data';
@@ -110,25 +114,70 @@ function CaseList({ items }: { items: Case[] }) {
 }
 function Chat({
   id,
+  userId,
   caseId,
   threads,
   action,
   onResult,
   context,
   clearContext,
+  attachment,
+  screen,
+  onAdd,
 }: {
   id: string;
+  userId: string;
   caseId?: string;
   threads: Thread[];
   action: Action;
   onResult?: (b: Msg['body']) => void;
   context?: string;
   clearContext?: () => void;
+  attachment?: Attachment;
+  screen?: { calc: string; full: boolean; control?: string; cards: string[] };
+  onAdd?: (s: NonNullable<Msg['body']['suggestions']>[number]) => void;
 }) {
+  const pendingKey = 'pm-pending/' + userId + '/' + id;
+  const readPending = () => {
+    try {
+      return JSON.parse(sessionStorage.getItem(pendingKey) || 'null') as {
+        id: string;
+        body: string;
+        text: string;
+      } | null;
+    } catch {
+      return null;
+    }
+  };
   const [items, setItems] = useState<Msg[]>([]),
     [running, work] = useState(false),
-    [q, setQ] = useState(''),
+    [q, setQ] = useState(() => readPending()?.text || ''),
     [err, setErr] = useState('');
+  const [attached, setAttached] = useState<Attachment | undefined>(() => {
+    try {
+      return JSON.parse(sessionStorage.getItem('pm-attachment/' + id) || 'null') || undefined;
+    } catch {
+      return undefined;
+    }
+  });
+  const [sending, setSending] = useState(false),
+    [receipts, showReceipt] = useState<Record<string, string>>({});
+  const box = useRef<HTMLTextAreaElement>(null),
+    request = useRef<{ id: string; body: string; text: string } | null>(readPending());
+  useEffect(() => {
+    if (attachment) {
+      setAttached(attachment);
+      sessionStorage.setItem('pm-attachment/' + id, JSON.stringify(attachment));
+      box.current?.focus();
+    }
+  }, [attachment, id]);
+  useEffect(() => {
+    if (sessionStorage.getItem('pm-attachment/' + id)) box.current?.focus();
+  }, [id]);
+  function clearAttachment() {
+    setAttached(undefined);
+    sessionStorage.removeItem('pm-attachment/' + id);
+  }
   const last = useRef(-1),
     end = useRef<HTMLDivElement>(null);
   const refresh = useCallback(async () => {
@@ -177,6 +226,102 @@ function Chat({
           <article className={'bubble ' + m.role} key={m.seq}>
             <b>{m.author}</b>
             <p>{m.body.text}</p>
+            {m.body.rangeId && (
+              <a href={'#range/' + m.body.rangeId}>
+                Выделенный участок
+                {m.body.selection
+                  ? ' · ' +
+                    m.body.selection.ranges
+                      .map(
+                        (r, i) => (i ? 'B: ' : 'A: ') + rangeLabel(r, m.body.selection?.source === 'release'),
+                      )
+                      .join(' / ')
+                  : ''}
+              </a>
+            )}
+            {m.body.suggestions?.map((s) => (
+              <div className="tool-receipt" key={s.calc}>
+                <a
+                  href={
+                    (s.source === 'release'
+                      ? '/?legacy=1#calc/'
+                      : s.source === 'range'
+                        ? '#range/'
+                        : '#snapshot/') + s.calc
+                  }
+                  onClick={s.source === 'release' ? () => setTimeout(() => location.reload(), 0) : undefined}
+                >
+                  {s.title}
+                </a>
+                {onAdd && <button onClick={() => onAdd(s)}>Добавить на экран</button>}
+              </div>
+            ))}
+            {m.body.actions?.map((a, i) => (
+              <div className="tool-receipt" key={a.id || i}>
+                <b>
+                  {a.title ||
+                    (
+                      {
+                        prepare_publish: 'Публикация в команду',
+                        watch: 'Проверка назначена',
+                        feedback: 'Поправка сохранена',
+                        append_case: 'Вывод сохранён',
+                        set_view: 'Личный вид обновлён',
+                        decide: 'Состояние изменено',
+                      } as Record<string, string>
+                    )[a.op]}
+                </b>
+                {a.description && <p>{a.description}</p>}
+                {a.conclusion && <p>{a.conclusion}</p>}
+                {!!a.similar?.length && (
+                  <details>
+                    <summary>Похожие задачи · {a.similar.length}</summary>
+                    {a.similar.map((task) => (
+                      <p key={task.key}>
+                        {task.key} · {task.title}
+                      </p>
+                    ))}
+                  </details>
+                )}
+                {a.destination && (
+                  <small>
+                    {a.destination} ·{' '}
+                    {a.key ? 'Изменить ' + a.key + ' · приоритет ' + a.priority : 'Новая задача'}
+                  </small>
+                )}
+                {a.recipient && <small>Получатели: {a.recipient}</small>}
+                {a.rangeId && <a href={'#range/' + a.rangeId}>Проверить выделенные периоды</a>}
+                {a.cards?.length ? (
+                  <small>Материалы: {a.cards.map((k) => labels[k] || k).join(', ')}</small>
+                ) : null}
+                {a.id &&
+                  a.canConfirm !== false &&
+                  ['draft', 'prepare_publish'].includes(a.op) &&
+                  (a.state === 'done' || receipts[a.id] ? (
+                    <small>{receipts[a.id] || a.external || 'Подтверждено'}</small>
+                  ) : (
+                    <button
+                      onClick={() =>
+                        action(async () => {
+                          const r = await post<{ key?: string; id?: string }>(
+                            a.op === 'draft' ? 'confirm' : 'approve_preview',
+                            { id: a.id },
+                          );
+                          showReceipt((prev) => ({ ...prev, [a.id!]: r.key || 'Опубликовано' }));
+                        })
+                      }
+                    >
+                      {a.op === 'draft' ? 'Подтвердить задачу' : 'Подтвердить публикацию'}
+                    </button>
+                  ))}
+              </div>
+            ))}
+            {!!m.body.steps?.length && (
+              <details>
+                <summary>Выполненные проверки</summary>
+                <small>{m.body.steps.join(' → ')}</small>
+              </details>
+            )}
             {m.body.warning && <small>{m.body.warning}</small>}
             {m.body.calc && (
               <a href={'#snapshot/' + m.body.calc + '/' + (m.body.cards || initialCards).join(',')}>
@@ -211,21 +356,56 @@ function Chat({
       <form
         onSubmit={(e) => {
           e.preventDefault();
-          if (!q.trim()) return;
+          if (!q.trim() || sending) return;
           const groupMessage = (e.nativeEvent as SubmitEvent).submitter?.getAttribute('value') === 'message';
           action(async () => {
-            await post(groupMessage ? 'say' : 'ask', {
+            setSending(true);
+            const body = {
               thread: id,
               question: (context ? 'О графике «' + context + '». ' : '') + q,
               caseId,
-              requestId: crypto.randomUUID(),
-            });
+              screen,
+              ...(attached?.id
+                ? { rangeId: attached.id }
+                : attached
+                  ? { selection: attached.selection }
+                  : {}),
+            };
+            const key = JSON.stringify(body);
+            if (request.current?.body !== key)
+              request.current = { id: crypto.randomUUID(), body: key, text: q };
+            sessionStorage.setItem(pendingKey, JSON.stringify(request.current));
+            try {
+              await post(groupMessage ? 'say' : 'ask', { ...body, requestId: request.current.id });
+            } finally {
+              setSending(false);
+            }
+            request.current = null;
+            sessionStorage.removeItem(pendingKey);
+            clearAttachment();
             setQ('');
             work(!groupMessage);
             clearContext?.();
           });
         }}
       >
+        {attached && (
+          <div className="range-attachment">
+            <span>{attached.label}</span>
+            <button type="button" aria-label="Убрать выделение" onClick={clearAttachment}>
+              ×
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setQ('Почему здесь изменилось значение?');
+                box.current?.focus();
+              }}
+            >
+              Почему здесь изменение?
+            </button>
+          </div>
+        )}
         {context && (
           <button type="button" onClick={clearContext}>
             {context} ×
@@ -235,16 +415,17 @@ function Chat({
           Вопрос агенту
         </label>
         <textarea
+          ref={box}
           id={'q' + id}
           placeholder="Спросить агента…"
           value={q}
           onChange={(e) => setQ(e.target.value)}
           required
         />
-        <button className="primary">
+        <button className="primary" disabled={sending}>
           {threads.find((t) => t.id === id)?.scope === 'group' ? 'Спросить агента' : 'Отправить'}
         </button>
-        {threads.find((t) => t.id === id)?.scope === 'group' && (
+        {!attached && threads.find((t) => t.id === id)?.scope === 'group' && (
           <button type="submit" value="message">
             Написать команде
           </button>
@@ -271,6 +452,8 @@ function Investigation({
     [cards, layout] = useState(initialCards),
     [pinned, pin] = useState<string[]>([]),
     [ctx, ask] = useState(''),
+    [attachment, attach] = useState<Attachment>(),
+    [additional, addCheck] = useState<NonNullable<Msg['body']['suggestions']>>([]),
     [tid, thread] = useState(''),
     [preview, show] = useState(false),
     [conclusion, writeConclusion] = useState(''),
@@ -291,6 +474,21 @@ function Investigation({
       .then((v) => {
         if (valid) {
           set(v);
+          if (v.personal?.revision && localStorage.getItem(prefix + '/revision') !== v.personal.revision) {
+            localStorage.setItem(prefix + '/revision', v.personal.revision);
+            localStorage.setItem(
+              prefix,
+              JSON.stringify({
+                ...v.personal,
+                pinned: v.personal.pin ? v.personal.cards : [],
+                sourceQuery: '',
+              }),
+            );
+            layout(v.personal.cards);
+            if (v.personal.full !== undefined) filter(v.personal.full);
+            if (v.personal.control) control(v.personal.control);
+            if (v.personal.pin) pin(v.personal.cards);
+          }
           if (v.case.body.origin && !localStorage.getItem(prefix)) {
             const snapshot = v.case.body.origin;
             localStorage.setItem(prefix, JSON.stringify(snapshot));
@@ -312,13 +510,20 @@ function Investigation({
       const v = JSON.parse(localStorage.getItem(prefix) || '{}');
       filter(!!v.full);
       findSources(v.sourceQuery || '');
+      if (v.control) control(v.control);
       layout(v.cards || initialCards);
       pin(v.pinned || []);
     } catch {}
   }, [id, prefix]);
   const result = useCallback(
     (m: Msg['body']) => {
-      if (m.cards) {
+      if (m.personal && m.personal.caseId === id) {
+        layout([...new Set([...pinned, ...m.personal.cards])]);
+        if (m.personal.full !== undefined) filter(m.personal.full);
+        if (m.personal.control) control(m.personal.control);
+        if (m.personal.pin) pin([...new Set([...pinned, ...m.personal.cards])]);
+      }
+      if (m.cards && !m.rangeId) {
         const next = [...new Set([...pinned, ...m.cards])];
         layout(next);
         filter(!!m.full);
@@ -419,6 +624,10 @@ function Investigation({
             cards={cards}
             backlog={d.backlog}
             pinned={pinned}
+            onAttach={(a) => {
+              attach(a);
+              chatMode(true);
+            }}
             onAsk={(x) => {
               ask(x);
               chatMode(true);
@@ -429,6 +638,20 @@ function Investigation({
               localStorage.setItem(prefix, JSON.stringify({ cards, full, pinned: next }));
             }}
           />
+          {additional.map((s) => (
+            <section className="paper" key={s.calc}>
+              <button onClick={() => addCheck((xs) => xs.filter((x) => x.calc !== s.calc))}>
+                Убрать дополнительную проверку
+              </button>
+              {s.source === 'release' ? (
+                <SavedChart id={s.calc} />
+              ) : s.source === 'range' ? (
+                <RangeResult id={s.calc} />
+              ) : (
+                <Snapshot id={s.calc} selected={s.cards.join(',')} embedded />
+              )}
+            </section>
+          ))}
           <section className="paper">
             <h3>Решение по задаче</h3>
             <p className="muted">
@@ -593,7 +816,13 @@ function Investigation({
               <h3>Опубликованные версии</h3>
               {d.published.map((p) => (
                 <p key={p.id}>
-                  <a href={'#snapshot/' + p.body.calc + '/' + p.body.cards.join(',')}>
+                  <a
+                    href={
+                      p.body.rangeId
+                        ? '#range/' + p.body.rangeId
+                        : '#snapshot/' + p.body.calc + '/' + p.body.cards.join(',')
+                    }
+                  >
                     {p.user} · {p.body.cards.map((k) => labels[k]).join(', ')}
                   </a>
                 </p>
@@ -604,11 +833,18 @@ function Investigation({
         {tid && (
           <Chat
             id={tid}
+            userId={home.user.id}
             caseId={id}
             threads={home.threads}
             action={action}
             context={ctx}
-            clearContext={() => ask('')}
+            attachment={attachment}
+            screen={{ calc: v.id, full, control: peer || v.summary[1]?.product, cards }}
+            onAdd={(s) => addCheck((xs) => (xs.some((x) => x.calc === s.calc) ? xs : [...xs, s]))}
+            clearContext={() => {
+              ask('');
+              attach(undefined);
+            }}
             onResult={result}
           />
         )}
@@ -792,7 +1028,7 @@ function Settings({ home, action, refresh }: { home: Home; action: Action; refre
     </>
   );
 }
-function Snapshot({ id, selected }: { id: string; selected?: string }) {
+function Snapshot({ id, selected, embedded = false }: { id: string; selected?: string; embedded?: boolean }) {
   const [v, set] = useState<View | null>(null),
     [err, fail] = useState('');
   useEffect(() => {
@@ -800,10 +1036,61 @@ function Snapshot({ id, selected }: { id: string; selected?: string }) {
       .then(set)
       .catch((e) => fail(e.message));
   }, [id]);
+  const custom = v as unknown as {
+    kind?: string;
+    metric: string;
+    step?: number;
+    title: string;
+    unit: string;
+    segment: string;
+    points: { date: string; value: number | null }[];
+  };
+  if (custom?.kind === 'evidence-search' && v)
+    return (
+      <section className="paper">
+        <h2>{custom.title}</h2>
+        {v.evidence.map((e) => (
+          <div key={e.kind + e.key} className="excerpt">
+            <small>{e.source}</small>
+            <p>{typeof e.data === 'string' ? e.data : e.data.title || e.data.description}</p>
+          </div>
+        ))}
+      </section>
+    );
+  if (custom?.kind === 'metric-chart') {
+    const pts = custom.points.map((p) => ({ at: Date.parse(p.date + 'T00:00:00Z'), value: p.value }));
+    const step =
+      custom.step || (pts.length > 1 ? Math.min(...pts.slice(1).map((p, i) => p.at - pts[i].at)) : DAY);
+    return (
+      <section className="paper">
+        <h2>{custom.title}</h2>
+        <RangeChart
+          title={custom.title}
+          unit={custom.unit === 'ratio' ? '%' : custom.unit}
+          step={step}
+          pick={(series, ranges) => ({
+            label: custom.title,
+            selection: { source: 'metric', calcId: id, version: id, metric: custom.metric, series, ranges },
+          })}
+          lines={[
+            {
+              key: custom.segment,
+              name: custom.segment,
+              color: '#568683',
+              points: pts.map((p) => ({
+                ...p,
+                value: p.value != null && custom.unit === 'ratio' ? 100 * p.value : p.value,
+              })),
+            },
+          ]}
+        />
+      </section>
+    );
+  }
   return (
     <>
-      <a href="#cases">← Разборы</a>
-      <h1>Сохранённый расчёт</h1>
+      {!embedded && <a href="#cases">← Разборы</a>}
+      {!embedded && <h1>Сохранённый расчёт</h1>}
       {v ? (
         <Cards
           view={{ ...v, id }}
@@ -895,6 +1182,8 @@ function Workspace({ user, onLogout }: { user: User; onLogout: () => void }) {
           <p>Загрузка рабочего пространства…</p>
         ) : route === 'case' ? (
           <Investigation key={id} id={id} home={home} action={action} refresh={refresh} />
+        ) : route === 'range' ? (
+          <RangeResult id={id} />
         ) : route === 'snapshot' ? (
           <Snapshot id={id} selected={selected} />
         ) : route === 'settings' ? (
@@ -945,7 +1234,13 @@ function Workspace({ user, onLogout }: { user: User; onLogout: () => void }) {
                   </a>
                 ))}
               </div>
-              <Chat key={id || 'group'} id={id || 'group'} threads={home.threads} action={action} />
+              <Chat
+                key={id || 'group'}
+                userId={home.user.id}
+                id={id || 'group'}
+                threads={home.threads}
+                action={action}
+              />
             </div>
           </>
         ) : route === 'releases-list' ? (

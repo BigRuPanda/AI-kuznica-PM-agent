@@ -85,10 +85,11 @@ export type View = {
 export type Issue = { key: string; title: string; category: string; reason: string; source: string };
 export type Detail = {
   case: Case;
+  personal?: { revision?: string; cards: string[]; full?: boolean; control?: string; pin?: boolean };
   view: View;
   effect: Watch | null;
   backlog: Issue[];
-  published: { id: string; user: string; body: { calc: string; cards: string[] } }[];
+  published: { id: string; user: string; body: { calc?: string; rangeId?: string; cards: string[] } }[];
   drafts: {
     id: string;
     body: { title: string; description: string; key: string; priority: string };
@@ -105,6 +106,31 @@ export type Msg = {
     calc?: string;
     caseId?: string;
     product?: string;
+    rangeId?: string;
+    selection?: import('./range-chart').GraphSelection;
+    suggestions?: { calc: string; cards: string[]; title: string; source?: string }[];
+    actions?: {
+      canConfirm?: boolean;
+      similar?: { key: string; title: string }[];
+      destination?: string;
+      rangeId?: string;
+      calc?: string;
+      cards?: string[];
+      op: string;
+      id?: string;
+      caseId?: string;
+      title?: string;
+      description?: string;
+      conclusion?: string;
+      key?: string;
+      priority?: string;
+      recipient?: string;
+      state?: string;
+      external?: string;
+    }[];
+    personal?: { caseId: string; cards: string[]; full?: boolean; control?: string; pin?: boolean };
+    rounds?: number;
+    steps?: string[];
     full?: boolean;
     sourceQuery?: string;
     cards?: string[];

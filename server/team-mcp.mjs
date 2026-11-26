@@ -1,9 +1,9 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { z } from 'zod/v4';
-import { analysisView, search } from './evidence.mjs';
-import { dashboard, visibleCase, enqueue, draft } from './workbench.mjs';
-export function teamTools(server, store, user) {
+import { operations, workspaceOperation } from './workspace-operations.mjs';
+import { dashboard, visibleCase, enqueue } from './workbench.mjs';
+export function teamTools(server, store, user, env = process.env, send = fetch) {
   const db = store.db;
   function register(name, description, inputSchema, fn) {
     server.registerTool(name, { description, inputSchema }, async (input) => {
@@ -14,9 +14,11 @@ export function teamTools(server, store, user) {
       }
     });
   }
+  for (const [name, [description, schema]] of Object.entries(operations))
+    register(name, description, schema, (b) => workspaceOperation(store, user, name, b, env, send));
   register('workspace_overview', 'Доступные разборы, источники и чаты', {}, () => dashboard(db, user));
   register('search_evidence', 'Найти источники с координатами', { query: z.string().max(400) }, (b) =>
-    search(db, b.query),
+    workspaceOperation(store, user, 'search', b),
   );
   register(
     'analyze_case',
@@ -24,7 +26,7 @@ export function teamTools(server, store, user) {
     { caseId: z.string(), full: z.boolean().optional() },
     (b) => {
       visibleCase(db, user, b.caseId);
-      return analysisView(db, b);
+      return workspaceOperation(store, user, 'view', b).view;
     },
   );
   register(
@@ -35,6 +37,8 @@ export function teamTools(server, store, user) {
       question: z.string().max(2400),
       caseId: z.string().optional(),
       requestId: z.string().optional(),
+      rangeId: z.string().optional(),
+      selection: operations.range_compare[1].selection.optional(),
     },
     (b) => ({ id: enqueue(store, user, b) }),
   );
@@ -51,12 +55,12 @@ export function teamTools(server, store, user) {
     'draft_issue',
     'Подготовить черновик для подтверждения в вебе',
     { caseId: z.string(), title: z.string(), description: z.string() },
-    (b) => draft(store, user, b),
+    (b) => workspaceOperation(store, user, 'draft', b, env, send),
   );
 }
-export async function remoteMcp(req, res, body, store, user) {
+export async function remoteMcp(req, res, body, store, user, env, send) {
   const server = new McpServer({ name: 'softline-pm', version: '2.0.0' });
-  teamTools(server, store, user);
+  teamTools(server, store, user, env, send);
   const transport = new StreamableHTTPServerTransport({
     sessionIdGenerator: undefined,
     enableJsonResponse: true,
