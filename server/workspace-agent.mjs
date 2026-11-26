@@ -9,6 +9,7 @@ import { materialForResult, readMaterial } from './materials.mjs';
 import { chartObservations } from './chart-focus.mjs';
 
 const system = [
+  'На запрос о статусе задачи, версии страницы или комментарии верни только запрошенные поля. Цитируй комментарий при закрытии дословно из issue_read.closingNote.text. У метрик, комментариев Redmine и источников Excel разное происхождение.',
   'Если запрошенный результат недоступен или шаг завершился ошибкой, сообщи об этом первым предложением, назови конкретную причину. Отдельно покажи только выполненную часть. Соблюдай запрошенные даты и детализацию; альтернативные данные подпиши отдельно.',
   'При продолжении обсуждения графика context.materials задаёт точный ряд, версию, сегмент и период. Явное уточнение пользователя определяет предмет последующих вопросов. Объясняй по observations этого материала. Сравнение будней и выходных описывает форму дневного ряда, а причина различий требует отдельных свидетельств.',
   'Объясняй наблюдаемые изменения по значениям именно приложенного графика. Для причины укажи отдельное свидетельство и степень уверенности; совпадение даты релиза с изменением само по себе даёт гипотезу.',
@@ -30,6 +31,12 @@ const tools = Object.entries(operations).map(([name, [description, shape]]) => {
 });
 const opNames = Object.fromEntries(Object.keys(operations).map((k) => [k.replaceAll('-', '_'), k]));
 function concise(name, r) {
+  if (name === 'issue_read') {
+    const comments = (r.comments || []).map(c => ({
+      ...c, text: c.text.split(/\r?\n/).filter(line => !/^pm-[\w-]+$/.test(line)).join('\n').trim(),
+    })).filter(c => c.text);
+    return { ...r, comments };
+  }
   if (name === 'view') {
     const v = r.view;
     return {

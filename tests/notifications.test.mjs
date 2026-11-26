@@ -139,6 +139,7 @@ test('verified contacts, private results, Redmine confirmation and one delivery 
         observed: new Date().toISOString(),
         status: 'Closed',
         url: key.url,
+        closing_note: { text: 'Проверка завершена.', author: 'QA' },
         report,
       },
     ];
@@ -162,6 +163,7 @@ test('verified contacts, private results, Redmine confirmation and one delivery 
     const page = knowledge.results[0].pageKey;
     const before = await call('page_read', { key: page, local: true });
     assert.equal(before.version, 1);
+    assert.ok(before.text.split('\n').includes('Проверка завершена.'));
     assert.match(before.text, /2\/40 → 5\/60/);
     assert.equal((await post('page_read', { key: page, local: true }, other.cookie)).status, 400);
     const workbook = (value) => ({

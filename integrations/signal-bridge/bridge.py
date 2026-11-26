@@ -154,6 +154,7 @@ def issue_details(ref):
     priority = issue.get('priority') or {}
     return dict(key='Redmine #'+str(key),url=tracked['url'],title=issue['subject'],description=issue.get('description') or '',
                 status=issue['status']['name'],statusId=str(issue['status']['id']),statuses=choices(issue.get('allowed_statuses',[])),
+                closingNote=closing_note(issue) if issue.get('closed_on') else None,
                 priority=priority.get('name',''),priorityId=str(priority.get('id','')),assignee=assignee.get('name',''),
                 assigneeId=str(assignee.get('id','')),comments=[{'author':j['user']['name'],'text':j['notes']}
                 for j in issue.get('journals',[]) if j.get('notes') and not j.get('private_notes')])

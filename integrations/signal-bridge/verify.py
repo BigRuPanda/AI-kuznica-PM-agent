@@ -44,7 +44,7 @@ class Checks(unittest.TestCase):
                 return {'issue':self.issue}
             if path.startswith('issues.json?'):
                 return {'issues':[self.issue],'total_count':1}
-            if path in ('issues/11.json','issues/11.json?include=journals'):
+            if path in ('issues/11.json','issues/11.json?include=journals','issues/11.json?include=journals,allowed_statuses'):
                 return {'issue':self.issue}
             if path=='issue_statuses.json':
                 return {'issue_statuses':[dict(id=1,name='Open'),dict(id=4,name='Done',is_closed=True)]}
@@ -86,6 +86,8 @@ class Checks(unittest.TestCase):
         self.issue['status']['id']=4
         self.issue['journals']=[{'notes':'Проверена корзина\n\npm-abc','user':{'name':'Участник'},
                                  'details':[{'name':'status_id','new_value':'4'}]}]
+        self.issue['closed_on']='2026-11-26T12:00:00Z'
+        self.assertEqual(bridge.issue_details(self.p['reference'])['closingNote']['text'],'Проверена корзина')
         bridge.sync_tasks()
         bridge.sync_tasks()
         self.assertEqual(len(bridge.events()),1)

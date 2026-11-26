@@ -494,12 +494,15 @@ export function publicPage(page) {
     title: page.title,
     version: page.version,
     url: page.url,
-    text: plain(
-      page.storage.replace(
+    text: page.storage
+      .replace(
         /<ac:structured-macro ac:name="anchor"><ac:parameter ac:name="">pm-[\w-]+<\/ac:parameter><\/ac:structured-macro>/g,
         '',
-      ),
-    ),
+      )
+      .split(/<\/(?:p|h[1-6]|li|tr)>|<br\s*\/?>/i)
+      .map(plain)
+      .filter(Boolean)
+      .join('\n'),
     links: [...page.storage.matchAll(/<a\b[^>]*\bhref="([^"]+)"[^>]*>([\s\S]*?)<\/a>/gi)]
       .map((m) => ({ url: plain(m[1]), title: plain(m[2]) }))
       .filter((l) => /^(https?:\/\/|#demo-(issue|page)\/|#knowledge-source\/[a-f0-9]{64}$)/i.test(l.url)),
