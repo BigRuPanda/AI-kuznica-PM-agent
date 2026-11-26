@@ -65,7 +65,8 @@ export function RangeResult({ id }: { id: string }) {
         lines={r.series.map((key, i) => ({
           key,
           name: key,
-          color: i ? '#468381' : '#bc3e31',
+          color: i ? 'var(--series-control)' : 'var(--series-main)',
+          dash: i ? '7 4' : undefined,
           points: r.points[key],
         }))}
         unit={r.unit}

@@ -9,7 +9,7 @@ import { openStore } from '../server/store.mjs';
 import { initEvidence, importDocs, cases, analysisView, effect, updateCase } from '../server/evidence.mjs';
 import { createTeamApp } from '../server/team-http.mjs';
 import { jira, metrika } from '../server/connectors.mjs';
-import { initWorkbench, deliver, createThread, enqueue, messages, workJobs } from '../server/workbench.mjs';
+import { initWorkbench, deliver, createThread, deleteThread, enqueue, messages, workJobs } from '../server/workbench.mjs';
 const WEEK = 604800000;
 const date = (i) => new Date(Date.UTC(2026, 0, 5) + i * WEEK).toISOString().slice(0, 10);
 function sales(i, p = 'A', value = i < 12 ? 100 : 40, partial = false) {
@@ -25,6 +25,25 @@ function sales(i, p = 'A', value = i < 12 ? 100 : 40, partial = false) {
   };
 }
 const doc = (facts) => [{ file: 'Generated for testing.xlsx', facts }];
+
+test('legacy chat history survives upgrade and deleted message numbers are not reused', () => {
+  const store = openStore(':memory:');
+  const user = { id: 'owner', name: 'Fixture' };
+  try {
+    initEvidence(store.db);
+    store.db.exec('CREATE TABLE chat_items(seq INTEGER PRIMARY KEY,thread TEXT,author TEXT,role TEXT,body TEXT,created INTEGER)');
+    store.db.prepare('INSERT INTO chat_items VALUES(42,?,?,?,?,?)').run('group', user.name, 'user', '{"text":"Old message"}', 1);
+    initWorkbench(store.db);
+    assert.equal(messages(store.db, user, 'group').items[0].body.text, 'Old message');
+    const id = createThread(store.db, user, 'Delete fixture');
+    const write = store.db.prepare("INSERT INTO chat_items(thread,body) VALUES(?,'{}')");
+    const removedSeq = write.run(id).lastInsertRowid;
+    deleteThread(store, user, id);
+    assert.ok(write.run('group').lastInsertRowid > removedSeq);
+  } finally {
+    store.close();
+  }
+});
 
 test('a conversation can reply, clarify, and then calculate with thread-local chronological memory', async () => {
   const s = openStore(':memory:');
@@ -300,7 +319,27 @@ test('accounts, private and group chat, isolated judges, publish, MCP parity, du
       await new Promise((r) => setTimeout(r, 20));
     const privateLog = (await call('messages', { thread: privateThread }, a.cookie)).b.items;
     assert.equal(privateLog.length, 2);
+    assert.equal((await call('rename-thread', { thread: privateThread, title: 'Чужой чат' }, b.cookie)).s, 400);
+    for (const title of ['   ', 'а'.repeat(121)]) {
+      assert.equal((await call('rename-thread', { thread: privateThread, title }, a.cookie)).s, 400);
+    }
+    const renamed = await call('rename-thread', { thread: privateThread, title: '  Личный разбор  ' }, a.cookie);
+    assert.equal(renamed.s, 200);
+    assert.deepEqual(renamed.b, { id: privateThread, title: 'Личный разбор' });
+    assert.deepEqual((await call('messages', { thread: privateThread }, a.cookie)).b.items, privateLog);
+
+    const teamThreads = (await call('overview', {}, b.cookie)).b.threads;
+    assert.ok(!teamThreads.some((t) => t.id === privateThread));
+    assert.equal(teamThreads.find((t) => t.id === 'group').canRename, false);
+    assert.equal((await call('rename-thread', { thread: 'group', title: 'Без разрешения' }, b.cookie)).s, 400);
+    assert.equal((await call('rename-thread', { thread: 'group', title: 'Команда продукта' }, a.cookie)).s, 200);
+    const customTeam = (await call('thread', { title: 'Рабочий чат', group: true }, b.cookie)).b.id;
+    assert.equal((await call('rename-thread', { thread: customTeam, title: 'Встречи продукта' }, b.cookie)).s, 200);
+
     const v = (await call('view', { caseId: c.id }, a.cookie)).b.view;
+    const preview = await call('prepare_publish', { caseId: c.id, calc: v.id, cards: ['trend'] }, a.cookie);
+    assert.equal(preview.s, 200);
+    assert.equal(preview.b.recipient, 'Команда продукта');
     await call('publish', { caseId: c.id, calc: v.id, cards: ['trend'] }, a.cookie);
     const shared = (await call('messages', { thread: 'group' }, b.cookie)).b.items;
     assert.equal(shared.length, 1);
@@ -337,6 +376,24 @@ test('accounts, private and group chat, isolated judges, publish, MCP parity, du
     app = createTeamApp({ base: path, env, background: false });
     base = await localServer(app);
     assert.equal((await call('messages', { thread: privateThread }, a.cookie)).b.items.length, 2);
+    const threads = (await call('overview', {}, a.cookie)).b.threads;
+    assert.equal(threads.find((t) => t.id === privateThread).title, 'Личный разбор');
+    assert.equal(threads.find((t) => t.id === 'group').title, 'Команда продукта');
+    assert.equal(threads.find((t) => t.id === 'group').canDelete, false);
+    assert.equal((await call('delete-thread', { thread: 'group' }, a.cookie)).s, 400);
+    assert.equal((await call('delete-thread', { thread: privateThread }, b.cookie)).s, 400);
+    const queued = await call('ask', { thread: privateThread, question: 'Ожидает ответа' }, a.cookie);
+    assert.equal(queued.s, 200);
+    assert.equal((await call('delete-thread', { thread: privateThread }, a.cookie)).s, 400);
+    const db = app.space('team').db;
+    db.prepare("UPDATE jobs SET status='done' WHERE id=?").run(queued.b.id);
+    db.prepare("INSERT INTO snapshot_access VALUES('fixture-snapshot','thread',?)").run(privateThread);
+    assert.deepEqual((await call('delete-thread', { thread: privateThread }, a.cookie)).b, { id: privateThread });
+    assert.equal((await call('messages', { thread: privateThread }, a.cookie)).s, 400);
+    assert.equal(db.prepare('SELECT count(*) n FROM chat_items WHERE thread=?').get(privateThread).n, 0);
+    assert.equal(db.prepare('SELECT count(*) n FROM jobs WHERE thread=?').get(privateThread).n, 0);
+    assert.equal(db.prepare('SELECT count(*) n FROM snapshot_access WHERE ref=?').get(privateThread).n, 0);
+    assert.equal((await call('messages', { thread: 'group' }, b.cookie)).b.items.length, 1);
     assert.equal(
       (await call('login', { login: 'judge-one', password: 'fixture-password' })).b.space,
       judge.b.space,

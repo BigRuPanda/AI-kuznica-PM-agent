@@ -2,18 +2,43 @@ import { RangeResult } from './range-result';
 import { rangeLabel, RangeChart, DAY } from './range-chart';
 import type { Attachment } from './range-chart';
 import { SavedChart } from './calculations';
-import React, { useState, useEffect, useCallback, useRef } from 'react';
+import React, { useState, useEffect, useLayoutEffect, useCallback, useRef } from 'react';
 import { createRoot } from 'react-dom/client';
 import { post, jump, num } from './team-data';
 import type { Home, User, Case, Detail, View, Msg, Thread } from './team-data';
 import { Cards, initialCards, labels } from './work-cards';
+import { Icon } from './icons';
+import { Dialog } from './dialog';
+import { ChatMenu } from './chat-menu';
+import type { ChatAction } from './chat-menu';
+import { ThemeSwitch } from './theme-switch';
+import { caseHeading, changeLabel, signalBaseline, signalPeriod } from './case-periods';
+import { Answer } from './answer';
+import { moveMenu, moveView } from './motion';
+import { styleFormValidation } from './form-validation';
+import { menuLayoutKey, readMenuLayout } from './menu-layout';
+import type { MenuLayout } from './menu-layout';
+import { minSidebarWidth, SidebarResizeHandle, useSidebarWidth } from './sidebar-width';
+import { BrandLogo } from './brand-logo';
 import './team.css';
+import './chat.css';
 
 type Action = (fn: () => Promise<void>) => void;
+type ThreadTitle = Pick<Thread, 'id' | 'title'>;
 function useRoute() {
   const [route, set] = useState(location.hash.slice(1) || 'overview');
+  const current = useRef(route);
   useEffect(() => {
-    const change = () => set(location.hash.slice(1) || 'overview');
+    const section = (value: string) => value.split('/', 1)[0];
+    const change = () => {
+      const read = () => location.hash.slice(1) || 'overview';
+      const update = () => {
+        current.current = read();
+        set(current.current);
+      };
+      if (section(current.current) === 'chats' && section(read()) === 'chats') update();
+      else moveView(update);
+    };
     window.addEventListener('hashchange', change);
     return () => window.removeEventListener('hashchange', change);
   }, []);
@@ -27,11 +52,13 @@ function Login({ onLogin }: { onLogin: (user: User) => void }) {
   return (
     <main className="login-wrap">
       <div className="login-box">
-        <div className="brand">
-          <i />
-          Softline <span>Store</span>
+        <div className="login-top">
+          <div className="brand" role="img" aria-label="Софтлайн Решения">
+            <BrandLogo />
+          </div>
+          <ThemeSwitch />
         </div>
-        <h1>{register ? 'Создать аккаунт' : 'Вход в команду'}</h1>
+        <h1>{register ? 'Создать аккаунт' : 'Вход'}</h1>
         <form
           onSubmit={async (e) => {
             e.preventDefault();
@@ -50,7 +77,7 @@ function Login({ onLogin }: { onLogin: (user: User) => void }) {
         >
           {register && (
             <label>
-              Имя для обсуждений
+              Имя
               <input name="name" autoComplete="name" required />
             </label>
           )}
@@ -97,12 +124,12 @@ function CaseList({ items }: { items: Case[] }) {
               <h3>{c.title}</h3>
               <small>{c.body.signal?.week || c.product}</small>
             </div>
-            <div className="case-value">
+            <div className="case-value" data-negative={(c.body.signal?.change ?? 0) < 0}>
               {c.body.signal?.rule === 'relative'
-                ? num(c.body.signal.change) + '%'
+                ? changeLabel(c.body.signal.change)
                 : c.body.signal
-                  ? num(c.body.signal.value)
-                  : '↗'}
+                  ? num(c.body.signal.value) + ' п.'
+                  : <Icon name="arrow" />}
             </div>
           </a>
         ))
@@ -110,6 +137,69 @@ function CaseList({ items }: { items: Case[] }) {
         <p className="empty">Разборы появятся после загрузки данных или нового поручения.</p>
       )}
     </div>
+  );
+}
+function Overview({ home, onAsk }: { home: Home; onAsk: () => void }) {
+  const watching = home.cases.filter((c) => c.state === 'Наблюдаем эффект');
+  const attention = home.cases
+    .filter((c) => (c.state === 'Исследуем' && c.body.signal) || c.state === 'Нужно решение')
+    .sort((a, b) => (b.body.signal?.week || '').localeCompare(a.body.signal?.week || ''));
+  const featured = attention.find((c) => c.body.signal);
+  const signal = featured?.body.signal;
+  const relative = signal?.rule === 'relative';
+
+  return (
+    <>
+      <div className="page-head overview-head">
+        <div>
+          <h1>Обзор</h1>
+          {home.user.role === 'judge' && <span className="state">Демо</span>}
+        </div>
+        <button onClick={onAsk}>Спросить помощника</button>
+      </div>
+      <section aria-labelledby="attention-title">
+        <h2 id="attention-title">Требует внимания</h2>
+        {featured && signal && (
+          <article className="signal-panel">
+            <div className="signal-main">
+              <span className="state">{featured.state}</span>
+              <h3>{caseHeading(featured)}</h3>
+              <p className="signal-product">{featured.product}</p>
+              <strong className="signal-metric">
+                {relative ? changeLabel(signal.change) : num(signal.value) + ' п.'}
+              </strong>
+            </div>
+            <div className="signal-comparison">
+              <dl className="signal-periods">
+                <div>
+                  <dt>{relative ? '4 полные недели' : 'Неделя сигнала'}</dt>
+                  <dd>{signalPeriod(signal)}</dd>
+                </div>
+                {relative && (
+                  <div>
+                    <dt>Предыдущие 12 недель</dt>
+                    <dd>{signalBaseline(signal)}</dd>
+                  </div>
+                )}
+              </dl>
+              {relative && (
+                <div className="signal-window-strip" aria-hidden="true">
+                  <span /><span />
+                </div>
+              )}
+              <a className="primary arrow-action" href={'#case/' + featured.id}>
+                Открыть разбор <Icon name="arrow" />
+              </a>
+            </div>
+          </article>
+        )}
+        {(!featured || attention.length > 1) && <CaseList items={attention.filter((c) => c !== featured)} />}
+      </section>
+      <section aria-labelledby="watch-title">
+        <h2 id="watch-title">Проверка эффекта</h2>
+        {watching.length ? <CaseList items={watching} /> : <p className="empty">Пока нет назначенных проверок.</p>}
+      </section>
+    </>
   );
 }
 function Chat({
@@ -124,6 +214,7 @@ function Chat({
   attachment,
   screen,
   onAdd,
+  headerActions,
 }: {
   id: string;
   userId: string;
@@ -136,8 +227,10 @@ function Chat({
   attachment?: Attachment;
   screen?: { calc: string; full: boolean; control?: string; cards: string[] };
   onAdd?: (s: NonNullable<Msg['body']['suggestions']>[number]) => void;
+  headerActions?: React.ReactNode;
 }) {
   const pendingKey = 'pm-pending/' + userId + '/' + id;
+  const draftKey = 'pm-chat-draft/' + userId + '/' + id;
   const readPending = () => {
     try {
       return JSON.parse(sessionStorage.getItem(pendingKey) || 'null') as {
@@ -151,8 +244,16 @@ function Chat({
   };
   const [items, setItems] = useState<Msg[]>([]),
     [running, work] = useState(false),
-    [q, setQ] = useState(() => readPending()?.text || ''),
-    [err, setErr] = useState('');
+    [q, setQ] = useState(() => {
+      try { return sessionStorage.getItem(draftKey) || readPending()?.text || ''; }
+      catch { return ''; }
+    }),
+    [err, setErr] = useState(''),
+    [loaded, setLoaded] = useState(false),
+    [away, setAway] = useState(false),
+    [copied, setCopied] = useState<number>();
+  const activeThread = threads.find((t) => t.id === id);
+  const isGroup = activeThread?.scope === 'group';
   const [attached, setAttached] = useState<Attachment | undefined>(() => {
     try {
       return JSON.parse(sessionStorage.getItem('pm-attachment/' + id) || 'null') || undefined;
@@ -163,6 +264,9 @@ function Chat({
   const [sending, setSending] = useState(false),
     [receipts, showReceipt] = useState<Record<string, string>>({});
   const box = useRef<HTMLTextAreaElement>(null),
+    history = useRef<HTMLDivElement>(null),
+    send = useRef<HTMLButtonElement>(null),
+    follow = useRef(true),
     request = useRef<{ id: string; body: string; text: string } | null>(readPending());
   useEffect(() => {
     if (attachment) {
@@ -178,8 +282,7 @@ function Chat({
     setAttached(undefined);
     sessionStorage.removeItem('pm-attachment/' + id);
   }
-  const last = useRef(-1),
-    end = useRef<HTMLDivElement>(null);
+  const last = useRef(-1);
   const refresh = useCallback(async () => {
     return await post<{ items: Msg[]; jobs: unknown[] }>('messages', { thread: id });
   }, [id]);
@@ -187,6 +290,7 @@ function Chat({
     let valid = true;
     last.current = -1;
     setItems([]);
+    setLoaded(false);
     setErr('');
     const read = async () => {
       try {
@@ -194,12 +298,17 @@ function Chat({
         if (!valid) return;
         setItems(data.items);
         work(!!data.jobs.length);
+        setLoaded(true);
+        setErr('');
         const latest = data.items.at(-1);
         if (latest && last.current >= 0 && latest.seq > last.current && latest.role === 'assistant')
           onResult?.(latest.body);
         last.current = latest?.seq || 0;
       } catch (e) {
-        if (valid) setErr((e as Error).message);
+        if (valid) {
+          setErr((e as Error).message);
+          setLoaded(true);
+        }
       }
     };
     void read();
@@ -209,23 +318,84 @@ function Chat({
       clearInterval(t);
     };
   }, [id, refresh, onResult]);
+  useLayoutEffect(() => {
+    if (box.current) {
+      box.current.style.height = 'auto';
+      box.current.style.height = Math.min(144, box.current.scrollHeight) + 'px';
+    }
+  }, [q]);
   useEffect(() => {
-    if (items.length) end.current?.scrollIntoView({ block: 'nearest' });
-  }, [items.length]);
+    try {
+      if (q) sessionStorage.setItem(draftKey, q);
+      else sessionStorage.removeItem(draftKey);
+    } catch {}
+  }, [q, draftKey]);
+  useLayoutEffect(() => {
+    if (follow.current && history.current) history.current.scrollTop = history.current.scrollHeight;
+  }, [items.length, loaded, running]);
+  function jumpToLatest() {
+    follow.current = true;
+    setAway(false);
+    history.current?.scrollTo({
+      top: history.current.scrollHeight,
+      behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth',
+    });
+  }
+  function suggest(question: string) {
+    setQ(question);
+    box.current?.focus();
+  }
   return (
-    <section className="chat-box">
-      <header>
-        <small>
-          {threads.find((t) => t.id === id)?.scope === 'group' ? 'Участники команды' : 'Только вы и агент'}
-        </small>
-        <h3>{caseId ? 'Обсудить разбор' : threads.find((t) => t.id === id)?.title || 'Чат'}</h3>
+    <section className={!caseId ? 'chat-box standalone-chat' : 'chat-box'} aria-label="Переписка">
+      <header className="conversation-heading">
+        <span className="chat-avatar" aria-hidden="true"><Icon name={isGroup ? 'people' : 'agent'} /></span>
+        <div className="conversation-title">
+          <h3>{caseId ? 'Обсудить разбор' : activeThread?.title || 'Чат'}</h3>
+          <small>{isGroup ? 'Командный чат' : 'Личный чат'}</small>
+        </div>
+        {headerActions}
       </header>
-      <div className="chat-history">
-        {!items.length && <p className="muted">Задайте вопрос о продукте, данных или следующей задаче.</p>}
+      <div className="conversation-body">
+        <div
+          className="chat-history"
+          ref={history}
+          onScroll={(event) => {
+            const list = event.currentTarget;
+            const nearEnd = list.scrollHeight - list.scrollTop - list.clientHeight < 72;
+            follow.current = nearEnd;
+            setAway(!nearEnd);
+          }}
+        >
+        {!loaded && <p className="chat-loading muted" role="status">Загрузка переписки…</p>}
+        {loaded && !items.length && !err && !running && (
+          <div className="chat-empty">
+            {!caseId && <span className="chat-illustration" aria-hidden="true" />}
+            <h4>{caseId ? 'Что проверить?' : 'С чего начнём?'}</h4>
+            {caseId ? (
+              <button type="button" onClick={() => suggest('Что стоит проверить в этом разборе?')}>
+                <Icon name="cases" /> Что стоит проверить
+              </button>
+            ) : (
+              <div className="chat-prompts">
+                <button type="button" onClick={() => suggest('Какие изменения метрик требуют внимания?')}>
+                  <Icon name="trend" /> Найти отклонения
+                </button>
+                <button type="button" onClick={() => suggest('Какие задачи стоит проверить в первую очередь?')}>
+                  <Icon name="cases" /> Проверить бэклог
+                </button>
+              </div>
+            )}
+          </div>
+        )}
         {items.map((m) => (
           <article className={'bubble ' + m.role} key={m.seq}>
-            <b>{m.author}</b>
-            <p>{m.body.text}</p>
+            <div className="message-author">
+              <span className="chat-avatar" aria-hidden="true">
+                {m.role === 'assistant' ? <Icon name="agent" /> : m.author.trim().slice(0, 1).toUpperCase()}
+              </span>
+              <b>{m.author}</b>
+            </div>
+            {m.body.text && (m.role === 'assistant' ? <Answer text={m.body.text} /> : <p>{m.body.text}</p>)}
             {m.body.rangeId && (
               <a href={'#range/' + m.body.rangeId}>
                 Выделенный участок
@@ -249,7 +419,6 @@ function Chat({
                         ? '#range/'
                         : '#snapshot/') + s.calc
                   }
-                  onClick={s.source === 'release' ? () => setTimeout(() => location.reload(), 0) : undefined}
                 >
                   {s.title}
                 </a>
@@ -318,7 +487,7 @@ function Chat({
             ))}
             {!!m.body.steps?.length && (
               <details>
-                <summary>Выполненные проверки</summary>
+                <summary>Проверки</summary>
                 <small>{m.body.steps.join(' → ')}</small>
               </details>
             )}
@@ -347,13 +516,37 @@ function Chat({
                 Открыть разбор
               </button>
             )}
+            {m.role === 'assistant' && m.body.text && (
+              <button
+                type="button"
+                className="copy-message"
+                aria-label={copied === m.seq ? 'Ответ скопирован' : 'Скопировать ответ'}
+                title={copied === m.seq ? 'Скопировано' : 'Скопировать ответ'}
+                onClick={() => action(async () => {
+                  await navigator.clipboard.writeText(m.body.text);
+                  setCopied(m.seq);
+                })}
+              >
+                <Icon name={copied === m.seq ? 'check' : 'copy'} />
+              </button>
+            )}
           </article>
         ))}
         {err && <p role="alert">{err}</p>}
-        {running && <p role="status">Агент отвечает…</p>}
-        <div ref={end} />
+        {running && (
+          <p className="chat-typing" role="status">
+            <span aria-hidden="true"><i /><i /><i /></span> Помощник отвечает
+          </p>
+        )}
+        </div>
+        {away && (
+          <button type="button" className="chat-latest" onClick={jumpToLatest} title="К последнему сообщению" aria-label="К последнему сообщению">
+            <Icon name="down" />
+          </button>
+        )}
       </div>
       <form
+        className="chat-composer"
         onSubmit={(e) => {
           e.preventDefault();
           if (!q.trim() || sending) return;
@@ -382,6 +575,8 @@ function Chat({
             }
             request.current = null;
             sessionStorage.removeItem(pendingKey);
+            follow.current = true;
+            setAway(false);
             clearAttachment();
             setQ('');
             work(!groupMessage);
@@ -398,8 +593,7 @@ function Chat({
             <button
               type="button"
               onClick={() => {
-                setQ('Почему здесь изменилось значение?');
-                box.current?.focus();
+                suggest('Почему здесь изменилось значение?');
               }}
             >
               Почему здесь изменение?
@@ -414,26 +608,264 @@ function Chat({
         <label className="sr" htmlFor={'q' + id}>
           Вопрос агенту
         </label>
-        <textarea
-          ref={box}
-          id={'q' + id}
-          placeholder="Спросить агента…"
-          value={q}
-          onChange={(e) => setQ(e.target.value)}
-          required
-        />
-        <button className="primary" disabled={sending}>
-          {threads.find((t) => t.id === id)?.scope === 'group' ? 'Спросить агента' : 'Отправить'}
-        </button>
-        {!attached && threads.find((t) => t.id === id)?.scope === 'group' && (
-          <button type="submit" value="message">
-            Написать команде
+        <div className="composer-row">
+          <textarea
+            ref={box}
+            id={'q' + id}
+            placeholder="Спросить помощника…"
+            value={q}
+            rows={1}
+            onChange={(e) => setQ(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key !== 'Enter' || e.shiftKey || e.ctrlKey || e.altKey || e.metaKey || e.nativeEvent.isComposing) return;
+              e.preventDefault();
+              if (q.trim() && !sending) e.currentTarget.form?.requestSubmit(send.current ?? undefined);
+            }}
+            required
+          />
+          <button ref={send} type="submit" className="primary chat-send" aria-label={isGroup ? 'Спросить помощника' : 'Отправить'} title="Отправить (Enter)" disabled={sending || !q.trim()}>
+            <Icon name="arrowUp" />
+          </button>
+        </div>
+        {isGroup && !attached && (
+          <button type="submit" className="text-action team-send" value="message" disabled={sending || !q.trim()}>
+            <Icon name="people" /> Написать команде
           </button>
         )}
       </form>
     </section>
   );
 }
+function RenameChatDialog({ thread, close, onRename }: {
+  thread: Thread;
+  close: () => void;
+  onRename: (renamed: ThreadTitle) => void;
+}) {
+  const [saving, save] = useState(false);
+  const [error, fail] = useState('');
+  const field = useRef<HTMLInputElement>(null);
+  useEffect(() => {
+    field.current?.focus();
+    field.current?.select();
+  }, []);
+
+  return (
+    <Dialog title="Переименовать чат" close={close}>
+      {(dismiss) => (
+        <form onSubmit={async (event) => {
+          event.preventDefault();
+          if (saving) return;
+          const title = String(new FormData(event.currentTarget).get('title') || '').trim();
+          if (!title) {
+            fail('Введите название чата.');
+            field.current?.focus();
+            return;
+          }
+          if (title === thread.title) {
+            dismiss();
+            return;
+          }
+          save(true);
+          fail('');
+          try {
+            onRename(await post<ThreadTitle>('rename-thread', { thread: thread.id, title }));
+            dismiss();
+          } catch (e) {
+            fail((e as Error).message);
+          } finally {
+            save(false);
+          }
+        }}>
+          <label>
+            Название
+            <input
+              ref={field}
+              name="title"
+              defaultValue={thread.title}
+              maxLength={120}
+              required
+              readOnly={saving}
+              onChange={() => fail('')}
+            />
+          </label>
+          {error && <p role="alert">{error}</p>}
+          <footer className="actions chat-dialog-actions">
+            <button type="button" disabled={saving} onClick={() => dismiss()}>Отмена</button>
+            <button type="submit" className="primary" disabled={saving}>{saving ? 'Сохраняем…' : 'Сохранить'}</button>
+          </footer>
+        </form>
+      )}
+    </Dialog>
+  );
+}
+
+function DeleteChatDialog({ thread, close, onDelete }: {
+  thread: Thread;
+  close: () => void;
+  onDelete: (id: string) => void;
+}) {
+  const [deleting, setDeleting] = useState(false);
+  const [error, fail] = useState('');
+  const cancel = useRef<HTMLButtonElement>(null);
+  useEffect(() => cancel.current?.focus(), []);
+
+  return (
+    <Dialog title="Удалить чат?" close={close}>
+      {(dismiss) => (
+        <div className="confirm-action">
+          <p>Чат <strong>«{thread.title}»</strong> будет удалён вместе с перепиской. Восстановить её нельзя.</p>
+          {thread.scope === 'group' && <p>Чат исчезнет у всех участников.</p>}
+          {error && <p role="alert">{error}</p>}
+          <footer className="actions chat-dialog-actions">
+            <button ref={cancel} type="button" disabled={deleting} onClick={() => dismiss()}>Отмена</button>
+            <button type="button" className="primary" disabled={deleting} onClick={async () => {
+              if (deleting) return;
+              setDeleting(true);
+              fail('');
+              try {
+                const result = await post<{ id: string }>('delete-thread', { thread: thread.id });
+                onDelete(result.id);
+                dismiss();
+              } catch (e) {
+                fail((e as Error).message);
+              } finally {
+                setDeleting(false);
+              }
+            }}>{deleting ? 'Удаляем…' : 'Удалить чат'}</button>
+          </footer>
+        </div>
+      )}
+    </Dialog>
+  );
+}
+
+function ChatWorkspace({ home, id, action, refresh, onRename, onDelete }: {
+  home: Home;
+  id: string;
+  action: Action;
+  refresh: () => Promise<void>;
+  onRename: (renamed: ThreadTitle) => void;
+  onDelete: (id: string) => void;
+}) {
+  const [query, search] = useState('');
+  const [listOpen, toggleList] = useState(false);
+  const [creating, create] = useState(false);
+  const [saving, save] = useState(false);
+  const [editing, edit] = useState<{ thread: Thread; action: ChatAction } | null>(null);
+  const activeId = id || 'group';
+  const activeThread = home.threads.find((thread) => thread.id === activeId);
+  const term = query.trim().toLocaleLowerCase('ru');
+  const threads = home.threads.filter((thread) => thread.title.toLocaleLowerCase('ru').includes(term));
+  const openAction = (thread: Thread, action: ChatAction) => edit({ thread, action });
+
+  function removeChat(deleted: string) {
+    try {
+      sessionStorage.removeItem('pm-chat-draft/' + home.user.id + '/' + deleted);
+      sessionStorage.removeItem('pm-pending/' + home.user.id + '/' + deleted);
+      sessionStorage.removeItem('pm-attachment/' + deleted);
+    } catch {}
+    onDelete(deleted);
+    if (location.hash === '#chats/' + deleted) location.replace('#chats');
+  }
+
+  return (
+    <>
+      <div className="page-head chats-head">
+        <h1>Чаты</h1>
+        <button type="button" className="primary new-chat" onClick={() => create(true)}>
+          <Icon name="plus" /> Новый чат
+        </button>
+      </div>
+      <div className="chat-layout">
+        <aside className="threads-panel" aria-label="Чаты" data-open={listOpen}>
+          <button
+            type="button"
+            className="threads-toggle"
+            aria-expanded={listOpen}
+            aria-controls="thread-panel-content"
+            onClick={() => toggleList(!listOpen)}
+          >
+            <Icon name="chat" /> Список чатов <Icon name="down" />
+          </button>
+          <div id="thread-panel-content" className="thread-panel-content">
+            <label className="thread-search">
+              <Icon name="search" />
+              <span className="sr">Поиск чатов</span>
+              <input type="search" placeholder="Найти чат" value={query} onChange={(e) => search(e.target.value)} />
+            </label>
+            <nav className="thread-list" aria-label="Переписки">
+              {threads.map((t) => (
+                <div className="thread-row" key={t.id}>
+                  <a
+                    aria-current={activeId === t.id ? 'page' : undefined}
+                    href={'#chats/' + t.id}
+                    onClick={() => toggleList(false)}
+                  >
+                    <span className="thread-icon"><Icon name={t.scope === 'group' ? 'people' : 'chat'} /></span>
+                    <span className="thread-title">{t.title}</span>
+                  </a>
+                  <ChatMenu thread={t} onAction={openAction} />
+                </div>
+              ))}
+              {!threads.length && <p className="muted">{query ? 'Чаты не найдены' : 'Пока нет чатов'}</p>}
+            </nav>
+          </div>
+        </aside>
+        <Chat
+          key={activeId}
+          userId={home.user.id}
+          id={activeId}
+          threads={home.threads}
+          action={action}
+          headerActions={activeThread && <ChatMenu thread={activeThread} onAction={openAction} />}
+        />
+      </div>
+      {creating && (
+        <Dialog title="Новый чат" close={() => create(false)}>
+          <form
+            onSubmit={(e) => {
+              e.preventDefault();
+              if (saving) return;
+              const fields = new FormData(e.currentTarget);
+              const title = String(fields.get('title') || '').trim();
+              if (!title) return;
+              action(async () => {
+                save(true);
+                try {
+                  const thread = await post<{ id: string }>('thread', { title, group: fields.get('scope') === 'group' });
+                  create(false);
+                  search('');
+                  toggleList(false);
+                  await refresh();
+                  jump('chats/' + thread.id);
+                } finally {
+                  save(false);
+                }
+              });
+            }}
+          >
+            <label>Название<input name="title" required /></label>
+            <label>
+              Участники
+              <select name="scope"><option value="private">Только я</option><option value="group">Вся команда</option></select>
+            </label>
+            <button className="primary" disabled={saving}>Создать</button>
+          </form>
+        </Dialog>
+      )}
+      {editing?.action === 'rename' && (
+        <RenameChatDialog thread={editing.thread} close={() => edit(null)} onRename={(renamed) => {
+          if (!renamed.title.toLocaleLowerCase('ru').includes(term)) search('');
+          onRename(renamed);
+        }} />
+      )}
+      {editing?.action === 'delete' && (
+        <DeleteChatDialog thread={editing.thread} close={() => edit(null)} onDelete={removeChat} />
+      )}
+    </>
+  );
+}
+
 function Investigation({
   id,
   home,
@@ -460,7 +892,9 @@ function Investigation({
     [selection, select] = useState<string[]>([]),
     [hits, search] = useState<{ key: string; title: string }[]>([]),
     [key, setKey] = useState(''),
-    [err, fail] = useState('');
+    [err, fail] = useState(''),
+    [confirmation, confirm] = useState<'reset' | 'finish'>(),
+    [updating, setUpdating] = useState(false);
   const prefix = 'pm-view/' + home.user.id + '/' + id;
   const load = useCallback(
     async () =>
@@ -468,7 +902,8 @@ function Investigation({
     [id, full, peer, sourceQuery],
   );
   useEffect(() => {
-    set(null);
+    setUpdating(true);
+    fail('');
     let valid = true;
     post<Detail>('view', { caseId: id, full, control: peer || undefined, sourceQuery })
       .then((v) => {
@@ -497,7 +932,8 @@ function Investigation({
           }
         }
       })
-      .catch((e) => fail(e.message));
+      .catch((e) => { if (valid) fail(e.message); })
+      .finally(() => { if (valid) setUpdating(false); });
     return () => {
       valid = false;
     };
@@ -537,9 +973,26 @@ function Investigation({
     [pinned, prefix],
   );
   const [mobileChat, chatMode] = useState(false);
-  if (!d) return <p>{err || 'Загружаем разбор…'}</p>;
+  const taskTitle = useRef<HTMLHeadingElement>(null);
+  const effectSection = useRef<HTMLDetailsElement>(null);
+  if (!d) return <p className={err ? 'error' : 'empty'} role={err ? 'alert' : 'status'}>{err || 'Загружаем разбор…'}</p>;
   const v = d.view,
     c = d.case;
+  const watchNext = c.state === 'Наблюдаем эффект';
+  const completed = c.state === 'Завершено';
+  const openShare = () => {
+    select(cards);
+    writeConclusion(v.summary.filter((s) => s.change != null).map((s) => s.product + ' ' + changeLabel(s.change)).join(' · '));
+    show(true);
+  };
+  const openNext = () => {
+    chatMode(false);
+    requestAnimationFrame(() => {
+      if (watchNext && effectSection.current) effectSection.current.open = true;
+      const target = watchNext ? effectSection.current?.querySelector('summary') : taskTitle.current;
+      target?.focus();
+    });
+  };
   return (
     <>
       <a className="crumb" href="#cases">
@@ -552,29 +1005,29 @@ function Investigation({
           </a>
         </p>
       )}
-      <div className="page-head">
+      <div className="page-head investigation-head">
         <div>
           <small>
             {c.product} · {c.body.owner ? 'Личный разбор' : 'Команда'}
           </small>
-          <h1>{c.title}</h1>
-          <span className="state">{c.state}</span>
+          <h1>{caseHeading(c)}</h1>
         </div>
-        <button
-          onClick={() => {
-            select(cards);
-            writeConclusion(d.view.summary.map((s) => s.product + ' ' + num(s.change) + '%').join(' · '));
-            show(true);
-          }}
-        >
-          Поделиться
-        </button>
+        <div className="actions">
+          {!completed && <button onClick={openShare} disabled={updating}>Поделиться</button>}
+          <button className="primary arrow-action" disabled={updating && completed} onClick={completed ? openShare : openNext}>
+            {completed ? 'Поделиться' : watchNext ? 'Проверить эффект' : 'К задаче'}
+            <Icon name="arrow" />
+          </button>
+        </div>
       </div>
-      <button className="mobile-toggle" onClick={() => chatMode(!mobileChat)}>
-        {mobileChat ? 'К результату' : 'Обсудить разбор'}
-      </button>
+      {tid && (
+        <button className="mobile-toggle" aria-expanded={mobileChat} onClick={() => moveView(() => chatMode(!mobileChat))}>
+          <Icon name="down" /> {mobileChat ? 'К разбору' : 'Обсудить'}
+        </button>
+      )}
       <div className={'case-layout ' + (mobileChat ? 'show-chat' : '')}>
-        <div className="case-main">
+        <div className="case-main" aria-busy={updating}>
+          {err && <p role="alert">{err}</p>}
           <div className="toolbar">
             <label>
               <input
@@ -598,27 +1051,11 @@ function Investigation({
               </select>
             </label>
             <button
-              onClick={() => {
-                layout(initialCards);
-                filter(false);
-                pin([]);
-                localStorage.removeItem(prefix);
-              }}
+              onClick={() => confirm('reset')}
             >
-              Исходный вид
+              Сбросить вид
             </button>
           </div>
-          {c.body.plan?.hypothesis && (
-            <section className="paper">
-              <h3>План до разработки</h3>
-              <p>{c.body.plan.hypothesis}</p>
-              <small>
-                {[c.body.plan.metric, c.body.plan.baseline, c.body.plan.control, c.body.plan.success]
-                  .filter(Boolean)
-                  .join(' · ')}
-              </small>
-            </section>
-          )}
           <Cards
             view={v}
             cards={cards}
@@ -638,6 +1075,17 @@ function Investigation({
               localStorage.setItem(prefix, JSON.stringify({ cards, full, pinned: next }));
             }}
           />
+          {c.body.plan?.hypothesis && (
+            <section className="paper">
+              <h3>План до разработки</h3>
+              <p>{c.body.plan.hypothesis}</p>
+              <small>
+                {[c.body.plan.metric, c.body.plan.baseline, c.body.plan.control, c.body.plan.success]
+                  .filter(Boolean)
+                  .join(' · ')}
+              </small>
+            </section>
+          )}
           {additional.map((s) => (
             <section className="paper" key={s.calc}>
               <button onClick={() => addCheck((xs) => xs.filter((x) => x.calc !== s.calc))}>
@@ -652,13 +1100,11 @@ function Investigation({
               )}
             </section>
           ))}
-          <section className="paper">
-            <h3>Решение по задаче</h3>
-            <p className="muted">
-              {home.issueMode === 'local'
-                ? 'Локальный демо-бэклог · запись останется на этом стенде'
-                : 'Jira · запись после подтверждения'}
-            </p>
+          <section className="paper task-panel">
+            <div className="row-between">
+              <h3 tabIndex={-1} ref={taskTitle}>Решение по задаче</h3>
+              <span className="state">{home.issueMode === 'local' ? 'Демо-бэклог' : 'Jira'}</span>
+            </div>
             <button
               onClick={() =>
                 action(async () => {
@@ -693,6 +1139,7 @@ function Investigation({
                 Проверка и критерий успеха
                 <textarea
                   name="description"
+                  rows={3}
                   defaultValue={
                     'Проверить выбор лицензии, фактическое добавление в корзину и доставку события в аналитику. Источник: ' +
                     v.id
@@ -720,7 +1167,7 @@ function Investigation({
                   {r.body.key || 'Новая задача'} {r.body.priority} · сгенерирована ИИ-помощником
                 </small>
                 {r.state === 'done' ? (
-                  <strong>{r.external}</strong>
+                  <strong className="state issue-key">{r.external}</strong>
                 ) : (
                   <button
                     className="primary"
@@ -737,9 +1184,10 @@ function Investigation({
               </div>
             ))}
           </section>
-          <details className="paper">
+          <details className="paper effect-panel" ref={effectSection}>
             <summary>Проверка эффекта</summary>
-            <p>{d.effect?.state || 'Укажите дату подтверждённой выкладки.'}</p>
+            <p>{d.effect?.state || 'Укажите дату выкладки и цель.'}</p>
+            {d.effect?.weeks != null && <small>Полных недель по продукту: {d.effect.weeks} из 4</small>}
             <form
               onSubmit={(e) => {
                 e.preventDefault();
@@ -762,13 +1210,8 @@ function Investigation({
               <button>Назначить проверку</button>
             </form>
             <button
-              onClick={() =>
-                action(async () => {
-                  await post('decide', { caseId: id, state: 'Завершено' });
-                  await load();
-                  await refresh();
-                })
-              }
+              onClick={() => confirm('finish')}
+              disabled={completed}
             >
               Завершить разбор
             </button>
@@ -849,13 +1292,40 @@ function Investigation({
           />
         )}
       </div>
+      {confirmation && (
+        <Dialog title={confirmation === 'reset' ? 'Сбросить вид?' : 'Завершить разбор?'} close={() => confirm(undefined)}>
+          {(dismiss) => (
+            <div className="confirm-action">
+              <p>{confirmation === 'reset'
+                ? 'Вернутся начальные фильтры и карточки. Закрепления будут сняты.'
+                : 'Разбор получит статус «Завершено» и уйдёт из активных проверок.'}</p>
+              <footer className="actions">
+                <button type="button" onClick={() => dismiss()}>Отмена</button>
+                <button type="button" className="primary" onClick={() => dismiss(() => {
+                  if (confirmation === 'reset') {
+                    layout(initialCards);
+                    filter(false);
+                    control('');
+                    findSources('');
+                    pin([]);
+                    localStorage.setItem(prefix, JSON.stringify({ cards: initialCards, full: false, pinned: [] }));
+                    return;
+                  }
+                  action(async () => {
+                    await post('decide', { caseId: id, state: 'Завершено' });
+                    await load();
+                    await refresh();
+                  });
+                })}>{confirmation === 'reset' ? 'Сбросить' : 'Завершить'}</button>
+              </footer>
+            </div>
+          )}
+        </Dialog>
+      )}
       {preview && (
-        <div className="scrim">
-          <section className="sheet" role="dialog" aria-modal="true" aria-label="Публикация">
-            <h2>Поделиться с командой</h2>
-            <p>
-              В группе «Команда Store» появятся выбранные материалы. История личного чата останется у вас.
-            </p>
+        <Dialog title="Поделиться с командой" close={() => show(false)}>
+          {(dismiss) => <div className="share-form">
+            <p className="muted">Получатель — «{home.threads.find((t) => t.id === 'group')?.title || 'Команда Store'}».</p>
             <label>
               Вывод для команды
               <textarea
@@ -877,39 +1347,39 @@ function Investigation({
               </label>
             ))}
             <footer>
-              <button onClick={() => show(false)}>Отмена</button>
+              <button type="button" onClick={() => dismiss()}>Отмена</button>
               <button
                 className="primary"
                 disabled={!selection.length}
                 onClick={() =>
                   action(async () => {
                     await post('publish', { caseId: id, calc: v.id, cards: selection, conclusion });
-                    show(false);
-                    await load();
-                    await refresh();
+                    dismiss(() => action(async () => {
+                      await load();
+                      await refresh();
+                    }));
                   })
                 }
               >
                 Опубликовать
               </button>
             </footer>
-          </section>
-        </div>
+          </div>}
+        </Dialog>
       )}
     </>
   );
 }
-function Settings({ home, action, refresh }: { home: Home; action: Action; refresh: () => Promise<void> }) {
+function Sources({ home, action, refresh }: { home: Home; action: Action; refresh: () => Promise<void> }) {
   const [notice, say] = useState('');
   const admin = home.user.role === 'admin';
   return (
     <>
       <div className="page-head">
-        <h1>Настройки команды</h1>
+        <h1>Источники</h1>
       </div>
       {admin && (
         <section className="paper">
-          <h3>Источники</h3>
           <form
             onSubmit={(e) => {
               e.preventDefault();
@@ -932,19 +1402,22 @@ function Settings({ home, action, refresh }: { home: Home; action: Action; refre
               Книга, презентация или архив
               <input name="file" type="file" accept=".xlsx,.pptx,.zip" required />
             </label>
-            <button className="primary">Загрузить и пересчитать</button>
+            <div className="actions source-actions">
+              <button className="primary">Загрузить и пересчитать</button>
+              <button
+                type="button"
+                onClick={() =>
+                  action(async () => {
+                    const r = await post<{ inserted: number }>('metrika');
+                    say('Метрика ответила. Добавлено версий: ' + r.inserted);
+                    await refresh();
+                  })
+                }
+              >
+                Синхронизировать Метрику
+              </button>
+            </div>
           </form>
-          <button
-            onClick={() =>
-              action(async () => {
-                const r = await post<{ inserted: number }>('metrika');
-                say('Метрика ответила. Добавлено версий: ' + r.inserted);
-                await refresh();
-              })
-            }
-          >
-            Синхронизировать Метрику
-          </button>
         </section>
       )}
       <section className="paper">
@@ -958,6 +1431,36 @@ function Settings({ home, action, refresh }: { home: Home; action: Action; refre
           </div>
         ))}
         {!home.sources.length && <p>Источники пока не загружены.</p>}
+      </section>
+      {notice && <p className="notice" role="status">{notice}</p>}
+    </>
+  );
+}
+
+function Settings({ home, action, refresh, menu, changeMenu }: {
+  home: Home;
+  action: Action;
+  refresh: () => Promise<void>;
+  menu: MenuLayout;
+  changeMenu: (layout: MenuLayout) => void;
+}) {
+  const [notice, say] = useState('');
+  const admin = home.user.role === 'admin';
+  return (
+    <>
+      <div className="page-head">
+        <h1>Настройки команды</h1>
+      </div>
+      <section className="paper menu-preference" aria-labelledby="menu-preference-title">
+        <h3 id="menu-preference-title">Положение меню</h3>
+        <div className="actions menu-preference-options">
+          <button type="button" aria-pressed={menu !== 'top'} onClick={() => changeMenu('left')}>
+            <Icon name="panelLeft" />Слева
+          </button>
+          <button type="button" aria-pressed={menu === 'top'} onClick={() => changeMenu('top')}>
+            <Icon name="panelTop" />Сверху
+          </button>
+        </div>
       </section>
       {admin && (
         <section className="paper">
@@ -1076,7 +1579,7 @@ function Snapshot({ id, selected, embedded = false }: { id: string; selected?: s
             {
               key: custom.segment,
               name: custom.segment,
-              color: '#568683',
+              color: 'var(--series-main)',
               points: pts.map((p) => ({
                 ...p,
                 value: p.value != null && custom.unit === 'ratio' ? 100 * p.value : p.value,
@@ -1109,58 +1612,86 @@ function Workspace({ user, onLogout }: { user: User; onLogout: () => void }) {
     [err, fail] = useState(''),
     [filter, setFilter] = useState(''),
     [create, newCase] = useState(false),
-    [group, newGroup] = useState(false),
-    [releaseRef, selectRelease] = useState('');
-  const refresh = useCallback(async () => setHome(await post<Home>('overview')), []);
+    [releaseRef, selectRelease] = useState(''),
+    [menu, setMenu] = useState(readMenuLayout);
+  const sidebar = useSidebarWidth();
+  const settings = route === 'settings' || (route === 'cases' && id === 'settings');
+  const homeVersion = useRef(0);
+  const refresh = useCallback(async () => {
+    const version = ++homeVersion.current;
+    const next = await post<Home>('overview');
+    if (homeVersion.current === version) setHome(next);
+  }, []);
+  function updateThreads(update: (threads: Thread[]) => Thread[]) {
+    homeVersion.current++;
+    setHome((current) => current && ({
+      ...current,
+      threads: update(current.threads),
+    }));
+  }
   useEffect(() => {
     refresh().catch((e) => fail(e.message));
   }, [refresh, route, id]);
   useEffect(() => {
-    if (!['release', 'calc', 'releases'].includes(route)) return;
-    const css = document.createElement('link');
-    css.rel = 'stylesheet';
-    css.href = '/legacy.css';
-    document.head.append(css);
-    const tag = document.createElement('script');
-    tag.type = 'module';
-    tag.src = '/legacy.js';
-    document.body.append(tag);
+    if (['release', 'calc', 'releases'].includes(route)) location.reload();
   }, [route]);
+  useLayoutEffect(() => {
+    window.scrollTo(0, 0);
+  }, [route, id]);
   const action: Action = (fn) => {
     fail('');
     void fn().catch((e) => fail(e.message));
   };
+  function changeMenu(next: MenuLayout) {
+    moveMenu(next, () => {
+      setMenu(next);
+      try { localStorage.setItem(menuLayoutKey, next); } catch {}
+    });
+  }
   const tabs = [
     ['overview', 'Обзор'],
     ['chats', 'Чаты'],
     ['cases', 'Разборы'],
+    ['sources', 'Источники'],
   ];
   return (
-    <div className="team-app">
-      <aside className="side">
-        <div className="brand">
-          <i />
-          Softline <span>Store</span>
-        </div>
+    <div className="team-app" data-menu={menu} style={{
+      '--sidebar-width': `${sidebar.width}px`,
+      '--sidebar-min-width': `${minSidebarWidth}px`,
+    } as React.CSSProperties}>
+      <aside className="side" id="workspace-sidebar" data-compact-logo={sidebar.width < 118}>
+        <a className="brand" href="#overview" aria-label="Софтлайн Решения — обзор">
+          <BrandLogo />
+          <span className="brand-emblem"><BrandLogo compact /></span>
+        </a>
         <nav aria-label="Основные разделы">
-          {tabs.map(([k, t], i) => (
+          {tabs.map(([k, t]) => {
+            const active = !settings && (route === k || (k === 'cases' && route === 'case'));
+            return (
             <a
-              className={route === k || (route === 'case' && k === 'cases') ? 'active' : ''}
+              className={active ? 'active' : ''}
+              aria-current={active ? 'page' : undefined}
+              aria-label={t}
+              title={t}
               key={k}
               href={'#' + k}
             >
-              <b aria-hidden="true">{['◫', '◌', '▤'][i]}</b>
-              {t}
+              <Icon name={k === 'chats' ? 'chat' : k} />
+              <span className="menu-label">{t}</span>
             </a>
-          ))}
+            );
+          })}
         </nav>
         <div className="side-bottom">
-          <a href="#settings">Настройки</a>
-          <small>
-            {user.name} ·{' '}
-            {user.role === 'judge' ? 'Демо' : user.role === 'admin' ? 'Администратор' : 'Команда'}
-          </small>
+          <a className="menu-command" href="#settings" aria-label="Настройки" title="Настройки" aria-current={settings ? 'page' : undefined}>
+            <Icon name="settings" /><span className="menu-label">Настройки</span>
+          </a>
+          <ThemeSwitch />
+          <small>{user.name}</small>
           <button
+            className="menu-command"
+            aria-label="Выйти"
+            title="Выйти"
             onClick={() =>
               action(async () => {
                 await post('logout');
@@ -1168,81 +1699,41 @@ function Workspace({ user, onLogout }: { user: User; onLogout: () => void }) {
               })
             }
           >
-            Выйти
+            <Icon name="logout" /><span className="menu-label">Выйти</span>
           </button>
         </div>
       </aside>
+      {menu === 'left' && <SidebarResizeHandle {...sidebar} />}
       <main className="content">
         {err && (
           <p role="alert" className="error">
-            {err} <button onClick={() => fail('')}>×</button>
+            {err} <button aria-label="Закрыть сообщение" onClick={() => fail('')}>×</button>
           </p>
         )}
+        <div className="workspace-page" key={route === 'chats' ? route : [route, id, selected].join('/')}>
         {!home ? (
-          <p>Загрузка рабочего пространства…</p>
+          <p className="empty" role="status">Загрузка…</p>
         ) : route === 'case' ? (
           <Investigation key={id} id={id} home={home} action={action} refresh={refresh} />
         ) : route === 'range' ? (
           <RangeResult id={id} />
         ) : route === 'snapshot' ? (
           <Snapshot id={id} selected={selected} />
-        ) : route === 'settings' ? (
-          <Settings home={home} action={action} refresh={refresh} />
+        ) : settings ? (
+          <Settings home={home} action={action} refresh={refresh} menu={menu} changeMenu={changeMenu} />
+        ) : route === 'sources' ? (
+          <Sources home={home} action={action} refresh={refresh} />
         ) : route === 'chats' ? (
-          <>
-            <div className="page-head">
-              <h1>Чаты</h1>
-              <button onClick={() => newGroup(!group)}>Новый чат</button>
-            </div>
-            {group && (
-              <form
-                className="paper inline-form"
-                onSubmit={(e) => {
-                  e.preventDefault();
-                  const b = Object.fromEntries(new FormData(e.currentTarget));
-                  action(async () => {
-                    const r = await post<{ id: string }>('thread', {
-                      title: b.title,
-                      group: b.scope === 'group',
-                    });
-                    newGroup(false);
-                    await refresh();
-                    jump('chats/' + r.id);
-                  });
-                }}
-              >
-                <label>
-                  Название
-                  <input required name="title" />
-                </label>
-                <label>
-                  Участники
-                  <select name="scope">
-                    <option value="private">Только я</option>
-                    <option value="group">Вся команда</option>
-                  </select>
-                </label>
-                <button>Создать</button>
-              </form>
-            )}
-            <div className="chat-layout">
-              <div className="paper thread-list">
-                {home.threads.map((t) => (
-                  <a key={t.id} className={id === t.id ? 'selected' : ''} href={'#chats/' + t.id}>
-                    {t.title}
-                    <small>{t.scope === 'group' ? 'Группа' : 'Личный'}</small>
-                  </a>
-                ))}
-              </div>
-              <Chat
-                key={id || 'group'}
-                userId={home.user.id}
-                id={id || 'group'}
-                threads={home.threads}
-                action={action}
-              />
-            </div>
-          </>
+          <ChatWorkspace
+            home={home}
+            id={id}
+            action={action}
+            refresh={refresh}
+            onRename={(renamed) => updateThreads((threads) => threads.map((thread) =>
+              thread.id === renamed.id ? { ...thread, title: renamed.title } : thread
+            ))}
+            onDelete={(deleted) => updateThreads((threads) => threads.filter((thread) => thread.id !== deleted))}
+          />
         ) : route === 'releases-list' ? (
           <>
             <a href="#cases">← Разборы</a>
@@ -1256,7 +1747,7 @@ function Workspace({ user, onLogout }: { user: User; onLogout: () => void }) {
                   {r.description}
                 </a>
               ))}
-              <a href="/?legacy=1#releases" onClick={() => setTimeout(() => location.reload(), 0)}>
+              <a href="/?legacy=1#releases">
                 Архив прежнего прототипа
               </a>
             </section>
@@ -1290,7 +1781,7 @@ function Workspace({ user, onLogout }: { user: User; onLogout: () => void }) {
           <>
             <div className="page-head">
               <h1>Разборы</h1>
-              <button className="primary" onClick={() => newCase(!create)}>
+              <button className="primary" aria-expanded={create} onClick={() => moveView(() => newCase(!create))}>
                 Новый разбор
               </button>
             </div>
@@ -1372,41 +1863,18 @@ function Workspace({ user, onLogout }: { user: User; onLogout: () => void }) {
             <CaseList items={home.cases.filter((c) => !filter || c.state === filter)} />
           </>
         ) : (
-          <>
-            <div className="page-head">
-              <div>
-                <small>{user.role === 'judge' ? 'Демонстрационное пространство' : 'Команда Store'}</small>
-                <h1>Обзор</h1>
-              </div>
-              <button
-                className="primary"
-                onClick={() =>
-                  action(async () => {
-                    const t = await post<{ id: string }>('thread', { title: 'Личный вопрос' });
-                    await refresh();
-                    jump('chats/' + t.id);
-                  })
-                }
-              >
-                Спросить агента ↗
-              </button>
-            </div>
-            <h2>Требует внимания</h2>
-            <CaseList
-              items={home.cases
-                .filter((c) => c.state !== 'Завершено' && (c.body.signal || c.state === 'Нужно решение'))
-                .sort((a, b) =>
-                  String(b.body.signal?.week || '').localeCompare(String(a.body.signal?.week || '')),
-                )}
-            />
-            <h2>Наблюдение за эффектом</h2>
-            {home.cases.some((c) => c.state === 'Наблюдаем эффект') ? (
-              <CaseList items={home.cases.filter((c) => c.state === 'Наблюдаем эффект')} />
-            ) : (
-              <p className="empty">Назначенные проверки появятся после подтверждения даты выкладки.</p>
-            )}
-          </>
+          <Overview
+            home={home}
+            onAsk={() =>
+              action(async () => {
+                const t = await post<{ id: string }>('thread', { title: 'Личный вопрос' });
+                await refresh();
+                jump('chats/' + t.id);
+              })
+            }
+          />
         )}
+        </div>
       </main>
     </div>
   );
@@ -1434,4 +1902,5 @@ function Root() {
     <Login onLogin={set} />
   );
 }
+styleFormValidation();
 createRoot(document.getElementById('root')!).render(<Root />);

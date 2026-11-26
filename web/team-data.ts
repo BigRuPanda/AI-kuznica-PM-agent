@@ -24,7 +24,7 @@ export type Case = {
   };
   effect?: Watch;
 };
-export type Thread = { id: string; title: string; scope: string };
+export type Thread = { id: string; title: string; scope: string; canRename: boolean; canDelete: boolean };
 export type Source = { file: string; versions: number; updated: number };
 export type Release = {
   release_id: string;

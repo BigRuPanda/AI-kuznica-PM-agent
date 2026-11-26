@@ -25,6 +25,8 @@ import {
   dashboard,
   visibleCase,
   createThread,
+  renameThread,
+  deleteThread,
   enqueue,
   messages,
   thread,
@@ -308,6 +310,8 @@ export function createTeamApp({
           return reply(200, { id });
         }
         if (op === 'thread') return reply(200, { id: createThread(db, user, b.title, !!b.group) });
+        if (op === 'rename-thread') return reply(200, renameThread(db, user, b.thread, b.title));
+        if (op === 'delete-thread') return reply(200, deleteThread(store, user, b.thread));
         if (op === 'messages') return reply(200, messages(db, user, b.thread));
         if (op === 'say') {
           const t = thread(db, user, b.thread),

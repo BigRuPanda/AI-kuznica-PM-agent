@@ -381,7 +381,7 @@ export function workspaceOperation(
         user.id,
         JSON.stringify(body),
       );
-      return { id: key, recipient: 'Команда Store', ...body };
+      return { id: key, recipient: thread(db, user, 'group').title, ...body };
     }
     const key = digest(JSON.stringify([user.id, body]));
     return store.tx(() => commitPublication(store, user, key, body));

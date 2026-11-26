@@ -8,6 +8,9 @@ import {DataForm} from './forms';
 import {Answer} from './answer';
 import {Icon} from './icons';
 import './style.css';
+import {ThemeSwitch} from './theme-switch';
+import {moveView} from './motion';
+import {styleFormValidation} from './form-validation';
 
 function stored(key:string){try{return localStorage.getItem('release-v1/'+key)||'';}catch{return '';}}
 function remember(key:string,value:string){try{localStorage.setItem('release-v1/'+key,value);}catch{}}
@@ -32,12 +35,12 @@ function Headline({report:r}:{report:Report}){
 function App(){
   const [hash,setHash]=useState(location.hash.slice(1)),[journal,load]=useState<Journal|null>(null),[error,fail]=useState('');
   const [profile,setProfile]=useState(sessionStorage.getItem('release-profile')||'Анна'),[form,setForm]=useState<'import'|'release'|null>(null),[generation,bump]=useState(0);
-  useEffect(()=>{const f=()=>setHash(location.hash.slice(1));window.addEventListener('hashchange',f);return()=>window.removeEventListener('hashchange',f);},[]);
+  useEffect(()=>{const f=()=>moveView(()=>setHash(location.hash.slice(1)));window.addEventListener('hashchange',f);return()=>window.removeEventListener('hashchange',f);},[]);
   useEffect(()=>{api<Journal>('journal').then(load).catch(e=>fail(e.message));},[generation]);
   const [kind,part]=hash.split('/'),id=kind==='release'?part:journal?.releases.find(r=>r.id===stored('last'))?.id??journal?.releases[0]?.id;
   useEffect(()=>{if(id&&journal?.releases.some(r=>r.id===id))remember('last',id);},[id,journal]);
-  return <div className="app"><nav aria-label="Разделы"><div><a className={kind==='workspace'?'active':''} aria-current={kind==='workspace'?'page':undefined} href="#workspace">Рабочая область</a><a className={kind!=='workspace'?'active':''} aria-current={kind!=='workspace'?'page':undefined} href={'#release/'+(id||'')}>Релизы</a></div>
-    <label className="profile"><Avatar name={profile}/><select aria-label="Профиль" value={profile} onChange={e=>{setProfile(e.target.value);sessionStorage.setItem('release-profile',e.target.value);}}>{(journal?.profiles||['Анна','Дмитрий']).map(p=><option key={p}>{p}</option>)}</select></label></nav>
+  return <div className="app"><nav aria-label="Разделы"><div><a href="/?legacy=0#overview">Обзор</a><a className={kind!=='workspace'?'active':''} aria-current={kind!=='workspace'?'page':undefined} href={'#release/'+(id||'')}>Архив</a></div>
+    <div className="archive-actions"><ThemeSwitch/><label className="profile"><Avatar name={profile}/><select aria-label="Профиль" value={profile} onChange={e=>{setProfile(e.target.value);sessionStorage.setItem('release-profile',e.target.value);}}>{(journal?.profiles||['Анна','Дмитрий']).map(p=><option key={p}>{p}</option>)}</select></label></div></nav>
     {error&&<p role="alert">{error}</p>}
     {kind==='workspace'?<div className="placeholder"><h1>Рабочая область</h1><p>Здесь появятся личные чаты с помощником продакта.</p><a href="#releases">Вернуться к релизам</a></div>:
     kind==='calc'?<CalculationPage id={part}/>:journal&&id?<Releases key={id} id={id} journal={journal} author={profile} generation={generation} onForm={setForm}/>:<p className="page">Загружается журнал…</p>}
@@ -161,4 +164,5 @@ function Releases({id,journal,author,generation,onForm}:{id:string;journal:Journ
       <button className="primary send" aria-label="Отправить вопрос" title="Отправить вопрос" disabled={!r||busy||!question.trim()}><Icon name="send"/></button></div></form></footer></div>
     </aside></div>;
 }
+styleFormValidation();
 createRoot(document.getElementById('root')!).render(<App/>);

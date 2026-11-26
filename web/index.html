@@ -1,1 +1,44 @@
-<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Softline Store · Помощник продакта</title><link rel="stylesheet" href="/app.css"></head><body><div id="root"></div><script type="module" src="/app.js"></script></body></html>
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <title>Softline Store · Помощник продакта</title>
+    <script>
+      const root = document.documentElement;
+      const legacyRoutes = /^#(?:release|releases|calc)(?:\/|$)/;
+      if (new URLSearchParams(location.search).get('legacy') === '1' || legacyRoutes.test(location.hash)) {
+        root.dataset.app = 'archive';
+      }
+      let theme;
+      try { theme = localStorage.getItem('pm-theme'); } catch {}
+      if (theme === 'light' || theme === 'dark') root.dataset.themeOverride = 'true';
+      else theme = matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+      root.dataset.theme = theme;
+      const stylesheet = document.createElement('link');
+      stylesheet.rel = 'stylesheet';
+      stylesheet.setAttribute('blocking', 'render');
+      stylesheet.href = root.dataset.app === 'archive' ? '/legacy.css' : '/app.css';
+      document.head.append(stylesheet);
+    </script>
+    <style>
+      html { background: #f4f5f7; color-scheme: light; }
+      html[data-theme="dark"] { background: #151517; color-scheme: dark; }
+    </style>
+    <script type="module">
+      const root = document.documentElement;
+      if (root.dataset.app === 'archive') {
+        const session = await fetch('/api/team/session').then(response => response.json()).catch(() => null);
+        if (!session?.user) {
+          delete root.dataset.app;
+          document.querySelector('link[rel="stylesheet"]').href = '/app.css';
+        }
+      }
+      const bundle = root.dataset.app === 'archive' ? '/legacy.js' : '/app.js';
+      import(bundle);
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+  </body>
+</html>
