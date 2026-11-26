@@ -1,5 +1,6 @@
 import { ReleaseAnalytics } from './app';
 import { ChatTrackerPreview, Connections, DemoObject, Tracking } from './tracking';
+import { hiddenDemoPage, visibleTrackerStep } from './tracking-visibility';
 import { RangeResult } from './range-result';
 import { rangeLabel, RangeChart, DAY } from './range-chart';
 import type { Attachment } from './range-chart';
@@ -40,6 +41,7 @@ import './chat.css';
 type Action = (fn: () => Promise<void>) => void;
 type ThreadTitle = Pick<Thread, 'id' | 'title'>;
 function currentRoute() {
+  if (hiddenDemoPage(location.hash)) return 'cases';
   if (location.hash.length > 1) return location.hash.slice(1);
   const params = new URLSearchParams(location.search);
   if (params.get('openChat')) return 'chats/' + params.get('openChat');
@@ -175,6 +177,15 @@ const stepNames: Record<string, string> = {
   decide: 'Изменён статус',
 };
 const stepLabel = (name: string) => stepNames[name] || name;
+function CompletedChecks({ body }: { body: Msg['body'] }) {
+  const checks = [...new Set([...(body.checks || []), ...(body.steps || [])]
+    .filter(visibleTrackerStep).map(stepLabel))];
+  if (!checks.length) return null;
+  return <details>
+    <summary>Выполненные проверки</summary>
+    <ul>{checks.map(check => <li key={check}>{check}</li>)}</ul>
+  </details>;
+}
 function Overview({ home, onAsk }: { home: Home; onAsk: () => void }) {
   const watching = home.cases.filter((c) => c.state === 'Наблюдаем эффект');
   const attention = home.cases
@@ -399,7 +410,7 @@ function Chat({
         work(!!data.jobs.length);
         setLoaded(true);
         setErr('');
-        setProgress(data.jobs.flatMap((j) => j.steps || []));
+        setProgress(data.jobs.flatMap((j) => j.steps || []).filter(visibleTrackerStep));
         setJobIssue(data.jobs.find((j) => j.issue)?.issue || '');
         for (const m of data.items)
           if (m.role === 'assistant') {
@@ -538,7 +549,7 @@ function Chat({
                   : ''}
               </a>
             )}
-            {m.body.actions?.map((a, i) => (
+            {m.body.actions?.filter(a => visibleTrackerStep(a.op)).map((a, i) => (
               <div className="tool-receipt" key={a.id || i}>
                 <b>
                   {a.title ||
@@ -594,18 +605,7 @@ function Chat({
                   ))}
               </div>
             ))}
-            {!!(m.body.steps?.length || m.body.checks?.length) && (
-              <details>
-                <summary>Выполненные проверки</summary>
-                <ul>
-                  {[...new Set([...(m.body.checks || []), ...(m.body.steps || []).map(stepLabel)])].map(
-                    (s) => (
-                      <li key={s}>{s}</li>
-                    ),
-                  )}
-                </ul>
-              </details>
-            )}
+            <CompletedChecks body={m.body} />
             {m.body.warning && !m.body.text.includes(m.body.warning) && <small>{m.body.warning}</small>}
             {m.body.canResume && (
               <button

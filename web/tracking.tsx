@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { post } from './team-data';
 import type { Home } from './team-data';
+import { hiddenDemoPage, showConfluence, visibleTrackers } from './tracking-visibility';
 
 type Action = (fn: () => Promise<void>) => void;
 type Link = { key: string; url: string };
@@ -51,7 +52,7 @@ function Value({ text }: { text: string }) {
   return (
     <>
       {text.split(/(https?:\/\/[^\s<>]+|#demo-(?:issue|page)\/[\w%.-]+)/g).map((s, i) =>
-        /^(https?:\/\/|#demo-)/.test(s) ? (
+        /^(https?:\/\/|#demo-)/.test(s) && !hiddenDemoPage(s) ? (
           <a key={i} href={s}>
             {s}
           </a>
@@ -69,7 +70,7 @@ function TaskContents({ task }: { task: Task }) {
       <p className="tracker-text">
         <Value text={task.description} />
       </p>
-      {task.comments.map((c, i) => (
+      {task.comments.filter(c => showConfluence || !/^Confluence · (?:https?:\/\/|#demo-page\/)/.test(c.text)).map((c, i) => (
         <p key={i}>
           <b>{c.author}</b> <Value text={c.text} />
         </p>
@@ -526,12 +527,13 @@ export function Tracking({
 }) {
   const [tab, select] = useState<'redmine' | 'confluence'>('redmine'),
     [picked, pick] = useState('');
-  const [links, setLinks] = useState<Hit[]>([]),
+  type CaseLink = Hit & { service: 'redmine' | 'confluence' };
+  const [links, setLinks] = useState<CaseLink[]>([]),
     [linkError, setLinkError] = useState('');
   const confirmed = drafts.map((d) => d.receipt?.url || '').join('|');
   useEffect(() => {
     let active = true;
-    post<{ items: Hit[] }>('case_links', { caseId })
+    post<{ items: CaseLink[] }>('case_links', { caseId })
       .then((r) => {
         if (active) {
           setLinks(r.items);
@@ -545,21 +547,21 @@ export function Tracking({
       active = false;
     };
   }, [caseId, confirmed]);
-  const otherLinks = links.filter(
-    (link) => !drafts.some((d) => d.receipt?.url === link.url || d.issue?.url === link.url),
-  );
+  const visibleDrafts = drafts.filter(d => d.kind !== 'page' || showConfluence);
+  const otherLinks = links.filter(link => visibleTrackers.includes(link.service) &&
+    !visibleDrafts.some(d => d.receipt?.url === link.url || d.issue?.url === link.url));
   const site = home.integrations[tab];
   const latest = drafts.find((d) => d.kind === 'issue' && d.state === 'done')?.receipt;
   return (
     <section className="paper task-panel">
-      <h3 ref={headingRef} tabIndex={-1}>Задачи и документация</h3>
-      <div className="toolbar">
-        {(['redmine', 'confluence'] as const).map((t) => (
+      <h3 ref={headingRef} tabIndex={-1}>{showConfluence ? 'Задачи и документация' : 'Задачи Redmine'}</h3>
+      {visibleTrackers.length > 1 && <div className="toolbar">
+        {visibleTrackers.map((t) => (
           <button aria-pressed={t === tab} key={t} onClick={() => select(t)}>
             {t === 'redmine' ? 'Redmine' : 'Confluence'}
           </button>
         ))}
-      </div>
+      </div>}
       <p className="muted">{site.local ? 'Локальное демо' : site.scope + ' · ' + site.url}</p>
       {!site.local && !site.connected ? (
         <a href="#settings">Подключить личный доступ</a>
@@ -584,7 +586,7 @@ export function Tracking({
       {linkError && <p role="status">{linkError}</p>}
       {otherLinks.length > 0 && (
         <>
-          <h4>Связанные задачи и страницы</h4>
+          <h4>{showConfluence ? 'Связанные задачи и страницы' : 'Связанные задачи'}</h4>
           {otherLinks.map((l) => (
             <p key={l.url}>
               <a href={l.url}>
@@ -594,7 +596,7 @@ export function Tracking({
           ))}
         </>
       )}
-      {drafts.map((d) => (
+      {visibleDrafts.map((d) => (
         <PreviewCard key={d.id} item={d} action={action} reload={reload} />
       ))}
     </section>
@@ -613,14 +615,14 @@ export function Connections({
   if (home.user.role === 'judge')
     return (
       <section className="paper">
-        <h3>Redmine и Confluence</h3>
-        <p>Задачи и страницы сохраняются в вашем демонстрационном пространстве.</p>
+        <h3>{showConfluence ? 'Redmine и Confluence' : 'Redmine'}</h3>
+        <p>{showConfluence ? 'Задачи и страницы сохраняются' : 'Задачи сохраняются'} в вашем демонстрационном пространстве.</p>
       </section>
     );
   return (
     <section className="paper">
       <h3>Подключения</h3>
-      {(['redmine', 'confluence'] as const).map((service) => {
+      {visibleTrackers.map((service) => {
         const site = home.integrations[service],
           name = service === 'redmine' ? 'Redmine' : 'Confluence';
         async function access(actionName: string, token?: string) {

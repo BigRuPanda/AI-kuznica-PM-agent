@@ -1,4 +1,5 @@
 import { Fragment, type ReactNode } from 'react';
+import { hiddenDemoPage } from './tracking-visibility';
 
 function inline(text: string, openMaterial?: (id: string) => void): ReactNode[] {
   const pattern =
@@ -13,6 +14,7 @@ function inline(text: string, openMaterial?: (id: string) => void): ReactNode[] 
     const material = href.match(/#material\/([a-f0-9]{64})$/i);
     const local =
       href.startsWith('#') || (typeof location !== 'undefined' && href.startsWith(location.origin + '/'));
+    if (link && local && hiddenDemoPage(href)) return <Fragment key={i}>{link[1]}</Fragment>;
     if (link || (material && local))
       return (
         <a

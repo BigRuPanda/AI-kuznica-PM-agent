@@ -146,25 +146,55 @@ test('Softline workspace, upgrade and browser journeys', async t => {
     await visible(admin.getByText('Ожидаем данные после исправления'));
   });
 
-  await journey('owner preview, demo issue, Confluence page and reciprocal links', async () => {
+  await journey('Redmine works directly while saved Confluence pages stay hidden', async () => {
+    for (const p of [admin,member,judge]) {
+      await go(p,'settings');
+      await visible(p.getByRole('heading',{name:'Redmine',exact:true}));
+      assert.equal(await p.getByText(/Confluence/i).count(),0);
+    }
     await go(admin,caseRoute);
+    const panel=admin.locator('.task-panel');
+    await visible(panel.getByRole('heading',{name:'Задачи Redmine'}));
+    assert.equal(await panel.getByRole('button',{name:/^(Redmine|Confluence)$/}).count(),0);
     const draft=admin.locator('.tracker-preview').filter({hasText:'Исходный черновик'});
     await submit(admin,'confirm',()=>role(draft,'Подтвердить запись').click());
     const issue=draft.getByRole('link',{name:/Открыть задачу/});
     await visible(issue);
     const issueHref=await issue.getAttribute('href');
-    await role(admin,'Confluence').click();
-    await field(admin,'Название страницы').fill('Результаты приёмки');
-    await field(admin,'Текст публикации').fill('Проверено по двум периодам.');
-    await submit(admin,'page_draft',()=>role(admin,'Подготовить публикацию в Confluence').click());
-    const preview=admin.locator('.tracker-preview').filter({hasText:'Результаты приёмки'});
-    await visible(preview.locator('.tracker-diff').first());
-    await submit(admin,'confirm',()=>role(preview,'Подтвердить запись').click());
-    await preview.getByRole('link',{name:/Открыть страницу/}).click();
-    await visible(admin.getByRole('heading',{name:'Результаты приёмки'}));
-    await admin.locator('a').filter({hasText:/DEMO-/}).first().click();
-    assert.ok(admin.url().endsWith(issueHref));
+    // Create representative existing data through the unchanged authenticated API.
+    async function post(op,data) {
+      const res=await admin.request.post(base+'/api/team/'+op,{data});
+      assert.ok(res.ok(),op);
+      return res.json();
+    }
+    const page=await post('page_draft',{caseId:fixture.caseId,title:'Результаты приёмки',
+      content:'Проверено по двум периодам.',issueKey:issueHref.split('/').at(-1)});
+    const receipt=await post('confirm',{id:page.id,revision:page.revision});
+    assert.equal((await post('page_read',{key:receipt.key})).title,'Результаты приёмки');
+    await admin.reload();
+    await visible(issue);
+    assert.equal(await panel.getByText('Результаты приёмки').count(),0);
+    await issue.click();
     await visible(admin.getByRole('heading',{name:'Исходный черновик'}));
+    assert.equal(await admin.getByText(/Confluence/i).count(),0);
+    assert.equal(await admin.locator('a[href*="#demo-page/"]').count(),0);
+    await go(member,caseRoute);
+    await visible(member.locator('a[href="'+issueHref+'"]'));
+    assert.equal(await member.getByText('Результаты приёмки').count(),0);
+    let pageReads=0;
+    admin.on('request',r=>{if(r.url().endsWith('/page_read')) pageReads++;});
+    await admin.goto(base+'/'+receipt.url);
+    await visible(admin.getByRole('heading',{name:'Разборы',exact:true}));
+    assert.equal(pageReads,0);
+    app.space('team').db.prepare("INSERT INTO chat_items(thread,author,role,body,created) VALUES(?,?,'assistant',?,?)")
+      .run(fixture.thread,'Помощник',JSON.stringify({text:'Проверка завершена. [Документ]('+receipt.url+')',steps:['issue_read','page_read'],
+        actions:[{op:'page_draft',id:page.id,title:'Результаты приёмки'}]}),Date.now());
+    await go(admin,'chats/'+fixture.thread);
+    const msg=admin.locator('.bubble').filter({hasText:'Проверка завершена.'});
+    await msg.getByText('Выполненные проверки').click();
+    await visible(msg.getByText('Прочитана задача'));
+    assert.equal(await msg.getByRole('link',{name:'Документ'}).count(),0);
+    assert.equal(await msg.getByText(/Прочитана страница|Результаты приёмки/).count(),0);
     await go(judge,issueHref.slice(1));
     await visible(judge.getByRole('alert').first());
   });
