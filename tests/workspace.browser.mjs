@@ -331,6 +331,25 @@ test('Softline workspace, upgrade and browser journeys', async t => {
     assert.equal(await admin.getByRole('heading',{name:'Задача из пространства жюри'}).count(),0);
   });
 
+  await journey('Signal Bridge exposes the knowledge page and its documentation form', async () => {
+    env.SIGNAL_BRIDGE_URL = 'http://localhost/fixture-bridge';
+    try {
+      await admin.reload();
+      await admin.getByRole('navigation').getByRole('link', {name: 'База знаний'}).click();
+      await admin.getByRole('link', {name: 'Результаты приёмки'}).click();
+      await visible(admin.getByRole('heading', {name: 'Результаты приёмки'}));
+      await admin.reload();
+      await visible(admin.getByRole('heading', {name: 'Результаты приёмки'}));
+      const pageKey = new URL(admin.url()).hash.split('/').at(-1);
+      await go(admin, caseRoute + '/documentation?' + new URLSearchParams({issue: '1', page: pageKey}));
+      await visible(role(admin.locator('.task-panel'), 'Подготовить страницу базы знаний'));
+      await go(admin, 'settings');
+      await visible(admin.getByRole('heading', {name: 'Мои уведомления'}));
+    } finally {
+      delete env.SIGNAL_BRIDGE_URL;
+    }
+  });
+
   await journey('standalone demo preserves release selection, filters, themes and discussion', async () => {
     const demo = await browser.newPage();
     try {

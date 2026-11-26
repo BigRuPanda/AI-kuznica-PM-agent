@@ -917,3 +917,11 @@ p {
   .full-role { display: none; }
   .short-role { display: inline; }
 }
+.contact-fields {
+  border: 1px solid #d7dce2;
+  border-radius: 8px;
+  margin: 1rem 0;
+  padding: 1rem;
+  min-width: 0;
+}
+.contact-fields legend { padding: 0 .4rem; font-weight: 600; }

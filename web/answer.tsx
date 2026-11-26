@@ -1,7 +1,7 @@
 import { Fragment, type ReactNode } from 'react';
-import { hiddenDemoPage } from './tracking-visibility';
+import { useTrackingVisibility } from './tracking-visibility';
 
-function inline(text: string, openMaterial?: (id: string) => void): ReactNode[] {
+function inline(text: string, hiddenDemoPage: (href: string) => boolean, openMaterial?: (id: string) => void): ReactNode[] {
   const pattern =
     /(\*\*[^*\n]+\*\*|__[^_\n]+__|\*[^*\n]+\*|`[^`\n]+`|\[[^\]\n]+\]\((?:https?:\/\/|#)[^\s)]+\)|(?:https?:\/\/[^\s<>]*\/)?#material\/[a-f0-9]{64})/gi;
   return text.split(pattern).map((part, i) => {
@@ -43,6 +43,7 @@ export function Answer({
   compact?: boolean;
   openMaterial?: (id: string) => void;
 }) {
+  const { hiddenDemoPage } = useTrackingVisibility();
   const lines = text.trim().replace(/\r\n?/g, '\n').split('\n');
   if (compact && text.length > 240 && lines.length === 1) {
     const end = text.search(/(?<=[.!?])\s+(?=[А-ЯЁA-Z])/u);
@@ -97,7 +98,7 @@ export function Answer({
             <thead>
               <tr>
                 {headers.map((v, k) => (
-                  <th key={k}>{inline(v, openMaterial)}</th>
+                  <th key={k}>{inline(v, hiddenDemoPage, openMaterial)}</th>
                 ))}
               </tr>
             </thead>
@@ -105,7 +106,7 @@ export function Answer({
               {rows.map((r, j) => (
                 <tr key={j}>
                   {r.map((v, k) => (
-                    <td key={k}>{inline(v, openMaterial)}</td>
+                    <td key={k}>{inline(v, hiddenDemoPage, openMaterial)}</td>
                   ))}
                 </tr>
               ))}
@@ -126,13 +127,13 @@ export function Answer({
         const content = [item[2]];
         while (i < lines.length && /^\s+\S/.test(lines[i]) && !list.test(lines[i]))
           content.push(lines[i++].trim());
-        items.push(<li key={i}>{inline(content.join(' '), openMaterial)}</li>);
+        items.push(<li key={i}>{inline(content.join(' '), hiddenDemoPage, openMaterial)}</li>);
       }
       blocks.push(<Tag key={key}>{items}</Tag>);
       continue;
     }
     if (/^#{1,6}\s/.test(line)) {
-      blocks.push(<h4 key={key}>{inline(line.replace(/^#+\s+/, ''), openMaterial)}</h4>);
+      blocks.push(<h4 key={key}>{inline(line.replace(/^#+\s+/, ''), hiddenDemoPage, openMaterial)}</h4>);
       i++;
       continue;
     }
@@ -145,7 +146,7 @@ export function Answer({
       !/^(?:#{1,6}\s|```)/.test(lines[i])
     )
       paragraph.push(lines[i++]);
-    blocks.push(<p key={key}>{inline(paragraph.join('\n'), openMaterial)}</p>);
+    blocks.push(<p key={key}>{inline(paragraph.join('\n'), hiddenDemoPage, openMaterial)}</p>);
   }
   return (
     <div className="prose">

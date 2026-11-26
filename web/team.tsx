@@ -1,7 +1,9 @@
 import { ReleaseAnalytics } from './app';
 import { ChatTrackerPreview, Connections, DemoObject, Tracking } from './tracking';
-import { hiddenDemoPage, visibleTrackerStep } from './tracking-visibility';
+import { BridgePages, useTrackingVisibility } from './tracking-visibility';
 import { RangeResult } from './range-result';
+import { Knowledge, NotificationSettings } from './notifications';
+import { SourceExtract } from './knowledge-source';
 import { rangeLabel, RangeChart, DAY } from './range-chart';
 import type { Attachment } from './range-chart';
 import { SavedChart } from './calculations';
@@ -41,7 +43,6 @@ import './chat.css';
 type Action = (fn: () => Promise<void>) => void;
 type ThreadTitle = Pick<Thread, 'id' | 'title'>;
 function currentRoute() {
-  if (hiddenDemoPage(location.hash)) return 'cases';
   if (location.hash.length > 1) return location.hash.slice(1);
   const params = new URLSearchParams(location.search);
   if (params.get('openChat')) return 'chats/' + params.get('openChat');
@@ -167,6 +168,8 @@ const stepNames: Record<string, string> = {
   issue_read: 'Прочитана задача',
   page_search: 'Найдены страницы',
   page_read: 'Прочитана страница',
+  'knowledge-sources': 'Найдены книги Excel',
+  'knowledge-source': 'Прочитаны строки Excel',
   page_draft: 'Подготовлена публикация в Confluence',
   'create-case': 'Создан личный разбор',
   set_view: 'Обновлён личный экран',
@@ -178,6 +181,7 @@ const stepNames: Record<string, string> = {
 };
 const stepLabel = (name: string) => stepNames[name] || name;
 function CompletedChecks({ body }: { body: Msg['body'] }) {
+  const { visibleTrackerStep } = useTrackingVisibility();
   const checks = [...new Set([...(body.checks || []), ...(body.steps || [])]
     .filter(visibleTrackerStep).map(stepLabel))];
   if (!checks.length) return null;
@@ -276,6 +280,7 @@ function Chat({
   onAttachFocus?: () => void;
   headerActions?: React.ReactNode;
 }) {
+  const { visibleTrackerStep } = useTrackingVisibility();
   const { open: openMaterial, load: loadMaterial, listen } = useMaterials();
   const [progress, setProgress] = useState<string[]>([]);
   const [jobIssue, setJobIssue] = useState('');
@@ -514,6 +519,9 @@ function Chat({
             ) : (
               <p>{m.body.text}</p>
             )}
+            {m.body.readSources?.map((source) => (
+              <div key={source.url}><a href={source.url}>{source.label}</a></div>
+            ))}
             {m.body.materials?.map((item) => (
               <MaterialCard key={item.id} item={item} />
             ))}
@@ -1036,11 +1044,13 @@ function ChatWorkspace({ home, id, action, refresh, onRename, onDelete }: {
 
 function Investigation({
   id,
+  section,
   home,
   action,
   refresh,
 }: {
   id: string;
+  section?: string;
   home: Home;
   action: Action;
   refresh: () => Promise<void>;
@@ -1262,7 +1272,9 @@ function Investigation({
             </section>
           )}
           <PinnedMaterials caseId={id} />
-          <Tracking headingRef={taskTitle}
+          <Tracking
+            headingRef={taskTitle}
+            documentation={section?.startsWith('documentation?') ? new URLSearchParams(section.slice(14)) : undefined}
             caseId={id}
             product={c.product}
             title={c.title}
@@ -1546,6 +1558,7 @@ function Settings({ home, action, refresh, menu, changeMenu }: {
         <h1>Настройки команды</h1>
       </div>
       <Connections home={home} action={action} refresh={refresh} />
+      {home.user.role !== 'judge' && <NotificationSettings />}
       <section className="paper menu-preference" aria-labelledby="menu-preference-title">
         <h3 id="menu-preference-title">Положение меню</h3>
         <div className="actions menu-preference-options">
@@ -1609,13 +1622,6 @@ function Settings({ home, action, refresh, menu, changeMenu }: {
           >
             Выпустить ключ MCP
           </button>
-          {home.user.role !== 'judge' && (
-            <button
-              onClick={() => action(async () => say((await post<{ command: string }>('bind')).command))}
-            >
-              Привязать Telegram
-            </button>
-          )}
         </div>
       </section>
       {notice && (
@@ -1753,13 +1759,15 @@ function Snapshot({
   );
 }
 function Workspace({ user, onLogout }: { user: User; onLogout: () => void }) {
-  const [route, id, selected] = useRoute(),
+  const [requestedRoute, id, selected] = useRoute(),
     [home, setHome] = useState<Home | null>(null),
     [err, fail] = useState(''),
     [filter, setFilter] = useState(''),
     [create, newCase] = useState(false),
     [releaseRef, selectRelease] = useState(''),
     [menu, setMenu] = useState(readMenuLayout);
+  const bridgePages = !!home?.bridgeEnabled;
+  const route = ['demo-page', 'knowledge', 'knowledge-source'].includes(requestedRoute) && !bridgePages ? 'cases' : requestedRoute;
   const sidebar = useSidebarWidth();
   const settings = route === 'settings' || (route === 'cases' && id === 'settings');
   const homeVersion = useRef(0);
@@ -1796,6 +1804,7 @@ function Workspace({ user, onLogout }: { user: User; onLogout: () => void }) {
     ['chats', 'Чаты'],
     ['cases', 'Разборы'],
     ['sources', 'Источники'],
+    ...(bridgePages ? [['knowledge', 'База знаний']] : []),
   ];
   const content = (
     <div className="team-app" data-menu={menu} style={{
@@ -1819,7 +1828,7 @@ function Workspace({ user, onLogout }: { user: User; onLogout: () => void }) {
               key={k}
               href={'#' + k}
             >
-              <Icon name={k === 'chats' ? 'chat' : k} />
+              <Icon name={k === 'chats' ? 'chat' : k === 'knowledge' ? 'sources' : k} />
               <span className="menu-label">{t}</span>
             </a>
             );
@@ -1869,11 +1878,15 @@ function Workspace({ user, onLogout }: { user: User; onLogout: () => void }) {
         ) : ['releases', 'release', 'calc'].includes(route) ? (
           <ReleaseAnalytics route={route} requestedId={id} author={user.name} admin={user.role === 'admin'} />
         ) : route === 'case' ? (
-          <Investigation key={id} id={id} home={home} action={action} refresh={refresh} />
+          <Investigation key={id+'/' + (selected || '')} id={id} section={selected} home={home} action={action} refresh={refresh} />
         ) : route === 'range' ? (
           <RangeResult id={id} />
         ) : route === 'snapshot' ? (
           <Snapshot id={id} selected={selected} />
+        ) : route === 'knowledge' ? (
+          <Knowledge admin={home.user.role==='admin'} />
+        ) : route === 'knowledge-source' ? (
+          <SourceExtract key={id} version={id} />
         ) : settings ? (
           <Settings home={home} action={action} refresh={refresh} menu={menu} changeMenu={changeMenu} />
         ) : route === 'sources' ? (
@@ -2036,7 +2049,7 @@ function Workspace({ user, onLogout }: { user: User; onLogout: () => void }) {
   );
   return (
     <MaterialsProvider home={home} caseId={route === 'case' ? id : undefined} refresh={refresh}>
-      {content}
+      <BridgePages.Provider value={bridgePages}>{content}</BridgePages.Provider>
     </MaterialsProvider>
   );
 }

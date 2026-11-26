@@ -120,13 +120,14 @@ export async function telegram(method, data, env = process.env, send = fetch) {
   );
   return r.result;
 }
-export async function mail(text, env = process.env) {
+export async function mail(text, env = process.env, recipient = env.SMTP_TO) {
   const config = Object.fromEntries(
     ['SMTP_HOST', 'SMTP_PORT', 'SMTP_USER', 'SMTP_PASSWORD', 'SMTP_FROM', 'SMTP_TO', 'SMTP_TLS'].map((k) => [
       k,
       env[k] || '',
     ]),
   );
+  config.SMTP_TO = recipient || '';
   required(config, 'SMTP_HOST');
   required(config, 'SMTP_TO');
   await python('mail_delivery.py', [], JSON.stringify({ ...config, text }), env);

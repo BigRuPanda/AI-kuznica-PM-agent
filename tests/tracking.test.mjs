@@ -16,6 +16,11 @@ import {
 } from '../server/tracker-connections.mjs';
 import { confluence } from '../server/tracker-clients.mjs';
 import { initTracking, revisePage } from '../server/tracker-workflow.mjs';
+import { openAccounts } from '../server/accounts.mjs';
+import { initContacts } from '../server/notification-contacts.mjs';
+import { syncWatches } from '../server/redmine-watch.mjs';
+import { knowledge } from '../server/redmine-bridge.mjs';
+import { importDocs } from '../server/evidence.mjs';
 
 const owner = { id: 'one', role: 'admin', name: 'Автор' },
   peer = { id: 'two', role: 'member', name: 'Коллега' };
@@ -171,6 +176,7 @@ test('local complete workflow, participant isolation, target binding, links and 
     assert.match(page.text, /Новый текст/);
     assert.equal(page.links[0].url, i.url);
     const issue = await read('issue_read', { key: i.key });
+    assert.equal((await read('page_read', { issueKey: i.key })).key, p.key);
     assert.equal(issue.status, 'В работе');
     assert.equal(issue.comments.length, 2);
     assert.ok(issue.comments.some((c) => c.text.includes(p.url)));
@@ -220,6 +226,7 @@ test('Redmine personal identity, project checks, choices, uncertain create and j
       m.send,
     );
     await assert.rejects(s.run('issue_read', { key: i.key }, peer), /403/);
+    assert.equal((await s.run('issue_read', { key: '№' + i.key })).key, i.key);
     assert.throws(() => s.run('issue_search', { query: 'Issue' }, owner, true), /личный чат/);
     m.issues[0].project.id = 12;
     await assert.rejects(s.run('issue_read', { key: i.key }), /другого проекта/);
@@ -426,6 +433,56 @@ test('older persisted drafts stay local after upgrading and activating a provide
     assert.match((await s.confirm({ id: 'legacy' })).key, /^DEMO-/);
     assert.equal(m.issues.length, 0);
   } finally {
+    store.close();
+  }
+});
+
+test('personal Redmine closes into a private wiki page, preserves the Excel version and can publish to Data Center', async () => {
+  const store = dbAt(),
+    mock = siteMock(),
+    s = scenario(store, mock),
+    accounts = openAccounts(':memory:');
+  s.env.APP_BASE_URL = 'https://pm.test';
+  try {
+    initContacts(accounts.db);
+    accounts.publicUser = (id) => (id === owner.id ? owner : peer);
+    store.db.prepare("UPDATE cases SET body=json_remove(body,'$.owner') WHERE id=?").run(s.caseId);
+    await s.connect('redmine');
+    const issue = await s.confirm(
+      await s.draft('draft', { title: 'Статус оплаты', description: 'Сверить отчёт' }),
+    );
+    mock.issues[0].status = { id: 6, name: 'Выполнена', is_closed: true };
+    await syncWatches(store, accounts, s.env, mock.send);
+    const kb = knowledge(store.db, owner),
+      page = kb.results[0].pageKey;
+    assert.equal(kb.results[0].report, null);
+    assert.equal(kb.pages.length, 1);
+    assert.equal(knowledge(store.db, peer).pages.length, 0);
+    assert.equal(knowledge(store.db, peer).results.length, 0);
+    await assert.rejects(s.run('page_read', { key: page, local: true }, peer));
+    await assert.rejects(s.run('page_read', { key: page, local: true }, owner, true));
+    const book = { file: 'Индексы.xlsx', facts: [{ kind: 'competitor', loc: 'Обзор!C4', text: 'Проверка' }] };
+    importDocs(store, [book], { notify: false });
+    const [{ version }] = knowledge(store.db, owner).sources;
+    const linked = await s.confirm(
+      await s.draft('page_draft', { key: page, issueKey: issue.key, sourceVersions: [version] }),
+    );
+    assert.ok(mock.issues[0].journals[0].notes.includes('https://pm.test/' + linked.url));
+    await s.connect('confluence');
+    const publication = await s.draft('page_draft', {
+      title: 'Итог по оплате',
+      content: 'Проверено',
+      resultPage: page,
+      issueKey: issue.key,
+    });
+    await s.confirm(publication);
+    await s.confirm(publication);
+    assert.equal(mock.pages.length, 1);
+    assert.match(mock.pages[0].body.storage.value, /bugs\.test\/pm\/issues\/1/);
+    assert.ok(mock.pages[0].body.storage.value.includes('https://pm.test/#knowledge-source/' + version));
+    assert.equal(mock.issues[0].journals.length, 2);
+  } finally {
+    accounts.db.close();
     store.close();
   }
 });

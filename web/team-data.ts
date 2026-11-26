@@ -34,6 +34,7 @@ export type Release = {
   related_task_ids: string;
 };
 export type Home = {
+  bridgeEnabled: boolean;
   integrations: Record<'redmine' | 'confluence', import('./tracking').Integration>;
   user: User;
   cases: Case[];
@@ -137,6 +138,7 @@ export type Msg = {
     personal?: { caseId: string; cards: string[]; full?: boolean; control?: string; pin?: boolean };
     rounds?: number;
     steps?: string[];
+    readSources?: { url: string; label: string }[];
     full?: boolean;
     sourceQuery?: string;
     cards?: string[];

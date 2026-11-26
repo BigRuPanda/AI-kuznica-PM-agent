@@ -79,6 +79,17 @@ export function redmine(target, token, send) {
     return (await call(projectPath + '.json?include=trackers')).project;
   }
   function item(i) {
+    const transition = (i.journals || []).findLast((j) =>
+      (j.details || []).some((d) => d.name === 'status_id' && String(d.new_value) === String(i.status?.id)),
+    );
+    const note =
+      transition &&
+      !transition.private_notes &&
+      (transition.notes || '')
+        .split(/\r?\n/)
+        .filter((s) => !/^pm-[\w-]+$/.test(s))
+        .join('\n')
+        .trim();
     return {
       key: String(i.id),
       url: target.url + '/issues/' + numeric(i.id),
@@ -88,6 +99,11 @@ export function redmine(target, token, send) {
       priority: i.priority?.name || '',
       assignee: i.assigned_to?.name || '',
       statusId: String(i.status?.id || ''),
+      closed: typeof i.status?.is_closed === 'boolean' ? i.status.is_closed : null,
+      closedOn: i.closed_on || null,
+      closingNote: note
+        ? { text: note, author: transition.user?.name || '', at: transition.created_on || null }
+        : null,
       priorityId: String(i.priority?.id || ''),
       assigneeId: String(i.assigned_to?.id || ''),
       comments: (i.journals || [])
@@ -99,7 +115,7 @@ export function redmine(target, token, send) {
   async function read(key) {
     const p = await project();
     const { issue } = await call(
-      '/issues/' + numeric(String(key).trim().replace(/^#/, '')) + '.json?include=journals,allowed_statuses',
+      '/issues/' + numeric(String(key).trim().replace(/^(?:Redmine\s*)?[#№]\s*/i, '')) + '.json?include=journals,allowed_statuses',
     );
     if (String(issue.project.id) !== String(p.id)) throw Error('Задача другого проекта');
     return item(issue);
@@ -139,6 +155,14 @@ export function redmine(target, token, send) {
     },
     read,
     search,
+    async isClosed(issue) {
+      if (typeof issue.closed === 'boolean') return issue.closed;
+      const { issue_statuses } = await call('/issue_statuses.json');
+      const status = issue_statuses.find((s) => String(s.id) === issue.statusId);
+      if (!status || typeof status.is_closed !== 'boolean')
+        throw Error('Redmine не подтвердил тип статуса задачи');
+      return status.is_closed;
+    },
     async options() {
       const p = await project(),
         priorities = await call('/enumerations/issue_priorities.json');

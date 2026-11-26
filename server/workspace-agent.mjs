@@ -9,6 +9,7 @@ import { materialForResult, readMaterial } from './materials.mjs';
 import { chartObservations } from './chart-focus.mjs';
 
 const system = [
+  'На запрос о статусе задачи, версии страницы или комментарии верни только запрошенные поля. Цитируй комментарий при закрытии дословно из issue_read.closingNote.text. У метрик, комментариев Redmine и источников Excel разное происхождение.',
   'Если запрошенный результат недоступен или шаг завершился ошибкой, сообщи об этом первым предложением, назови конкретную причину. Отдельно покажи только выполненную часть. Соблюдай запрошенные даты и детализацию; альтернативные данные подпиши отдельно.',
   'При продолжении обсуждения графика context.materials задаёт точный ряд, версию, сегмент и период. Явное уточнение пользователя определяет предмет последующих вопросов. Объясняй по observations этого материала. Сравнение будней и выходных описывает форму дневного ряда, а причина различий требует отдельных свидетельств.',
   'Объясняй наблюдаемые изменения по значениям именно приложенного графика. Для причины укажи отдельное свидетельство и степень уверенности; совпадение даты релиза с изменением само по себе даёт гипотезу.',
@@ -30,6 +31,12 @@ const tools = Object.entries(operations).map(([name, [description, shape]]) => {
 });
 const opNames = Object.fromEntries(Object.keys(operations).map((k) => [k.replaceAll('-', '_'), k]));
 function concise(name, r) {
+  if (name === 'issue_read') {
+    const comments = (r.comments || []).map(c => ({
+      ...c, text: c.text.split(/\r?\n/).filter(line => !/^pm-[\w-]+$/.test(line)).join('\n').trim(),
+    })).filter(c => c.text);
+    return { ...r, comments };
+  }
   if (name === 'view') {
     const v = r.view;
     return {
@@ -79,7 +86,7 @@ function concise(name, r) {
 const mutationRequests = {
   page_draft: /опублик|созда|подготов|обнов|измен|добав|замен|publish|update|create|edit/i,
   draft:
-    /измен|обнов|коммент|назнач|статус|приоритет|подготов|состав|заве[дс]|созда|оформи|сдела|запиш|отправ|черновик.{0,15}(?:нужен|для)|draft|create|prepare/i,
+    /измени|изменить|обнови|обновить|прокомментируй|оставь|добавь|назначь|назначить|установи|поставь|переведи|смени|закрой|возобнови|подготов|составь|заве[дс]|создай|создать|оформи|сдела|запиш|отправ|черновик.{0,15}(?:нужен|для)|draft|create|prepare|update|assign/i,
   'create-case': /разбер|расслед|созда|заве[дс]|подготов|оформи|сохрани|черновик|create|investigate|prepare/i,
   append_case: /дополни|добав|сохрани|запиш|append|save/i,
   set_view: /добав|покаж|построй|убери|оставь|закреп|верни|измени|открой|show|plot|pin|add/i,
@@ -99,6 +106,14 @@ function authorizedWrite(op, question) {
 }
 function note(state, op, r) {
   if (r.error) return;
+  if (['issue_read', 'page_read', 'knowledge-source'].includes(op)) {
+    const url = op === 'knowledge-source' ? '#knowledge-source/' + r.version : r.url;
+    const label = op === 'issue_read' ? 'Задача ' + r.key : r.file || r.title;
+    if (/^(?:https?:\/\/|#(?:demo-issue|demo-page|knowledge-source)\/)/i.test(url || '')) {
+      const sources = (state.readSources ??= []);
+      if (!sources.some(s => s.url === url)) sources.push({ url, label });
+    }
+  }
   if (op === 'funnel') {
     state.funnelChecked = r.available;
     state.funnelChart = r.chart;
@@ -164,6 +179,7 @@ function artifactResult(state, text, warning) {
     personal: state.personal,
     rounds: state.round,
     steps: state.completed,
+    readSources: state.readSources,
   };
 }
 export async function runAssistant(

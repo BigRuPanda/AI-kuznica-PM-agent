@@ -20,6 +20,7 @@ import { trackerClient, prepareTracker, confirmTracker, preview, publicPage, cas
 import { runTool } from './analytics.mjs';
 import { prepareResearch, researchContext } from './agent-research.mjs';
 import { saveMaterial } from './materials.mjs';
+import { excelSources, issuePages, sourceRows } from './knowledge.mjs';
 
 const text = z.string().min(1).max(2400),
   id = z.string().min(1).max(150),
@@ -112,14 +113,18 @@ export const operations = {
     },
   ],
   case_links: ['Доступные участнику задачи и страницы этого разбора', { caseId: id }],
+  'knowledge-sources': ['Список загруженных Excel-книг базы знаний с названиями и точными версиями.', {}],
+  'knowledge-source': ['Прочитать до 40 строк Excel из базы знаний по версии, полученной из knowledge_sources.', {
+    version: z.string().regex(/^[a-f0-9]{64}$/), offset: z.number().int().nonnegative().optional(),
+  }],
   issue_search: ['Найти задачи в проекте Redmine', { query: z.string().max(400) }],
   issue_read: [
-    'Прочитать задачу с комментариями и разрешёнными переходами',
+    'Прочитать задачу Redmine, её статус, комментарии и список связанных страниц. Для №123 передай key="123". Для демо-задачи используй точный ключ из issue_search.',
     { key: id, local: z.boolean().optional() },
   ],
   issue_options: ['Приоритеты, исполнители и типы задач Redmine', {}],
   page_search: ['Найти страницы Confluence в пространстве команды', { query: z.string().max(400) }],
-  page_read: ['Прочитать страницу Confluence и её версию', { key: id, local: z.boolean().optional() }],
+  page_read: ['Прочитать текст и версию страницы. Для страницы встроенной базы знаний по задаче Redmine передай только issueKey с числовым номером задачи. Для произвольной страницы передай key из page_search.', { key: id.optional(), issueKey: id.optional(), local: z.boolean().optional() }],
   page_draft: [
     'Предпросмотр изменения страницы Confluence. fragment — уникальный исходный текст для замены, иначе content добавляется в конец. issueKey связывает страницу с задачей.',
     {
@@ -129,6 +134,8 @@ export const operations = {
       content: z.string().max(30000).optional(),
       fragment: z.string().max(10000).optional(),
       issueKey: optional,
+      sourceVersions: z.array(z.string().regex(/^[a-f0-9]{64}$/)).max(8).optional(),
+      resultPage: id.optional(),
       baseVersion: z.number().int().positive().optional(),
     },
   ],
@@ -264,6 +271,8 @@ export function workspaceOperation(
   const meta = operations[op];
   const b = meta ? z.object(meta[1]).parse(input) : input;
   const current = () => visibleCase(db, user, b.caseId);
+  if (op === 'knowledge-sources') return excelSources(db);
+  if (op === 'knowledge-source') return sourceRows(db, b.version, b.offset);
   if (op === 'funnel') {
     if (!b.thread) throw Error('Укажите беседу для сохранения результата');
     const shared = thread(db, user, b.thread).scope === 'group';
@@ -499,6 +508,23 @@ export function workspaceOperation(
     current();
     return caseLinks(store, user, b.caseId, env, send, sharedOnly);
   }
+  // Internal pages have PAGE-* keys. A bare issue number is also a valid lookup
+  // on this wiki. On an external Confluence site numeric keys are page IDs.
+  if (op === 'page_read' && !b.issueKey && /^\d+$/.test(b.key || '') &&
+      (b.local || targetFor(db, user, 'confluence', env).local)) {
+    b.issueKey = b.key;
+    delete b.key;
+  }
+  if (op === 'page_read' && b.issueKey) {
+    if (b.key) throw Error('Укажите номер задачи или ключ страницы по отдельности');
+    return Promise.resolve(workspaceOperation(store, user, 'issue_read', { key: b.issueKey }, env, send, sharedOnly))
+      .then((issue) => {
+        if (!issue.pages.length) throw Error('Для этой задачи в базе знаний пока нет связанной страницы результата');
+        if (issue.pages.length > 1) throw Error('Выберите одну из страниц задачи: ' + issue.pages.map((p) => p.key).join(', '));
+        return workspaceOperation(store, user, 'page_read', { key: issue.pages[0].key, local: true }, env, send, sharedOnly);
+      });
+  }
+  if (op === 'page_read' && !b.key) throw Error('Укажите ключ страницы или номер задачи');
   if (
     [
       'issue_search',
@@ -511,10 +537,10 @@ export function workspaceOperation(
     ].includes(op)
   ) {
     const service = op.startsWith('page_') ? 'confluence' : 'redmine';
-    const target = b.local ? { service, local: true } : targetFor(db, user, service);
+    const target = b.local ? { service, local: true } : targetFor(db, user, service, env);
     if (
       sharedOnly &&
-      (!target.local || (op === 'page_draft' && b.issueKey && !targetFor(db, user, 'redmine').local))
+      (!target.local || (op === 'page_draft' && b.issueKey && !targetFor(db, user, 'redmine', env).local))
     )
       throw Error('Откройте личный чат для работы с задачами и страницами');
     if (op === 'draft' || op === 'page_draft') {
@@ -542,7 +568,7 @@ export function workspaceOperation(
         if (op.endsWith('_search')) return { local: !!target.local, items: await api.search(b.query) };
         if (op === 'issue_options') return api.options();
         const value = await api.read(b.key);
-        return op === 'page_read' ? publicPage(value) : value;
+        return op === 'page_read' ? publicPage(value) : { ...value, pages: issuePages(db, user, value.url, sharedOnly) };
       },
     );
   }

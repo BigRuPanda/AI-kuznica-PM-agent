@@ -1,7 +1,8 @@
 import React, { useEffect, useState } from 'react';
 import { post } from './team-data';
 import type { Home } from './team-data';
-import { hiddenDemoPage, showConfluence, visibleTrackers } from './tracking-visibility';
+import { useTrackingVisibility } from './tracking-visibility';
+import type { Workbook } from './knowledge-source';
 
 type Action = (fn: () => Promise<void>) => void;
 type Link = { key: string; url: string };
@@ -22,6 +23,7 @@ type Task = Hit & {
 type Page = Hit & { version: number; text: string; links: { url: string; title: string }[] };
 export type Integration = {
   service: string;
+  bridge?: boolean;
   local?: boolean;
   url?: string;
   scope?: string;
@@ -49,6 +51,7 @@ export type TrackerPreview = {
 };
 
 function Value({ text }: { text: string }) {
+  const { hiddenDemoPage } = useTrackingVisibility();
   return (
     <>
       {text.split(/(https?:\/\/[^\s<>]+|#demo-(?:issue|page)\/[\w%.-]+)/g).map((s, i) =>
@@ -64,6 +67,7 @@ function Value({ text }: { text: string }) {
   );
 }
 function TaskContents({ task }: { task: Task }) {
+  const { showConfluence } = useTrackingVisibility();
   return (
     <>
       <p>{[task.status, task.priority, task.assignee].filter(Boolean).join(' · ')}</p>
@@ -115,7 +119,7 @@ export function DemoObject({ id, service }: { id: string; service: string }) {
   }, [id, service]);
   return (
     <section className="paper">
-      <small>Локальное демо · {service === 'demo-page' ? 'Confluence' : 'Redmine'}</small>
+      <small>{service === 'demo-page' ? 'Встроенная база знаний' : 'Локальный бэклог Redmine'}</small>
       <h1>{page?.title || task?.title || 'Загрузка'}</h1>
       {error && <p role="alert">{error}</p>}
       {task && <TaskContents task={task} />} {page && <PageContents page={page} />}
@@ -443,6 +447,8 @@ function PageForm({
   title,
   conclusion,
   issueKey,
+  startPage,
+  internal,
   action,
   reload,
 }: {
@@ -450,10 +456,42 @@ function PageForm({
   title: string;
   conclusion: string;
   issueKey: string;
+  startPage?: string;
+  internal: boolean;
   action: Action;
   reload: () => Promise<void>;
 }) {
   const [page, setPage] = useState<Page>();
+  const [sources, setSources] = useState<Workbook[]>([]),
+    [selected, choose] = useState<string[]>([]);
+  const [sourceError, fail] = useState(''),
+    [loading, setLoading] = useState(!!startPage),
+    [seed, setSeed] = useState<Page>();
+  useEffect(() => {
+    let live = true;
+    post<Workbook[]>('knowledge-sources')
+      .then((r) => {
+        if (live) setSources(r);
+      })
+      .catch((e) => {
+        if (live) fail(e.message);
+      });
+    if (startPage)
+      post<Page>('page_read', { key: startPage, local: true })
+        .then((r) => {
+          if (live) {
+            setSeed(r);
+            if (internal) setPage(r);
+            setLoading(false);
+          }
+        })
+        .catch((e) => {
+          if (live) fail(e.message);
+        });
+    return () => {
+      live = false;
+    };
+  }, [startPage, internal]);
   return (
     <>
       <Search
@@ -469,43 +507,83 @@ function PageForm({
           <button onClick={() => setPage(undefined)}>Создать отдельную страницу</button>
         </>
       )}
-      <form
-        key={page?.key || 'new'}
-        onSubmit={(e) => {
-          e.preventDefault();
-          const b = Object.fromEntries(new FormData(e.currentTarget));
-          action(async () => {
-            if (page && b.title === page.title) delete b.title;
-            await post('page_draft', { ...b, caseId, key: page?.key, baseVersion: page?.version });
-            await reload();
-          });
-        }}
-      >
-        <label>
-          Название страницы
-          <input name="title" defaultValue={page?.title || title} maxLength={255} required />
-        </label>
-        {page && (
+      {sourceError && <p role="alert">{sourceError}</p>}
+      {!loading && (
+        <form
+          key={page?.key || 'new'}
+          onSubmit={(e) => {
+            e.preventDefault();
+            const b = Object.fromEntries(new FormData(e.currentTarget));
+            action(async () => {
+              if (page && b.title === page.title) delete b.title;
+              await post('page_draft', {
+                ...b,
+                caseId,
+                key: page?.key,
+                baseVersion: page?.version,
+                sourceVersions: selected,
+                resultPage: startPage,
+              });
+              await reload();
+            });
+          }}
+        >
           <label>
-            Фрагмент для замены
-            <textarea name="fragment" placeholder="Оставьте пустым, чтобы добавить текст в конец страницы" />
+            Название страницы
+            <input name="title" defaultValue={page?.title || seed?.title || title} maxLength={255} required />
           </label>
-        )}
-        <label>
-          Текст публикации
-          <textarea name="content" defaultValue={page ? undefined : conclusion} maxLength={30000} />
-        </label>
-        <label>
-          Номер связанной задачи
-          <input name="issueKey" defaultValue={issueKey} placeholder="Необязательно" />
-        </label>
-        <button>Подготовить публикацию в Confluence</button>
-      </form>
+          {page && (
+            <label>
+              Фрагмент для замены
+              <textarea
+                name="fragment"
+                placeholder="Оставьте пустым, чтобы добавить текст в конец страницы"
+              />
+            </label>
+          )}
+          <label>
+            Текст публикации
+            <textarea
+              name="content"
+              defaultValue={page ? undefined : seed?.text || conclusion}
+              maxLength={30000}
+            />
+          </label>
+          <label>
+            Номер связанной задачи
+            <input name="issueKey" defaultValue={issueKey} placeholder="Необязательно" />
+          </label>
+          {sources.length > 0 && (
+            <fieldset className="contact-fields">
+              <legend>Источники Excel</legend>
+              {sources.map((s) => (
+                <label key={s.version}>
+                  <input
+                    type="checkbox"
+                    checked={selected.includes(s.version)}
+                    disabled={selected.length >= 8 && !selected.includes(s.version)}
+                    onChange={(e) =>
+                      choose(
+                        e.target.checked ? [...selected, s.version] : selected.filter((v) => v !== s.version),
+                      )
+                    }
+                  />
+                  {s.file} · {s.version.slice(0, 12)}
+                </label>
+              ))}
+            </fieldset>
+          )}
+          <button>
+            {internal ? 'Подготовить страницу базы знаний' : 'Подготовить публикацию в Confluence'}
+          </button>
+        </form>
+      )}
     </>
   );
 }
 export function Tracking({
   headingRef,
+  documentation,
   caseId,
   product,
   title,
@@ -515,6 +593,7 @@ export function Tracking({
   action,
   reload,
 }: {
+  documentation?: URLSearchParams;
   caseId: string;
   product: string;
   title: string;
@@ -525,8 +604,9 @@ export function Tracking({
   action: Action;
   reload: () => Promise<void>;
 }) {
-  const [tab, select] = useState<'redmine' | 'confluence'>('redmine'),
-    [picked, pick] = useState('');
+  const { showConfluence, visibleTrackers } = useTrackingVisibility();
+  const [tab, select] = useState<'redmine' | 'confluence'>(showConfluence && documentation ? 'confluence' : 'redmine'),
+    [picked, pick] = useState(documentation?.get('issue') || '');
   type CaseLink = Hit & { service: 'redmine' | 'confluence' };
   const [links, setLinks] = useState<CaseLink[]>([]),
     [linkError, setLinkError] = useState('');
@@ -558,11 +638,19 @@ export function Tracking({
       {visibleTrackers.length > 1 && <div className="toolbar">
         {visibleTrackers.map((t) => (
           <button aria-pressed={t === tab} key={t} onClick={() => select(t)}>
-            {t === 'redmine' ? 'Redmine' : 'Confluence'}
+            {t === 'redmine' ? 'Redmine' : home.integrations.confluence.local ? 'База знаний' : 'Confluence'}
           </button>
         ))}
       </div>}
-      <p className="muted">{site.local ? 'Локальное демо' : site.scope + ' · ' + site.url}</p>
+      <p className="muted">
+        {site.bridge
+          ? 'Redmine через Signal Bridge · к новой задаче прикладывается снимок Метрики'
+          : site.local
+            ? tab === 'confluence'
+              ? 'Страницы рабочего пространства'
+              : 'Локальный демо-бэклог'
+            : site.scope + ' · ' + site.url}
+      </p>
       {!site.local && !site.connected ? (
         <a href="#settings">Подключить личный доступ</a>
       ) : tab === 'redmine' ? (
@@ -579,6 +667,8 @@ export function Tracking({
           title={title}
           conclusion={conclusion}
           issueKey={picked || latest?.key || ''}
+          internal={!!site.local}
+          startPage={documentation?.get('page') || undefined}
           action={action}
           reload={reload}
         />
@@ -611,6 +701,7 @@ export function Connections({
   action: Action;
   refresh: () => Promise<void>;
 }) {
+  const { showConfluence, visibleTrackers } = useTrackingVisibility();
   const [notice, say] = useState('');
   if (home.user.role === 'judge')
     return (
@@ -663,11 +754,16 @@ export function Connections({
                 >
                   <label>
                     Адрес сервиса
-                    <input type="url" name="url" defaultValue={site.url} placeholder="https://" />
+                    <input
+                      type="url"
+                      name="url"
+                      defaultValue={site.bridge ? '' : site.url}
+                      placeholder="https://"
+                    />
                   </label>
                   <label>
                     {service === 'redmine' ? 'Идентификатор проекта' : 'Ключ пространства'}
-                    <input name="scope" defaultValue={site.scope} />
+                    <input name="scope" defaultValue={site.bridge ? '' : site.scope} />
                   </label>
                   {service === 'confluence' && (
                     <label>
@@ -683,13 +779,17 @@ export function Connections({
               </details>
             )}
             <p>
-              {site.local
-                ? 'Локальное демо'
-                : site.scope +
-                  ' · ' +
-                  (site.connected ? 'Личный доступ подключён' : 'Требуется личный доступ')}
+              {site.bridge
+                ? 'Подключён командный Signal Bridge'
+                : site.local
+                  ? service === 'confluence'
+                    ? 'Встроенная база знаний'
+                    : 'Локальный демо-бэклог'
+                  : site.scope +
+                    ' · ' +
+                    (site.connected ? 'Личный доступ подключён' : 'Требуется личный доступ')}
             </p>
-            {!site.local && (
+            {!site.local && !site.bridge && (
               <>
                 <form
                   onSubmit={(e) => {

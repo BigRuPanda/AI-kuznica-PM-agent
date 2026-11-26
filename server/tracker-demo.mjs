@@ -4,7 +4,8 @@ import { facts } from './evidence.mjs';
 
 export function initTrackerDemo(db) {
   db.exec(`CREATE TABLE IF NOT EXISTS demo_issue_details(key TEXT PRIMARY KEY, data TEXT NOT NULL);
-    CREATE TABLE IF NOT EXISTS demo_pages(key TEXT PRIMARY KEY,case_id TEXT,title TEXT,storage TEXT,version INTEGER);`);
+    CREATE TABLE IF NOT EXISTS demo_pages(key TEXT PRIMARY KEY,case_id TEXT,title TEXT,storage TEXT,version INTEGER);
+    CREATE TABLE IF NOT EXISTS private_wiki_pages(page TEXT PRIMARY KEY,user TEXT NOT NULL);`);
 }
 export function localHref(service, key) {
   return '#' + (service === 'redmine' ? 'demo-issue/' : 'demo-page/') + encodeURIComponent(key);
@@ -18,9 +19,13 @@ export function demoClient(db, user, service, caseId, sharedOnly = false) {
     return !owner || (!sharedOnly && owner === user.id);
   }
   if (service === 'confluence') {
+    function visiblePage(row) {
+      const acl = db.prepare('SELECT user FROM private_wiki_pages WHERE page=?').get(row.key);
+      return visible(row.case_id) && (!acl || (!sharedOnly && acl.user === user.id));
+    }
     function read(key) {
       const r = db.prepare('SELECT * FROM demo_pages WHERE key=?').get(key);
-      if (!r || !visible(r.case_id)) throw Error('Страница недоступна');
+      if (!r || !visiblePage(r)) throw Error('Страница недоступна. Используйте ключ из поиска страниц или передайте номер Redmine в поле issueKey.');
       return { ...r, url: localHref(service, key) };
     }
     return {
@@ -31,7 +36,7 @@ export function demoClient(db, user, service, caseId, sharedOnly = false) {
           .all()
           .filter(
             (r) =>
-              visible(r.case_id) &&
+              visiblePage(r) &&
               (r.title + ' ' + r.key + ' ' + plain(r.storage)).toLowerCase().includes(q.toLowerCase()),
           )
           .slice(0, 25)
@@ -56,7 +61,7 @@ export function demoClient(db, user, service, caseId, sharedOnly = false) {
         return db
           .prepare('SELECT key,case_id FROM demo_pages WHERE instr(storage,?)>0')
           .all(marker)
-          .filter((r) => visible(r.case_id) && (!key || key === r.key))
+          .filter((r) => visiblePage(r) && (!key || key === r.key))
           .map((r) => read(r.key))[0];
       },
     };
