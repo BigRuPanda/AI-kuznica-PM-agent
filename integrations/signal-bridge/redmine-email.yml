@@ -1,0 +1,9 @@
+# SMTP inside the demo Docker network. Mailpit captures messages locally.
+production:
+  email_delivery:
+    delivery_method: :smtp
+    smtp_settings:
+      address: mailpit
+      port: 1025
+      domain: signal-demo.example.invalid
+      enable_starttls_auto: false

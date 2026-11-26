@@ -33,7 +33,7 @@ export type Release = {
   related_task_ids: string;
 };
 export type Home = {
-  issueMode: 'jira' | 'local';
+  issueMode: 'jira' | 'redmine' | 'local';
   user: User;
   cases: Case[];
   threads: Thread[];

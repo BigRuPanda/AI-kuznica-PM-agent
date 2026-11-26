@@ -17,6 +17,8 @@ import {
 } from './evidence.mjs';
 import { apiConfigured, providerCall } from './agent.mjs';
 import { jira, mail, telegram } from './connectors.mjs';
+import { confirmRedmine, initRedmine, trackerMode } from './redmine-bridge.mjs';
+import { destination } from './notification-contacts.mjs';
 export function initWorkbench(db) {
   db.exec(
     'CREATE TABLE IF NOT EXISTS conversations(id TEXT PRIMARY KEY,owner TEXT,scope TEXT,title TEXT);' +
@@ -29,6 +31,7 @@ export function initWorkbench(db) {
       'CREATE TABLE IF NOT EXISTS known_updates(id INTEGER PRIMARY KEY);',
   );
   initRanges(db);
+  initRedmine(db);
   db.prepare("INSERT OR IGNORE INTO conversations VALUES('group','','group','Команда Store')").run();
   db.prepare("UPDATE jobs SET status='queued' WHERE status='running'").run();
   db.prepare("UPDATE draft_actions SET state='uncertain' WHERE state='sending'").run();
@@ -517,8 +520,11 @@ export async function confirm(store, user, id, env, send) {
   if (!r) throw Error('Черновик недоступен');
   visibleCase(db, user, r.case_id);
   if (r.state === 'done') return { key: r.external };
-  const body = JSON.parse(r.body),
-    local = user.role === 'judge' || !env.JIRA_BASE_URL;
+  const body = JSON.parse(r.body), mode = trackerMode(user, env), local = mode === 'local';
+  const linked = db.prepare('SELECT 1 FROM redmine_drafts WHERE draft=?').get(id);
+  if (user.role !== 'judge' && (linked || (mode === 'redmine' && r.state === 'draft')))
+    return confirmRedmine(db, r, body, env, send);
+  if (r.state === 'uncertain' && mode !== 'jira') throw Error('Сверьте результат предыдущей отправки в Jira');
   if (local) {
     return store.tx(() => {
       const key = body.key || 'DEMO-' + id.slice(0, 8);
@@ -571,15 +577,20 @@ export async function confirm(store, user, id, env, send) {
     throw e;
   }
 }
-export async function deliver(store, env, send, mailSend = mail) {
+export async function deliver(store, env, send, mailSend = mail, accounts) {
   const db = store.db;
   const d = db
     .prepare(
-      "SELECT * FROM deliveries WHERE state='queued' AND next<=? AND (?=1 OR json_extract(body,'$.chat') IS NOT NULL) ORDER BY rowid LIMIT 1",
+      "SELECT * FROM deliveries WHERE state='queued' AND next<=? AND (?=1 OR json_extract(body,'$.chat') IS NOT NULL OR json_extract(body,'$.owner') IS NOT NULL) ORDER BY rowid LIMIT 1",
     )
     .get(Date.now(), env.NOTIFICATIONS_ENABLED === 'true' ? 1 : 0);
   if (!d) return;
   const b = JSON.parse(d.body);
+  const personal = b.owner && accounts ? destination(accounts,b.owner,d.channel) : null;
+  if (b.owner && (!personal || digest(personal) !== b.addressHash)) {
+    db.prepare("UPDATE deliveries SET state='cancelled' WHERE id=?").run(d.id);
+    return;
+  }
   const destinations = [
     ...new Set(
       [...String(env.TELEGRAM_CHAT_IDS || '').split(','), env.TELEGRAM_CHANNEL_ID]
@@ -588,7 +599,7 @@ export async function deliver(store, env, send, mailSend = mail) {
         .filter(Boolean),
     ),
   ];
-  if (d.channel === 'telegram' && !b.chat && destinations.length > 1) {
+  if (d.channel === 'telegram' && !b.owner && !b.chat && destinations.length > 1) {
     store.tx(() => {
       for (const chat of destinations)
         db.prepare(
@@ -598,10 +609,10 @@ export async function deliver(store, env, send, mailSend = mail) {
     });
     return;
   }
-  const addr = b.chat || destinations[0];
+  const addr = personal || b.chat || destinations[0];
   if (
     (d.channel === 'telegram' && (!env.TELEGRAM_BOT_TOKEN || !addr)) ||
-    (d.channel === 'smtp' && (!env.SMTP_HOST || !env.SMTP_TO))
+    (d.channel === 'smtp' && (!env.SMTP_HOST || !(personal || env.SMTP_TO)))
   ) {
     db.prepare('UPDATE deliveries SET next=? WHERE id=?').run(Date.now() + 60000, d.id);
     return;
@@ -612,11 +623,14 @@ export async function deliver(store, env, send, mailSend = mail) {
       .run(d.id).changes
   )
     return;
-  const text =
-    b.text + (b.caseId ? '\n' + (env.APP_BASE_URL || 'http://127.0.0.1:8090') + '/#case/' + b.caseId : '');
+  const appUrl = env.APP_BASE_URL || 'http://127.0.0.1:8090';
+  const links = [b.issueUrl, b.caseId && appUrl + '/#case/' + b.caseId].filter(Boolean);
+  const accessibleLinks = d.channel === 'telegram' && b.owner
+    ? links.filter(link => !['localhost','127.0.0.1','[::1]'].includes(new URL(link).hostname)) : links;
+  const text = [b.text, ...accessibleLinks].join('\n');
   try {
     if (d.channel === 'telegram') await telegram('sendMessage', { chat_id: addr, text }, env, send);
-    else await mailSend(text, env);
+    else await mailSend(text, env, personal || env.SMTP_TO);
     db.prepare("UPDATE deliveries SET state='delivered' WHERE id=?").run(d.id);
   } catch (e) {
     db.prepare('UPDATE deliveries SET state=?,next=? WHERE id=?').run(

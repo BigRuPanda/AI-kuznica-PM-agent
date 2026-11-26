@@ -1,0 +1,60 @@
+{
+  "verified_at": "2026-11-26T21:23:51+03:00",
+  "environment": "Локальный Redmine, настоящий Reports API Метрики",
+  "report": {
+    "start": "2026-11-12",
+    "end": "2026-11-25",
+    "weekly_counts": [
+      [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    ],
+    "status": "Мало данных"
+  },
+  "reference": "signal-integration-acceptance-01",
+  "redmine_version": "6.1.6",
+  "created_issue": 1,
+  "repeated_create": 1,
+  "matched_issues": 1,
+  "redmine_status": "Closed",
+  "checked_polls": 2,
+  "closure_events": 1,
+  "telegram_state": "sent",
+  "telegram_message_id": 2,
+  "native_email": {
+    "status": "Closed",
+    "recipient_and_link_verified": true,
+    "transport": "local Mailpit",
+    "redmine_issue": 2
+  },
+  "team_website": {
+    "issue": 3,
+    "redmine_status": "Closed",
+    "verified_email": true,
+    "personal_mailpit_letters": 1,
+    "knowledge_records": 1,
+    "report_linked": true,
+    "repeat_confirm_same_key": true,
+    "telegram_web_binding": "automated test with Telegram API fixture",
+    "browser_verified": [
+      "registration",
+      "SMTP verification in Mailpit",
+      "deep link generated for live bot",
+      "knowledge search"
+    ]
+  },
+  "corporate_smtp_verified": false
+}

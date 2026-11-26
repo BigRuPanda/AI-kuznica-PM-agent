@@ -1,0 +1,26 @@
+name: softline-signal-bridge
+services:
+  mailpit:
+    image: axllent/mailpit:v1.27.4@sha256:df6c2541907e1be6fac21f509927cf6ed771617a1f4b361ef66d97bd05593d2d
+    ports:
+      - "127.0.0.1:18882:8025"
+      - "127.0.0.1:18883:1025"
+    environment:
+      MP_DATABASE: /data/mailpit.db
+    volumes:
+      - demo_mail:/data
+  redmine:
+    image: redmine:6.1@sha256:8beffc2ae1d39d418ccd12e0c05587716ce4eb03d38a269a52dbbe5c366534fd
+    entrypoint: ["/bin/sh", "-ec", "cp /opt/signal-email.yml config/configuration.yml && exec /docker-entrypoint.sh rails server -b 0.0.0.0"]
+    ports:
+      - "127.0.0.1:18881:3000"
+    environment:
+      REDMINE_LANG: en
+    volumes:
+      - ./redmine-email.yml:/opt/signal-email.yml:ro
+      - redmine_db:/usr/src/redmine/sqlite
+      - redmine_files:/usr/src/redmine/files
+volumes:
+  demo_mail:
+  redmine_db:
+  redmine_files:

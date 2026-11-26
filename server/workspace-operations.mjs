@@ -15,6 +15,7 @@ import {
 import { visibleCase, dashboard, draft, confirm, thread, cardTypes } from './workbench.mjs';
 import { access, grant, readSnapshot, readRange, compareRanges, neighboring } from './chart-ranges.mjs';
 import { jira } from './connectors.mjs';
+import { trackerMode } from './redmine-bridge.mjs';
 import { runTool } from './analytics.mjs';
 
 const text = z.string().min(1).max(2400),
@@ -328,7 +329,7 @@ export function workspaceOperation(
     return { id: hash, source: 'metric', title: view.title, unit: view.unit, points: view.points.length };
   }
   if (op === 'jira-search') {
-    if (user.role !== 'judge' && env.JIRA_BASE_URL)
+    if (trackerMode(user, env) === 'jira')
       return jira(env, send)
         .search(b.query)
         .then((items) => ({ local: false, items }));
@@ -352,8 +353,7 @@ export function workspaceOperation(
     }
     return {
       ...draft(store, user, b),
-      destination:
-        user.role === 'judge' || !env.JIRA_BASE_URL ? 'локальный демо-бэклог' : 'Jira · ' + env.JIRA_PROJECT,
+      destination: { local: 'локальный демо-бэклог', redmine: 'Redmine', jira: 'Jira · ' + env.JIRA_PROJECT }[trackerMode(user, env)],
     };
   }
   if (op === 'confirm') return confirm(store, user, b.id, env, send);

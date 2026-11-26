@@ -1,4 +1,5 @@
 import { RangeResult } from './range-result';
+import { Knowledge, NotificationSettings } from './notifications';
 import { rangeLabel, RangeChart, DAY } from './range-chart';
 import type { Attachment } from './range-chart';
 import { SavedChart } from './calculations';
@@ -657,9 +658,9 @@ function Investigation({
             <p className="muted">
               {home.issueMode === 'local'
                 ? 'Локальный демо-бэклог · запись останется на этом стенде'
-                : 'Jira · запись после подтверждения'}
+                : home.issueMode === 'redmine' ? 'Redmine · при подтверждении приложим последний отчёт Метрики из Signal Bridge' : 'Jira · запись после подтверждения'}
             </p>
-            <button
+            {home.issueMode !== 'redmine' && <button
               onClick={() =>
                 action(async () => {
                   const r = await post<{ items: typeof hits }>('jira-search', { query: c.product });
@@ -668,7 +669,7 @@ function Investigation({
               }
             >
               Найти похожие задачи
-            </button>
+            </button>}
             {hits.map((h) => (
               <label key={h.key}>
                 <input type="radio" name="issue" checked={key === h.key} onChange={() => setKey(h.key)} />
@@ -907,6 +908,7 @@ function Settings({ home, action, refresh }: { home: Home; action: Action; refre
       <div className="page-head">
         <h1>Настройки команды</h1>
       </div>
+      {home.user.role !== 'judge' && <NotificationSettings />}
       {admin && (
         <section className="paper">
           <h3>Источники</h3>
@@ -1011,13 +1013,6 @@ function Settings({ home, action, refresh }: { home: Home; action: Action; refre
           >
             Выпустить ключ MCP
           </button>
-          {home.user.role !== 'judge' && (
-            <button
-              onClick={() => action(async () => say((await post<{ command: string }>('bind')).command))}
-            >
-              Привязать Telegram
-            </button>
-          )}
         </div>
       </section>
       {notice && (
@@ -1155,6 +1150,7 @@ function Workspace({ user, onLogout }: { user: User; onLogout: () => void }) {
           ))}
         </nav>
         <div className="side-bottom">
+          <a href="#knowledge">База знаний</a>
           <a href="#settings">Настройки</a>
           <small>
             {user.name} ·{' '}
@@ -1186,6 +1182,8 @@ function Workspace({ user, onLogout }: { user: User; onLogout: () => void }) {
           <RangeResult id={id} />
         ) : route === 'snapshot' ? (
           <Snapshot id={id} selected={selected} />
+        ) : route === 'knowledge' ? (
+          <Knowledge />
         ) : route === 'settings' ? (
           <Settings home={home} action={action} refresh={refresh} />
         ) : route === 'chats' ? (

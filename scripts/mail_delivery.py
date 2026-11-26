@@ -4,7 +4,7 @@ import ssl
 import sys
 from email.message import EmailMessage
 
-c=json.load(sys.stdin)
+c=json.loads(sys.stdin.buffer.read())
 message=EmailMessage()
 message["From"]=c.get("SMTP_FROM","")
 message["To"]=c.get("SMTP_TO","")
@@ -17,7 +17,8 @@ if c["SMTP_TLS"]=="implicit":
 else:
     client=smtplib.SMTP(c["SMTP_HOST"],port,timeout=20)
 with client:
-    if c["SMTP_TLS"]!="implicit":
+    plain_test = c["SMTP_TLS"]=="local-test" and c["SMTP_HOST"] in ("localhost","127.0.0.1","::1")
+    if c["SMTP_TLS"]!="implicit" and not plain_test:
         client.starttls(context=tls)
     if c["SMTP_USER"]:
         client.login(c["SMTP_USER"],c["SMTP_PASSWORD"])

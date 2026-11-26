@@ -1,0 +1,4 @@
+.local/
+runtime/
+*.dpapi
+access.json
