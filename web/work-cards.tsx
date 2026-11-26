@@ -128,8 +128,7 @@ export function Cards({
                 <div key={s.product}>
                   <small>{s.product}</small>
                   <strong>
-                    {s.change != null && s.change > 0 ? '+' : ''}
-                    {num(s.change)}%
+                    {s.change == null ? 'Нет сравнения' : (s.change > 0 ? '+' : '') + num(s.change) + '%'}
                   </strong>
                   <span>
                     {num(s.before)} → {num(s.after)} · {s.baseWeeks} / {s.weeks} нед.
@@ -185,7 +184,7 @@ export function Cards({
             ))}
           {k === 'ctr' && (
             <p className="big-number">
-              {num(view.ctr.d ? (view.ctr.n / view.ctr.d) * 100 : null)}%{' '}
+              {view.ctr.d ? num((view.ctr.n / view.ctr.d) * 100) + '%' : 'Нет данных для CTR'}{' '}
               <small>
                 {view.ctr.n} клика / {view.ctr.d} визитов, где увидели блок
               </small>

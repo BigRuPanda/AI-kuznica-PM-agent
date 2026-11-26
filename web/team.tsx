@@ -184,7 +184,7 @@ function Chat({
               </a>
             )}{' '}
             {m.body.caseId && <a href={'#case/' + m.body.caseId}>К разбору</a>}
-            {!caseId && m.role === 'assistant' && m.body.product && !m.body.caseId && (
+            {!caseId && m.role === 'assistant' && m.body.calc && m.body.product && !m.body.caseId && (
               <button
                 onClick={() =>
                   action(async () => {
@@ -205,7 +205,7 @@ function Chat({
           </article>
         ))}
         {err && <p role="alert">{err}</p>}
-        {running && <p role="status">Агент проверяет данные…</p>}
+        {running && <p role="status">Агент отвечает…</p>}
         <div ref={end} />
       </div>
       <form

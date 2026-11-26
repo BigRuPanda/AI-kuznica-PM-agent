@@ -9,7 +9,7 @@ import { openStore } from '../server/store.mjs';
 import { initEvidence, importDocs, cases, analysisView, effect, updateCase } from '../server/evidence.mjs';
 import { createTeamApp } from '../server/team-http.mjs';
 import { jira, metrika } from '../server/connectors.mjs';
-import { initWorkbench, deliver } from '../server/workbench.mjs';
+import { initWorkbench, deliver, createThread, enqueue, messages, workJobs } from '../server/workbench.mjs';
 const WEEK = 604800000;
 const date = (i) => new Date(Date.UTC(2026, 0, 5) + i * WEEK).toISOString().slice(0, 10);
 function sales(i, p = 'A', value = i < 12 ? 100 : 40, partial = false) {
@@ -25,6 +25,136 @@ function sales(i, p = 'A', value = i < 12 ? 100 : 40, partial = false) {
   };
 }
 const doc = (facts) => [{ file: 'Generated for testing.xlsx', facts }];
+
+test('a conversation can reply, clarify, and then calculate with thread-local chronological memory', async () => {
+  const s = openStore(':memory:');
+  const u = { id: 'qa', name: 'QA' },
+    accounts = { publicUser: () => u };
+  const env = {
+    LLM_BACKEND: 'api',
+    LLM_BASE_URL: 'https://example.invalid',
+    LLM_MODEL: 'fixture',
+    LLM_DATA_MODE: 'selection',
+  };
+  try {
+    initEvidence(s.db);
+    initWorkbench(s.db);
+    importDocs(s, doc(Array.from({ length: 18 }, (_, i) => sales(i, 'Product A'))));
+    const id = createThread(s.db, u, 'Диалог'),
+      other = createThread(s.db, u, 'Отдельная беседа');
+    s.db
+      .prepare("INSERT INTO chat_items(thread,role,body) VALUES(?,'user',?)")
+      .run(other, JSON.stringify({ text: 'Чужая переписка' }));
+    const questions = ['Привет', 'Я хочу разобраться в конверсии', 'Посчитай CTR рекомендаций', 'Спасибо'];
+    const calls = [];
+    const send = async (_url, init) => {
+      const request = JSON.parse(init.body);
+      calls.push(request);
+      const { question } = JSON.parse(request.messages.at(-1).content);
+      const message =
+        question === questions[2]
+          ? {
+              role: 'assistant',
+              tool_calls: [
+                {
+                  id: 'analysis',
+                  type: 'function',
+                  function: {
+                    name: 'investigate',
+                    arguments: JSON.stringify({
+                      product: 'Product A',
+                      cards: ['ctr'],
+                      full: true,
+                      query: question,
+                    }),
+                  },
+                },
+              ],
+            }
+          : {
+              role: 'assistant',
+              content:
+                question === questions[0]
+                  ? 'Привет!'
+                  : question === questions[1]
+                    ? 'О каком шаге воронки речь?'
+                    : 'Рад помочь.',
+            };
+      return Response.json({ choices: [{ message }] });
+    };
+    // Queue all four before processing to verify later messages cannot leak into earlier turns.
+    for (const question of questions) enqueue(s, u, { thread: id, question });
+    const count = () => s.one('SELECT count(*) AS n FROM evidence_calcs').n;
+    await workJobs(s, accounts, env, send);
+    await workJobs(s, accounts, env, send);
+    assert.equal(count(), 0);
+    await workJobs(s, accounts, env, send);
+    assert.equal(count(), 1);
+    await workJobs(s, accounts, env, send);
+    assert.equal(count(), 1);
+    const replies = messages(s.db, u, id)
+      .items.filter((m) => m.role === 'assistant')
+      .map((m) => m.body);
+    assert.equal(replies[0].text, 'Привет!');
+    assert.equal(replies[1].text, 'О каком шаге воронки речь?');
+    for (const i of [0, 1, 3]) {
+      assert.equal(replies[i].calc, undefined);
+      assert.equal(replies[i].cards, undefined);
+    }
+    assert.ok(replies[2].calc);
+    assert.deepEqual(replies[2].cards, ['ctr']);
+    assert.equal(calls.length, 4);
+    assert.ok(calls.every((r) => r.tool_choice === 'auto'));
+    assert.deepEqual(
+      calls[0].messages.map((m) => m.role),
+      ['system', 'user'],
+    );
+    assert.deepEqual(calls[1].messages.slice(1, -1), [
+      { role: 'user', content: 'Привет' },
+      { role: 'assistant', content: 'Привет!' },
+    ]);
+    assert.ok(!JSON.stringify(calls).includes('Чужая переписка'));
+    assert.ok(
+      !JSON.stringify(calls[3]).includes(replies[2].text),
+      'selection mode keeps calculated figures local',
+    );
+  } finally {
+    s.close();
+  }
+});
+
+test('offline or unavailable model never opens a sales report for small talk; mixed greetings still allow analysis', async () => {
+  const s = openStore(':memory:'),
+    u = { id: 'qa', name: 'QA' },
+    accounts = { publicUser: () => u };
+  try {
+    initEvidence(s.db);
+    initWorkbench(s.db);
+    importDocs(s, doc([sales(1, 'Пример', 50)]));
+    const id = createThread(s.db, u, 'Личный');
+    const turn = async (question, env = {}) => {
+      enqueue(s, u, { thread: id, question });
+      await workJobs(s, accounts, env, async () => {
+        throw Error('offline');
+      });
+      return messages(s.db, u, id).items.at(-1).body;
+    };
+    assert.match((await turn('Привет!')).text, /привет/i);
+    assert.match((await turn('Что ты умеешь?')).text, /продакт/i);
+    assert.equal((await turn('Давай поговорим')).calc, undefined);
+    assert.match(
+      (await turn('Привет', { LLM_BACKEND: 'gemini', LLM_API_KEY: 'fixture' })).warning,
+      /локальный режим/i,
+    );
+    assert.equal(s.one('SELECT count(*) n FROM evidence_calcs').n, 0);
+    const real = await turn('Привет, сравни продажи продукта Пример');
+    assert.ok(real.calc);
+    assert.match(real.text, /недостаточно/);
+    assert.doesNotMatch(real.text, /—%/);
+  } finally {
+    s.close();
+  }
+});
 
 test('Telegram fans out once per recipient, SMTP gets one link and repeated worker ticks are idle', async () => {
   const store = openStore(':memory:'),
