@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Релизы · Помощник продакта</title><link rel="stylesheet" href="dashboard.css"></head>
+<body class="release-prototype">
+<div id="release-dashboard" lang="ru">
+  <nav class="top" aria-label="Разделы"><button data-tab="workspace">Рабочая область</button><button data-tab="releases" aria-pressed="true">Релизы</button><span class="demo-label">Демонстрационные данные</span></nav>
+  <section class="placeholder" data-slot="workspace" hidden><h2>Рабочая область</h2><p>Здесь появятся личные чаты с помощником продакта.</p><button data-tab="releases">Вернуться к релизам</button></section>
+  <section data-slot="releases">
+    <div class="toolbar"><button data-toggle="left">Список релизов</button><button data-toggle="right">Чат релиза</button></div>
+    <div class="layout">
+      <aside class="left"><h3>Список релизов</h3><div data-slot="list"></div></aside>
+      <div class="grip left-grip" role="separator" tabindex="0" aria-label="Ширина списка релизов" aria-orientation="vertical"></div>
+      <main><div class="kicker" data-slot="identity"></div><h1 data-slot="title"></h1><p class="lead" data-slot="lead"></p>
+        <div class="filters"><label>Данные на <select data-filter="date"></select></label><label>Клиенты <select data-filter="segment"><option value="all">Все</option><option value="new">Новые</option><option value="returning">Постоянные</option></select></label></div>
+        <p class="period" data-slot="period"></p><div class="cards" data-slot="charts"></div>
+      </main>
+      <div class="grip right-grip" role="separator" tabindex="0" aria-label="Ширина чата" aria-orientation="vertical"></div>
+      <aside class="right"><h3>Обсуждение релиза</h3><p class="meta" data-slot="chatId"></p><div class="chat-log" data-slot="messages" aria-live="polite"></div>
+        <form class="composer"><label>Вопрос агенту<input maxlength="400" placeholder="Что изменилось после релиза?"></label><button type="submit">Спросить</button></form><p class="meta">Примеры ответов по данным релиза</p>
+      </aside>
+    </div>
+  </section>
+</div>
+<script src="data.js"></script><script src="metrics.js"></script><script src="dashboard.js"></script>
+</body></html>

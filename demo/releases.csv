@@ -1,0 +1,3 @@
+release_id,title,activated_at,exposure_event
+R-001,Новая форма заказа,2026-10-05T07:00:00.000Z,checkout_started
+R-002,Кнопка «Скачать счёт»,2026-11-02T07:00:00.000Z,invoice_page_viewed
