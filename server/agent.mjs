@@ -45,8 +45,8 @@ export async function providerCall(env,messages,tools,choice='auto',send=fetch){
   try{response=await send(target,{method:'POST',redirect:'error',signal:AbortSignal.timeout(60000),headers:{'Content-Type':'application/json',...(env.LLM_API_KEY?{Authorization:'Bearer '+env.LLM_API_KEY}:{})},
     body:JSON.stringify({model:env.LLM_MODEL,messages,tools,tool_choice:choice})});}catch{throw Error('Модель недоступна. Проверьте подключение и параметры .env.');}
   if(!response.ok)throw Error('Провайдер модели вернул HTTP '+response.status+'.');
-  const reply=(await response.json()).choices?.[0]?.message;
-  if(!reply)throw Error('Модель вернула пустой ответ.');return reply;
+  const data=await response.json(),reply=data.choices?.[0]?.message;
+  if(!reply)throw Error('Модель вернула пустой ответ.');return {...reply,usage:{input:data.usage?.prompt_tokens,output:data.usage?.completion_tokens}};
 }
 async function apiTurn(store,a,history,question,env,send){
   const ctx=a.context,tools=apiTools(),refs=new Map(),messages=[{role:'system',content:system},
@@ -78,10 +78,10 @@ export function makeAgent(store,{env=process.env,send=fetch,alternate}={}){
   }
   function storeReview(a,decision,answer){
     const ctx=a.context,checked=reportSpec.parse(decision),ready=a.cards[a.rel.target].status==='ready'&&ctx.segment==='all';
-    if(ready&&!store.one('SELECT 1 FROM reports WHERE release=?',ctx.releaseId)){
+    if(ready&&!store.one('SELECT 1 FROM report_versions WHERE release=? AND version=?',ctx.releaseId,ctx.version)){
       const highlights=checked.highlights.filter(h=>a.cards[h.metric].status==='ready').map(h=>({...h,calc:runTool(store,'compare_metric',{...ctx,metric:h.metric}).id}));
       const source=runTool(store,'compare_metric',{...ctx,metric:a.rel.target});
-      store.db.prepare('INSERT OR IGNORE INTO reports VALUES(?,?)').run(ctx.releaseId,JSON.stringify({day:ctx.day,version:ctx.version,created:Date.now(),highlights,answer:checked.summary||a.cards[a.rel.target].caption,summaryMetric:a.rel.target,calc:source.id}));
+      store.db.prepare('INSERT OR IGNORE INTO report_versions VALUES(?,?,?)').run(ctx.releaseId,ctx.version,JSON.stringify({day:ctx.day,version:ctx.version,created:Date.now(),highlights,answer:checked.summary||a.cards[a.rel.target].caption,summaryMetric:a.rel.target,calc:source.id}));
     }
     for(const n of checked.intervals){
       if(n.start<a.first||n.end>ctx.day||n.end<=n.start)continue;
@@ -104,9 +104,9 @@ export function makeAgent(store,{env=process.env,send=fetch,alternate}={}){
     const reply=await providerCall(env,[{role:'user',content:prompt}],[tool],{type:'function',function:{name:'record_findings'}},send);
     return reportSpec.parse(JSON.parse(reply.tool_calls?.[0]?.function.arguments||'null'));
   }
-  function ask(body){return queue(body.releaseId,async()=>{
+  function ask(body,trustedActor){return queue(body.releaseId,async()=>{
     const question=name(body.question,1500),request=name(body.requestId||randomUUID(),100);
-    if(!profiles.includes(body.author))throw Error('Выберите тестовый профиль.');
+    if(body.author!==trustedActor&&!profiles.includes(body.author)||!body.author)throw Error('Выберите профиль.');
     const existing=store.one('SELECT body FROM messages WHERE release=? AND request=?',body.releaseId,request+'/a');
     if(existing)return JSON.parse(existing.body);
     const a=analysis(store,body),ctx=a.context;
@@ -122,7 +122,7 @@ export function makeAgent(store,{env=process.env,send=fetch,alternate}={}){
   });}
   return {ask,initial(input){return queue(input.releaseId,async()=>{
     const a=analysis(store,{...input,segment:'all'});
-    if(store.one('SELECT 1 FROM reports WHERE release=?',a.rel.id)||a.cards[a.rel.target].status!=='ready')return;
+    if(store.one('SELECT 1 FROM report_versions WHERE release=? AND version=?',a.rel.id,a.v.id)||a.cards[a.rel.target].status!=='ready')return;
     let decision;
     if(apiConfigured(env))decision=await review(a,'Первый полный обзор.');
     else if(env.LLM_BACKEND==='codex'&&alternate){const t=await alternate(store,a,[],'Составь первый полный обзор и выбери графики и участки.');decision={...t.decision,summary:t.answer.slice(0,1200)};}

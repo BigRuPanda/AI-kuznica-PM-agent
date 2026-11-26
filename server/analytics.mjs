@@ -112,7 +112,7 @@ export function runTool(store,op,input){
 }
 export function page(store,input){
   const a=analysis(store,input);
-  const stored=store.one('SELECT body FROM reports WHERE release=?',a.rel.id);
+  const stored=store.one('SELECT body FROM report_versions WHERE release=? AND version=?',a.rel.id,a.v.id);
   const report=stored?JSON.parse(stored.body):null;
   let overview=a.cards[a.rel.target].caption;
   if(a.rel.target===0&&a.context.segment==='all'&&a.cards[0].status==='ready'&&a.v.columns.includes('customer_segment')){

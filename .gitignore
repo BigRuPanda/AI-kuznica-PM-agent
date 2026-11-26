@@ -4,3 +4,13 @@
 node_modules/
 dist/
 var/
+__pycache__/
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+*.zip
+*.xlsx
+*.pptx
+*.docx
+*.mp4
+!submission/request-cost.xlsx

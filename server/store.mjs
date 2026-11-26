@@ -19,6 +19,7 @@ export function openStore(path=databasePath()){
     CREATE TABLE IF NOT EXISTS messages(seq INTEGER PRIMARY KEY,release TEXT REFERENCES releases(id),request TEXT NOT NULL,body TEXT NOT NULL,UNIQUE(release,request));
     CREATE TABLE IF NOT EXISTS boards(release TEXT REFERENCES releases(id),name TEXT NOT NULL,calc TEXT REFERENCES calculations(id),PRIMARY KEY(release,name,calc));
     CREATE TABLE IF NOT EXISTS notes(id TEXT PRIMARY KEY,release TEXT REFERENCES releases(id),body TEXT NOT NULL);`);
+  db.exec("CREATE TABLE IF NOT EXISTS report_versions(release TEXT,version TEXT,body TEXT,PRIMARY KEY(release,version)); INSERT OR IGNORE INTO report_versions SELECT release,json_extract(body,'$.version'),body FROM reports WHERE json_extract(body,'$.version') IS NOT NULL;");
   const one=(sql,...args)=>db.prepare(sql).get(...args);
   function tx(fn){db.exec('BEGIN IMMEDIATE');try{const r=fn();db.exec('COMMIT');return r;}catch(e){db.exec('ROLLBACK');throw e;}}
   function importCSV(input){

@@ -51,8 +51,8 @@ export async function geminiCall(env,messages,tools,choice,send,credentials=auth
   try{res=await send(url,{method:'POST',headers,redirect:'error',signal:AbortSignal.timeout(60000),body:JSON.stringify(geminiRequest(messages,tools,choice))});}
   catch{throw Error('Не удалось связаться с Google Cloud.');}
   if(!res.ok)throw Error('Google вернул HTTP '+res.status+'. '+({400:'Проверьте параметры модели и тип ключа.',401:'Проверьте аутентификацию.',403:developer?'Проверьте доступ ключа к Gemini API и модели.':'Проверьте биллинг, включение API и право aiplatform.endpoints.predict.',404:'Проверьте доступность ID модели.',429:'Исчерпана квота запросов.'}[res.status]||'Повторите запрос позже.'));
-  const parts=(await res.json()).candidates?.[0]?.content?.parts;
+  const response=await res.json(),parts=response.candidates?.[0]?.content?.parts;
   if(!parts?.length)throw Error('Gemini вернула пустой ответ.');
-  return {role:'assistant',content:parts.filter(p=>p.text&&!p.thought).map(p=>p.text).join('\n'),googleParts:parts,
+  return {role:'assistant',usage:{input:response.usageMetadata?.promptTokenCount,output:response.usageMetadata?.totalTokenCount!=null?response.usageMetadata.totalTokenCount-(response.usageMetadata.promptTokenCount||0):undefined},content:parts.filter(p=>p.text&&!p.thought).map(p=>p.text).join('\n'),googleParts:parts,
     tool_calls:parts.filter(p=>p.functionCall).map(p=>({id:p.functionCall.id||randomUUID(),type:'function',function:{name:p.functionCall.name,arguments:JSON.stringify(p.functionCall.args||{})}}))};
 }

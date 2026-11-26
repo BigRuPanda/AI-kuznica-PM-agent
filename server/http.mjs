@@ -19,7 +19,7 @@ export function application(store,{env=liveModelEnv,send=fetch}={}){
       if(p.startsWith('/api/')){
         const q=Object.fromEntries(url.searchParams);if(q.day!==undefined)q.day=Number(q.day);if(q.metric!==undefined)q.metric=Number(q.metric);
         if(req.method==='GET'){
-          if(p==='/api/journal')return json(200,{releases:store.releases(),datasets:store.datasets(),profiles,mode:mode(),model:env.LLM_MODEL||''});
+          if(p==='/api/journal')return json(200,{releases:store.releases(),datasets:store.datasets(),profiles:req.pmActor?[req.pmActor]:profiles,mode:mode(),model:env.LLM_MODEL||''});
           if(p==='/api/report')return json(200,page(store,q));
           if(p==='/api/activity'){
             store.release(q.releaseId);
@@ -34,14 +34,15 @@ export function application(store,{env=liveModelEnv,send=fetch}={}){
         let bytes=0;const chunks=[];
         for await(const c of req){bytes+=c.length;if(bytes>14_000_000)return json(413,{error:'Файл слишком велик.'});chunks.push(c);}
         const b=JSON.parse(Buffer.concat(chunks).toString('utf8'));
+        if(req.pmActor)b.author=req.pmActor;
         if(p==='/api/import')return json(200,store.importCSV(b));
         if(p==='/api/releases')return json(201,store.create(b));
         if(p==='/api/compare')return json(200,runTool(store,'compare_metric',b));
-        if(p==='/api/chat')return json(200,await agent.ask(b));
+        if(p==='/api/chat')return json(200,await agent.ask(b,req.pmActor));
         if(p==='/api/initial'){if(mode()!=='offline')await agent.initial(b);return json(200,{ok:true});}
         if(p==='/api/boards'){
           const calc=store.getCalc(b.calc),title=name(b.name,100);
-          if(!profiles.includes(b.author)||calc.op!=='build_chart'||calc.context.releaseId!==b.releaseId)throw Error('График должен принадлежать этому релизу.');
+          if((!req.pmActor&&!profiles.includes(b.author))||calc.op!=='build_chart'||calc.context.releaseId!==b.releaseId)throw Error('График должен принадлежать этому релизу.');
           store.db.prepare('INSERT OR IGNORE INTO boards VALUES(?,?,?)').run(b.releaseId,title,b.calc);
           return json(200,store.boards(b.releaseId));
         }

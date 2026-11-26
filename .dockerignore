@@ -1,0 +1,12 @@
+.git
+.env
+.env.*
+!.env.example
+node_modules
+dist
+var
+*.zip
+*.xlsx
+*.docx
+*.pptx
+*.sqlite*

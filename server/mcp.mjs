@@ -3,7 +3,16 @@ import {StdioServerTransport} from '@modelcontextprotocol/sdk/server/stdio.js';
 import {openStore} from './store.mjs';
 import {runTool} from './analytics.mjs';
 import {operations} from './tools.mjs';
-const store=openStore(),server=new McpServer({name:'release-analytics',version:'1.0.0'});
+import {dirname,join} from 'node:path';
+import {databasePath} from './config.mjs';
+import {openAccounts,workspacePath} from './accounts.mjs';
+import {teamTools} from './team-mcp.mjs';
+const access=process.env.MCP_ACCESS_TOKEN,base=databasePath();
+const accounts=access?openAccounts(join(dirname(base),'accounts.sqlite')):null;
+const actor=accounts?.bearer(access);
+if(access&&!actor)throw Error('Недействительный персональный ключ MCP');
+const store=openStore(actor?workspacePath(base,actor.space):base),server=new McpServer({name:'release-analytics',version:'2.0.0'});
+if(actor)teamTools(server,store,actor);
 const scope=process.env.RELEASE_MCP_CONTEXT?JSON.parse(process.env.RELEASE_MCP_CONTEXT):null;
 for(const [key,[description,inputSchema]] of Object.entries(operations)){
   server.registerTool(key,{description,inputSchema},async input=>{
