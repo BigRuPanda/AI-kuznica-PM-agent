@@ -45,8 +45,9 @@ export function bridgeTracker(db, user, env, send) {
   const number = (key) =>
     String(key)
       .trim()
-      .replace(/^(?:Redmine\s*)?#\s*/i, '');
+      .replace(/^(?:Redmine\s*)?[#№]\s*/i, '');
   function path(key) {
+    if (!/^\d+$/.test(number(key))) throw Error('Укажите номер задачи Redmine цифрами или возьмите точный ключ из issue_search');
     const row = visibleRows().find((r) => number(r.external) === number(key));
     if (!row) throw Error('Задача недоступна в этом рабочем пространстве');
     return '/tasks/' + encodeURIComponent(row.reference);

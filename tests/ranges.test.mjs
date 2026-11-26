@@ -178,6 +178,31 @@ function model(fn) {
     });
   };
 }
+test('reading a task status and closing comment does not request or authorize a draft', async () => {
+  const s = open();
+  try {
+    const c = op(s, a, 'create-case', { title: 'QA', product: 'Product' });
+    const t = createThread(s.db, a, 'Redmine');
+    const draft = await op(s, a, 'draft', { caseId: c.id, title: 'Check', description: 'Review' }, {});
+    const issue = await op(s, a, 'confirm', { id: draft.id }, {});
+    const prompt = { thread: t, caseId: c.id, question: 'Прочитай статус задачи и комментарий при закрытии' };
+    enqueue(s, a, prompt);
+    let n = 0;
+    await workJobs(s, { publicUser: () => a }, env, model(() =>
+      n++ ? say('Статус: Новая.') : call('issue_read', { key: issue.key })));
+    const reply = messages(s.db, a, t).items.at(-1).body;
+    assert.equal(reply.outcome, 'done');
+    assert.deepEqual(reply.steps, ['issue_read']);
+    assert.equal(n, 2);
+    enqueue(s, a, prompt);
+    await workJobs(s, { publicUser: () => a }, env, model(() =>
+      call('draft', { title: 'Unrequested task', description: 'Read only' })));
+    assert.equal(s.one('SELECT count(*) n FROM draft_actions').n, 1);
+  } finally {
+    s.close();
+  }
+});
+
 test('case follow-ups receive the displayed figures and retry an unrelated greeting', async () => {
   const s = open();
   try {

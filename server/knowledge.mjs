@@ -1,6 +1,23 @@
 import { digest } from './evidence.mjs';
 import { escapeXml } from './tracker-clients.mjs';
 
+export function issuePages(db, user, issueUrl, sharedOnly) {
+  return db.prepare(`
+    WITH linked(key) AS (
+      SELECT rp.page FROM redmine_results r JOIN redmine_result_pages rp ON rp.result=r.id
+      WHERE json_extract(r.body,'$.url')=?
+      UNION SELECT d.external FROM draft_actions d WHERE d.state IN ('done','partial')
+        AND json_extract(d.body,'$.kind')='page' AND json_extract(d.body,'$.target.local')=1
+        AND json_extract(d.body,'$.issue.url')=?
+    )
+    SELECT p.key, p.title, p.version FROM linked JOIN demo_pages p ON p.key=linked.key
+    JOIN cases c ON c.id=p.case_id
+    LEFT JOIN private_wiki_pages acl ON acl.page=p.key
+    WHERE COALESCE(json_extract(c.body,'$.owner'),'') IN ('',?)
+      AND (acl.user IS NULL OR acl.user=?) ORDER BY p.key
+  `).all(issueUrl, issueUrl, sharedOnly ? '' : user.id, sharedOnly ? '' : user.id);
+}
+
 export function excelSources(db) {
   return db
     .prepare(

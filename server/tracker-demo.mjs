@@ -25,7 +25,7 @@ export function demoClient(db, user, service, caseId, sharedOnly = false) {
     }
     function read(key) {
       const r = db.prepare('SELECT * FROM demo_pages WHERE key=?').get(key);
-      if (!r || !visiblePage(r)) throw Error('Страница недоступна');
+      if (!r || !visiblePage(r)) throw Error('Страница недоступна. Используйте ключ из поиска страниц или передайте номер Redmine в поле issueKey.');
       return { ...r, url: localHref(service, key) };
     }
     return {

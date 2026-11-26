@@ -193,6 +193,11 @@ test('verified contacts, private results, Redmine confirmation and one delivery 
     await collect();
     const reopened = await call('page_read', { key: page, local: true });
     assert.equal(reopened.version, 3);
+    assert.equal((await call('page_read', { issueKey: '№17' })).key, page);
+    assert.equal((await call('page_read', { key: '17' })).key, page);
+    assert.equal((await call('issue_read', { key: '17' })).pages[0].version, 3);
+    assert.notEqual((await post('page_read', { issueKey: '17' }, other.cookie)).status, 200);
+    assert.notEqual((await post('page_read', { issueKey: '17' }, guest.cookie)).status, 200);
     assert.match(reopened.text, /Закрытие №2/);
     assert.ok(reopened.links.some((l) => l.url === '#knowledge-source/' + version));
     assert.equal((await call('knowledge')).pages.length, 1);

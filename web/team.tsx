@@ -145,6 +145,8 @@ const stepNames: Record<string, string> = {
   issue_read: 'Прочитана задача',
   page_search: 'Найдены страницы',
   page_read: 'Прочитана страница',
+  'knowledge-sources': 'Найдены книги Excel',
+  'knowledge-source': 'Прочитаны строки Excel',
   page_draft: 'Подготовлена публикация в Confluence',
   'create-case': 'Создан личный разбор',
   set_view: 'Обновлён личный экран',
@@ -349,6 +351,9 @@ function Chat({
             ) : (
               <p>{m.body.text}</p>
             )}
+            {m.body.readSources?.map((source) => (
+              <div key={source.url}><a href={source.url}>{source.label}</a></div>
+            ))}
             {m.body.materials?.map((item) => (
               <MaterialCard key={item.id} item={item} />
             ))}

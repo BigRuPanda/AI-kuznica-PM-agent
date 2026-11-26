@@ -34,7 +34,6 @@ import {
 import { bindTelegram, contactAction, initContacts } from './notification-contacts.mjs';
 import { collectClosures, knowledge } from './redmine-bridge.mjs';
 import { syncWatches } from './redmine-watch.mjs';
-import { excelSources, sourceRows } from './knowledge.mjs';
 import { python, metrika, mail, telegram } from './connectors.mjs';
 import { preview, revisePage } from './tracker-workflow.mjs';
 import { configure, connectionInfo, personalConnection, finishOAuth } from './tracker-connections.mjs';
@@ -354,8 +353,6 @@ export function createTeamApp({
         }
         if (op === 'mcp-key') return reply(200, { key: accounts.issueKey(user.id) });
         if (op === 'knowledge') return reply(200, knowledge(db, user));
-        if (op === 'knowledge-sources') return reply(200, excelSources(db));
-        if (op === 'knowledge-source') return reply(200, sourceRows(db, b.version, b.offset));
         if (['bind', 'contacts', 'contact-unlink', 'email-request', 'email-confirm'].includes(op))
           return reply(
             200,

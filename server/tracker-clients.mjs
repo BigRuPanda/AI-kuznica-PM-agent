@@ -115,7 +115,7 @@ export function redmine(target, token, send) {
   async function read(key) {
     const p = await project();
     const { issue } = await call(
-      '/issues/' + numeric(String(key).trim().replace(/^#/, '')) + '.json?include=journals,allowed_statuses',
+      '/issues/' + numeric(String(key).trim().replace(/^(?:Redmine\s*)?[#№]\s*/i, '')) + '.json?include=journals,allowed_statuses',
     );
     if (String(issue.project.id) !== String(p.id)) throw Error('Задача другого проекта');
     return item(issue);

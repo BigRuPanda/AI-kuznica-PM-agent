@@ -136,6 +136,7 @@ export type Msg = {
     personal?: { caseId: string; cards: string[]; full?: boolean; control?: string; pin?: boolean };
     rounds?: number;
     steps?: string[];
+    readSources?: { url: string; label: string }[];
     full?: boolean;
     sourceQuery?: string;
     cards?: string[];

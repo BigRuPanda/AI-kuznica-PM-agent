@@ -79,7 +79,7 @@ function concise(name, r) {
 const mutationRequests = {
   page_draft: /опублик|созда|подготов|обнов|измен|добав|замен|publish|update|create|edit/i,
   draft:
-    /измен|обнов|коммент|назнач|статус|приоритет|подготов|состав|заве[дс]|созда|оформи|сдела|запиш|отправ|черновик.{0,15}(?:нужен|для)|draft|create|prepare/i,
+    /измени|изменить|обнови|обновить|прокомментируй|оставь|добавь|назначь|назначить|установи|поставь|переведи|смени|закрой|возобнови|подготов|составь|заве[дс]|создай|создать|оформи|сдела|запиш|отправ|черновик.{0,15}(?:нужен|для)|draft|create|prepare|update|assign/i,
   'create-case': /разбер|расслед|созда|заве[дс]|подготов|оформи|сохрани|черновик|create|investigate|prepare/i,
   append_case: /дополни|добав|сохрани|запиш|append|save/i,
   set_view: /добав|покаж|построй|убери|оставь|закреп|верни|измени|открой|show|plot|pin|add/i,
@@ -99,6 +99,14 @@ function authorizedWrite(op, question) {
 }
 function note(state, op, r) {
   if (r.error) return;
+  if (['issue_read', 'page_read', 'knowledge-source'].includes(op)) {
+    const url = op === 'knowledge-source' ? '#knowledge-source/' + r.version : r.url;
+    const label = op === 'issue_read' ? 'Задача ' + r.key : r.file || r.title;
+    if (/^(?:https?:\/\/|#(?:demo-issue|demo-page|knowledge-source)\/)/i.test(url || '')) {
+      const sources = (state.readSources ??= []);
+      if (!sources.some(s => s.url === url)) sources.push({ url, label });
+    }
+  }
   if (op === 'funnel') {
     state.funnelChecked = r.available;
     state.funnelChart = r.chart;
@@ -164,6 +172,7 @@ function artifactResult(state, text, warning) {
     personal: state.personal,
     rounds: state.round,
     steps: state.completed,
+    readSources: state.readSources,
   };
 }
 export async function runAssistant(

@@ -176,6 +176,7 @@ test('local complete workflow, participant isolation, target binding, links and 
     assert.match(page.text, /Новый текст/);
     assert.equal(page.links[0].url, i.url);
     const issue = await read('issue_read', { key: i.key });
+    assert.equal((await read('page_read', { issueKey: i.key })).key, p.key);
     assert.equal(issue.status, 'В работе');
     assert.equal(issue.comments.length, 2);
     assert.ok(issue.comments.some((c) => c.text.includes(p.url)));
@@ -225,6 +226,7 @@ test('Redmine personal identity, project checks, choices, uncertain create and j
       m.send,
     );
     await assert.rejects(s.run('issue_read', { key: i.key }, peer), /403/);
+    assert.equal((await s.run('issue_read', { key: '№' + i.key })).key, i.key);
     assert.throws(() => s.run('issue_search', { query: 'Issue' }, owner, true), /личный чат/);
     m.issues[0].project.id = 12;
     await assert.rejects(s.run('issue_read', { key: i.key }), /другого проекта/);
