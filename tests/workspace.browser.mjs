@@ -284,7 +284,16 @@ test('Softline workspace, upgrade and browser journeys', async t => {
     await submit(member,'pin-material',()=>role(dlg,'Добавить в разбор').click());
     await go(member,caseRoute);
     await member.locator('a[href="#material/'+fixture.chart+'"]').click();
-    await role(member.getByRole('dialog'),'Приложить к сообщению').click();
+    const detail = member.getByRole('dialog');
+    const intact = await detail.locator('td').evaluateAll(cells => cells
+      .filter(cell => /^[-+]?\d+(?:[,.]\d+)?$/.test(cell.textContent.trim()))
+      .every(cell => {
+        const range=document.createRange();
+        range.selectNodeContents(cell);
+        return range.getClientRects().length <= 1;
+      }));
+    assert.ok(intact, 'Числа таблицы должны помещаться на одной строке');
+    await role(detail,'Приложить к сообщению').click();
     await visible(member.locator('.chat-composer .range-attachment'));
     assert.ok(await member.evaluate(()=>document.documentElement.scrollWidth <= innerWidth));
     await go(admin,href.slice(1));

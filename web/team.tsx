@@ -1830,7 +1830,10 @@ function Workspace({ user, onLogout }: { user: User; onLogout: () => void }) {
             <Icon name="settings" /><span className="menu-label">Настройки</span>
           </a>
           <ThemeSwitch />
-          <span className="session-role">{user.role === 'judge' ? 'Демо · жюри' : user.role === 'admin' ? 'Администратор' : 'Участник'}</span>
+          <span className="session-role" title={user.role === 'admin' ? 'Администратор' : undefined}>
+            {user.role === 'admin' ? <><span className="full-role">Администратор</span><span className="short-role">Админ</span></> :
+              user.role === 'judge' ? 'Демо · жюри' : 'Участник'}
+          </span>
           <small>{user.name}</small>
           <button
             className="menu-command"

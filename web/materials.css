@@ -84,6 +84,12 @@
   min-width: 0;
   overflow-wrap: anywhere;
 }
+.material-detail .table-scroll :is(th, td) {
+  overflow-wrap: normal;
+  word-break: normal;
+}
+.material-detail .table-scroll th { white-space: nowrap; }
+.material-detail .table-scroll table { min-width: 100%; }
 .material-detail h2 {
   margin: 0.8rem 0;
 }

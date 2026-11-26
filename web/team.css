@@ -905,10 +905,15 @@ p {
 }
 
 .session-role { align-self: center; font-size: .78rem; font-weight: 600; color: var(--accent-text); overflow-wrap: anywhere; }
+.short-role { display: none; }
+.side[data-compact-logo='true'] .full-role { display: none; }
+.side[data-compact-logo='true'] .short-role { display: inline; }
 .modal > form, .modal details[open] label { display: grid; gap: .55rem; }
 .modal :is(textarea, select, input:not([type=checkbox])) { max-width: 100%; }
 .material-picker select { width: 100%; }
 @media (max-width: 560px) {
   .side-bottom { flex-wrap: wrap; justify-content: flex-end; }
-  .session-role { max-width: 8em; font-size: .69rem; }
+  .session-role { white-space: nowrap; font-size: .75rem; }
+  .full-role { display: none; }
+  .short-role { display: inline; }
 }
