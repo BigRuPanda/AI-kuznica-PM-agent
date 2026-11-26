@@ -525,6 +525,10 @@ test('case pins are idempotent, personal, durable and removable without deleting
     const preview = (await post('material', { id, preview: true }, a.cookie)).b;
     assert.equal(preview.sections, undefined);
     assert.ok(preview.plot.lines[0].points.length);
+    assert.equal((await post('delete-thread', {thread}, a.cookie)).status, 200);
+    assert.equal((await post('material', {id}, a.cookie)).status, 200);
+    assert.equal((await post('pin-material', {id, caseId:made.b.caseId, remove:true}, a.cookie)).status, 200);
+    assert.equal((await post('material', {id}, a.cookie)).status, 200);
   } finally {
     await app.close();
   }

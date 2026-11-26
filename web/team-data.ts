@@ -8,7 +8,7 @@ export type Signal = {
   count: number;
   threshold: number;
 };
-export type Watch = { state: string; weeks?: number; actual?: number };
+export type Watch = { state: string; weeks: number; controlWeeks: number; start: string; end: string; actual?: number; ctrl?: number };
 export type Case = {
   id: string;
   product: string;
@@ -19,12 +19,13 @@ export type Case = {
     owner?: string;
     origin?: { calc: string; cards: string[]; full: boolean };
     release?: string;
-    watch?: unknown;
+    watch?: { deployed: string; target: number; control: string };
+    notes?: { author: string; created: number; text: string; rangeId?: string }[];
     plan?: { hypothesis: string; metric: string; baseline: string; control: string; success: string };
   };
   effect?: Watch;
 };
-export type Thread = { id: string; title: string; scope: string };
+export type Thread = { id: string; title: string; scope: string; canRename: boolean; canDelete: boolean };
 export type Source = { file: string; versions: number; updated: number };
 export type Release = {
   release_id: string;

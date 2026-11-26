@@ -1,5 +1,4 @@
 import React,{useEffect,useRef,useState} from 'react';
-import {createRoot} from 'react-dom/client';
 import {api,calcHref,contextQuery,date,dayDate,fmt,metricNames,segmentNames} from './types';
 import type {Release,Report,Journal,Segment,Message,Board} from './types';
 import {MetricCard} from './charts';
@@ -29,21 +28,36 @@ function Headline({report:r}:{report:Report}){
   const supportingFact=explanation.split(/(?<=[.!?])\s+(?=[А-ЯЁ])/u).at(-1);
   return <p className="lead">{subjects[c.metric]}{change}.{supportingFact&&<span>{supportingFact.replace(/\s+%/gu,'%')}</span>}</p>;
 }
-function App(){
-  const [hash,setHash]=useState(location.hash.slice(1)),[journal,load]=useState<Journal|null>(null),[error,fail]=useState('');
-  const [profile,setProfile]=useState(sessionStorage.getItem('release-profile')||'Анна'),[form,setForm]=useState<'import'|'release'|null>(null),[generation,bump]=useState(0);
-  useEffect(()=>{const f=()=>setHash(location.hash.slice(1));window.addEventListener('hashchange',f);return()=>window.removeEventListener('hashchange',f);},[]);
-  useEffect(()=>{api<Journal>('journal').then(load).catch(e=>fail(e.message));},[generation]);
-  const [kind,part]=hash.split('/'),id=kind==='release'?part:journal?.releases.find(r=>r.id===stored('last'))?.id??journal?.releases[0]?.id;
-  useEffect(()=>{if(id&&journal?.releases.some(r=>r.id===id))remember('last',id);},[id,journal]);
-  return <div className="app"><nav aria-label="Разделы"><div><a className={kind==='workspace'?'active':''} aria-current={kind==='workspace'?'page':undefined} href="#workspace">Рабочая область</a><a className={kind!=='workspace'?'active':''} aria-current={kind!=='workspace'?'page':undefined} href={'#release/'+(id||'')}>Релизы</a></div>
-    <label className="profile"><Avatar name={profile}/><select aria-label="Профиль" value={profile} onChange={e=>{setProfile(e.target.value);sessionStorage.setItem('release-profile',e.target.value);}}>{(journal?.profiles||['Анна','Дмитрий']).map(p=><option key={p}>{p}</option>)}</select></label></nav>
-    {error&&<p role="alert">{error}</p>}
-    {kind==='workspace'?<div className="placeholder"><h1>Рабочая область</h1><p>Здесь появятся личные чаты с помощником продакта.</p><a href="#releases">Вернуться к релизам</a></div>:
-    kind==='calc'?<CalculationPage id={part}/>:journal&&id?<Releases key={id} id={id} journal={journal} author={profile} generation={generation} onForm={setForm}/>:<p className="page">Загружается журнал…</p>}
-    {form&&journal&&<DataForm kind={form} journal={journal} close={()=>setForm(null)} onDone={next=>{setForm(null);bump(v=>v+1);if(next)location.hash='release/'+next;}}/>}</div>;
+export function ReleaseAnalytics({ route, requestedId, author, admin }: {
+  route: string; requestedId?: string; author: string; admin: boolean;
+}) {
+  const [journal, setJournal] = useState<Journal | null>(null);
+  const [error, fail] = useState('');
+  const [form, setForm] = useState<'import' | 'release' | null>(null);
+  const [generation, bump] = useState(0);
+  useEffect(() => {
+    let active = true;
+    api<Journal>('journal').then(data => { if (active) setJournal(data); })
+      .catch(e => { if (active) fail(e.message); });
+    return () => { active = false; };
+  }, [generation]);
+  const id = route === 'release' ? requestedId :
+    journal?.releases.find(r => r.id === stored('last'))?.id || journal?.releases[0]?.id;
+  useEffect(() => {
+    if (id && journal?.releases.some(r => r.id === id)) remember('last', id);
+  }, [id, journal]);
+  return <section className="release-workspace">
+    <a className="crumb" href="#releases-list">← Журнал релизов</a>
+    {error && <p role="alert">{error}</p>}
+    {route === 'calc' ? <CalculationPage id={requestedId || ''}/> :
+      journal && id ? <Releases key={id} id={id} journal={journal} author={author}
+        generation={generation} onForm={admin ? setForm : undefined}/> :
+      <p role="status">{journal ? 'В журнале пока нет релизов.' : 'Загрузка журнала…'}</p>}
+    {admin && form && journal && <DataForm kind={form} journal={journal} close={() => setForm(null)}
+      onDone={next => { setForm(null); bump(n => n + 1); if (next) location.hash = 'release/' + next; }}/>}
+  </section>;
 }
-function Releases({id,journal,author,generation,onForm}:{id:string;journal:Journal;author:string;generation:number;onForm:(s:'import'|'release')=>void}){
+function Releases({id,journal,author,generation,onForm}:{id:string;journal:Journal;author:string;generation:number;onForm?:(s:'import'|'release')=>void}){
   const [day,setDay]=useState<number|undefined>(stored(id+'/day')?Number(stored(id+'/day')):undefined),[seg,setSeg]=useState<Segment>((stored(id+'/seg')||'all') as Segment);
   const [r,setReport]=useState<Report|null>(null),[error,fail]=useState(''),[metric,select]=useState<number|null>(null);
   const [messages,setMessages]=useState<Message[]>([]),[boards,setBoards]=useState<Board[]>([]),[board,setBoard]=useState(''),[question,write]=useState(''),[busy,wait]=useState(false);
@@ -134,8 +148,8 @@ function Releases({id,journal,author,generation,onForm}:{id:string;journal:Journ
   return <div className="layout" data-pane={pane} style={{'--lw':left?lw+'px':'44px','--rw':right?rw+'px':'44px','--lg':left?'6px':'1px','--rg':right?'6px':'1px'} as React.CSSProperties}>
     <aside className={'sidebar'+(!left&&!narrow?' folded':'')} aria-label="Список релизов">{sideHeading('left','Релизы')}
     <div className="side-body" id="left-content"><div className="release-list">{journal.releases.map(v=><a href={'#release/'+v.id} key={v.id} aria-current={id===v.id?'page':undefined} className={'release-link '+(id===v.id?'chosen':'')} onClick={()=>setPane('main')}><small>{v.id} · {date(v.launch)}</small><strong>{v.title}</strong></a>)}</div>
-    <div className="side-actions"><button onClick={()=>onForm('release')}><Icon name="plus"/>Добавить релиз</button><button onClick={()=>onForm('import')}><Icon name="download"/>Импорт CSV</button></div></div></aside>{left&&grip('left')}
-    <main className="dashboard"><div className="report-head"><div className="mobile-switch"><button onClick={()=>toggle('left')}>‹ Список релизов</button><button onClick={()=>toggle('right')}>Обсуждение ›</button></div>
+    {onForm&&<div className="side-actions"><button onClick={()=>onForm('release')}><Icon name="plus"/>Добавить релиз</button><button onClick={()=>onForm('import')}><Icon name="download"/>Импорт CSV</button></div>}</div></aside>{left&&grip('left')}
+    <section className="dashboard" aria-label="Аналитика релиза"><div className="report-head"><div className="mobile-switch"><button onClick={()=>toggle('left')}>‹ Список релизов</button><button onClick={()=>toggle('right')}>Обсуждение ›</button></div>
     <small className="eyebrow">{id}{rel?' · '+date(rel.launch):''}{r?' · '+({ready:'Разбор готов',missing:'Нужны данные',preliminary:'Предварительный разбор'}[r.cards[r.release.target].status]):''}</small><h1>{rel?.title||'Релиз'}</h1>
     {error&&<p role="alert" className="error">{error}</p>}
     {r&&<Headline report={r}/>}</div>
@@ -147,7 +161,7 @@ function Releases({id,journal,author,generation,onForm}:{id:string;journal:Journ
     {r.report?.summaryMetric===r.release.target&&r.report.version===r.context.version&&<details><summary>Первый разбор · {dayDate(r.release.launch,r.report.day)}</summary><Answer text={r.report.answer}/><a href={calcHref(r.report.calc)}>Открыть расчёт</a></details>}</details></div>
     {board?<section><h2>{board}</h2>{boards.filter(b=>b.name===board).map(b=><SavedChart key={b.calc} id={b.calc}/>)}</section>:<>
     <p className="period">Сравнение за семь суток до и после запуска. Границы периодов в {clock.format(r.release.launch)} МСК.</p>
-    {r.cards.map(c=><MetricCard key={r.context.version+'/'+seg+'/'+r.context.day+'/'+c.metric} card={c} report={r} select={()=>select(c.metric)}/>)}</>}</>:!error&&<p>Загружаем расчёты…</p>}</main>
+    {r.cards.map(c=><MetricCard key={r.context.version+'/'+seg+'/'+r.context.day+'/'+c.metric} card={c} report={r} select={()=>select(c.metric)}/>)}</>}</>:!error&&<p>Загружаем расчёты…</p>}</section>
     {right&&grip('right')}<aside className={'thread'+(!right&&!narrow?' folded':'')} aria-label="Обсуждение релиза">{sideHeading('right','Обсуждение релиза')}
       <div className="thread-body" id="right-content"><small className="thread-id">{id} · общая ветка</small>
       <div className="chat" ref={chatLog} onScroll={e=>{const el=e.currentTarget;followChat.current=el.scrollHeight-el.scrollTop-el.clientHeight<28;}}><div className="chat-flow" ref={chatFlow}>
@@ -161,4 +175,3 @@ function Releases({id,journal,author,generation,onForm}:{id:string;journal:Journ
       <button className="primary send" aria-label="Отправить вопрос" title="Отправить вопрос" disabled={!r||busy||!question.trim()}><Icon name="send"/></button></div></form></footer></div>
     </aside></div>;
 }
-createRoot(document.getElementById('root')!).render(<App/>);

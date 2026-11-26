@@ -7,6 +7,32 @@ export function initMaterials(db) {
     CREATE TABLE IF NOT EXISTS case_materials(user TEXT,case_id TEXT,material TEXT REFERENCES materials(id),PRIMARY KEY(user,case_id,material));
     CREATE TABLE IF NOT EXISTS material_case_requests(user TEXT,request TEXT,case_id TEXT,PRIMARY KEY(user,request));
     CREATE TABLE IF NOT EXISTS job_research(job TEXT PRIMARY KEY,body TEXT NOT NULL);`);
+  if (!db.prepare("SELECT 1 FROM settings WHERE key='personal_material_access_v1'").get()) {
+    db.exec('BEGIN IMMEDIATE');
+    try {
+      for (const pin of db.prepare('SELECT DISTINCT user,material FROM case_materials').all())
+        retainMaterial(db, pin.user, pin.material);
+      db.exec(`INSERT OR IGNORE INTO snapshot_access
+        SELECT json_extract(body,'$.origin.calc'),'user',json_extract(body,'$.owner') FROM cases
+        WHERE json_type(body,'$.origin.calc')='text' AND json_type(body,'$.owner')='text';
+        INSERT OR IGNORE INTO settings VALUES('personal_material_access_v1','true'); COMMIT`);
+    } catch (error) {
+      db.exec('ROLLBACK');
+      throw error;
+    }
+  }
+}
+
+// A personal pin keeps the frozen material tree, including nested charts. Its
+// backing calculation can contain other private rows and has its own access rules.
+export function retainMaterial(db, userId, materialId) {
+  db.prepare(`WITH RECURSIVE tree(id) AS (
+      SELECT id FROM materials WHERE id=?
+      UNION
+      SELECT json_extract(child.value,'$.id') FROM tree
+        JOIN materials m ON m.id=tree.id JOIN json_each(m.body,'$.children') child
+    ) INSERT OR IGNORE INTO snapshot_access(id,scope,ref)
+      SELECT id,'user',? FROM tree WHERE id IS NOT NULL`).run(materialId, userId);
 }
 
 export function materialRef(id, m) {
@@ -39,18 +65,20 @@ export function materialPreview(m) {
   return { ...materialRef(m.id, m), product: m.product, plot };
 }
 
-export function attachedMaterials(db, user, ids = [], shared = false, publishTo) {
+export function attachedMaterials(db, user, ids = [], conversation, share = false) {
   if (!Array.isArray(ids) || ids.length > 8) throw Error('Можно приложить до восьми материалов');
-  const seen = new Set();
-  function publish(id) {
-    if (seen.has(id)) return;
-    seen.add(id);
-    const m = readMaterial(db, user, id);
-    for (const child of m.children || []) publish(child.id);
-    grant(db, id, 'thread', publishTo);
+  const sharedOnly = conversation.scope === 'group' && !share;
+  const seen = new Map();
+  function attach(id) {
+    if (seen.has(id)) return seen.get(id);
+    const m = readMaterial(db, user, id, sharedOnly);
+    const ref = materialRef(id, m);
+    seen.set(id, ref);
+    for (const child of m.children || []) attach(child.id);
+    grant(db, id, 'thread', conversation.id);
+    return ref;
   }
-  if (shared && publishTo) for (const id of ids) publish(id);
-  return [...new Set(ids)].map((id) => materialRef(id, readMaterial(db, user, id, shared)));
+  return [...new Set(ids)].map(attach);
 }
 
 // Publish exactly the visible chart rows. The backing case may contain private notes or other periods.

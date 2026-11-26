@@ -7,6 +7,22 @@
   const storageKey = 'softline-release-preview-v1';
   const slot = name => root.querySelector('[data-slot="'+name+'"]');
   const find = selector => root.querySelector(selector);
+  const themeButton = find('[data-theme-toggle]');
+  const systemTheme = matchMedia('(prefers-color-scheme: dark)');
+  let preference;
+  try { preference = localStorage.getItem('pm-theme'); } catch {}
+  function applyTheme() {
+    const dark = preference ? preference === 'dark' : systemTheme.matches;
+    document.documentElement.dataset.theme = dark ? 'dark' : 'light';
+    themeButton.setAttribute('aria-pressed', String(dark));
+  }
+  themeButton.onclick = () => {
+    preference = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark';
+    try { localStorage.setItem('pm-theme', preference); } catch {}
+    applyTheme();
+  };
+  systemTheme.addEventListener('change', applyTheme);
+  applyTheme();
   const layout = find('.layout');
   let saved = {};
   try { saved = JSON.parse(localStorage.getItem(storageKey)) || {}; } catch {}
@@ -147,9 +163,9 @@
     ['Продлено вовремя','Подписок с наступившим сроком']
   ];
   const versionLines = [
-    {key:'all',label:'Все',color:'#30343b',weight:3.6},
-    {key:'old',label:'Старая версия',color:'#707580',weight:2,dash:'6 4'},
-    {key:'new',label:'Новая версия',color:'#a20c32',weight:2}
+    {key:'all',label:'Все',color:'var(--fg)',weight:3.6},
+    {key:'old',label:'Старая версия',color:'var(--series-control)',weight:2,dash:'6 4'},
+    {key:'new',label:'Новая версия',color:'var(--series-main)',weight:2}
   ];
   const rowUnits = ['компаний','счетов','оплат','заказов','подписок'];
   const basisNames = ['Оплатили / компаний','Оплачено / счетов','Оплат','Сумма / заказов','Продлено / подписок'];
@@ -293,7 +309,7 @@
     const n=report.days.length, edge=d=>(d+7)*1000/n;
     if(i<=1){
       report.days.forEach((day,j)=>{
-        if(report.daily[j][i].pending)add('rect',{x:edge(day),y:8,width:1000/n,height:84,fill:'#eeeff2'});
+        if(report.daily[j][i].pending)add('rect',{x:edge(day),y:8,width:1000/n,height:84,fill:'var(--surface-hover)'});
       });
     }
     if(mark)add('rect',{x:edge(0),y:8,width:edge(7)-edge(0),height:84,class:'band'});
@@ -306,7 +322,7 @@
       axis.style.top=y+'%';plot.append(axis);
     }
     const launch=edge(0);
-    add('line',{x1:launch,x2:launch,y1:4,y2:95,stroke:'#a20c32','stroke-dasharray':'3 4','vector-effect':'non-scaling-stroke'});
+    add('line',{x1:launch,x2:launch,y1:4,y2:95,stroke:'var(--series-main)','stroke-dasharray':'3 4','vector-effect':'non-scaling-stroke'});
     const visible=new Set(lines.map(line=>line.key)),legend=make('div',undefined,'series-legend');
     legend.setAttribute('role','group');legend.setAttribute('aria-label','Ряды по версиям интерфейса');
     lines.forEach((line,seriesIndex)=>{

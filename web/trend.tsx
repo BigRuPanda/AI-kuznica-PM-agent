@@ -5,7 +5,7 @@ import {calcHref,dayDate,fmt} from './types';
 import {eventSample,metricSample} from './metric-values';
 
 export const lines:Record<string,{title:string;color:string}>={
-  all:{title:'Все',color:'#37373b'},old:{title:'Старая версия',color:'#81818a'},new:{title:'Новая версия',color:'#a20c32'}
+  all:{title:'Все',color:'var(--fg)'},old:{title:'Старая версия',color:'var(--series-control)'},new:{title:'Новая версия',color:'var(--series-main)'}
 };
 type Point={value:number|null;n:number;d?:number;pending?:number;both?:number};
 type Mark={start:number;end:number;reason:string;calc:string};

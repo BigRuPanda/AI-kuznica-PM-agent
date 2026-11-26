@@ -15,12 +15,12 @@
   border-inline-start: 3px solid;
 }
 .tracker-diff del {
-  color: #79383a;
-  background: #fcf1ef;
+  color: var(--accent-text);
+  background: var(--accent-soft);
 }
 .tracker-diff ins {
-  color: #28583d;
-  background: #eef7f0;
+  color: var(--positive);
+  background: var(--positive-bg);
   text-decoration: none;
 }
 .tracker-preview > a {

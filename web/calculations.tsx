@@ -42,16 +42,16 @@ export function SavedChart({id,author,suggested,onSave,preview=false}:{id:string
     <label>Дашборд релиза<input value={board} onChange={e=>{setBoard(e.target.value);setState('');}} list={listId} required maxLength={100}/></label>
     <datalist id={listId}>{suggested?.map(s=><option key={s}>{s}</option>)}</datalist>
     <button disabled={state==='Сохранение…'||state==='Сохранено'}>Сохранить в релиз</button><small role="status">{state}</small></form>}</div>;
-  if(!preview)return content;
-  return <><button className="chart-preview" type="button" aria-haspopup="dialog" aria-label={'Раскрыть график: '+calc.result.title} aria-describedby={listId+'-summary'} onClick={()=>setOpen(true)}>
+  if(!preview)return <div className="release-chart">{content}</div>;
+  return <div className="release-chart"><button className="chart-preview" type="button" aria-haspopup="dialog" aria-label={'Раскрыть график: '+calc.result.title} aria-describedby={listId+'-summary'} onClick={()=>setOpen(true)}>
     <span className="preview-line"><span>{calc.result.title}</span><Icon name="expand"/></span>
     <span id={listId+'-summary'}><ChartSummary chart={calc.result} launch={calc.launch} day={calc.context.day}/></span><Sparkline chart={calc.result} launch={calc.launch}/>
-  </button>{open&&<Dialog title={calc.result.title} wide close={()=>setOpen(false)}>{content}</Dialog>}</>;
+  </button>{open&&<Dialog title={calc.result.title} wide close={()=>setOpen(false)}><div className="release-chart">{content}</div></Dialog>}</div>;
 }
 export function CalculationPage({id}:{id:string}){
   const {calc,error}=useCalculation(id);
-  if(!calc)return <section className="page"><a href="#">Журнал релизов</a><p>{error||'Открываем расчёт…'}</p></section>;
-  return <main className="proof-page"><a href={'#release/'+calc.context.releaseId}>← К релизу {calc.context.releaseId}</a><h1>Сохранённый расчёт</h1>
+  if(!calc)return <section className="page"><a href="#releases">Журнал релизов</a><p>{error||'Открываем расчёт…'}</p></section>;
+  return <section className="proof-page"><a href={'#release/'+calc.context.releaseId}>← К релизу {calc.context.releaseId}</a><h1>Сохранённый расчёт</h1>
     <p>{segmentNames[calc.context.segment]} · срез на {dayDate(calc.launch,calc.context.day)} · версия данных {calc.context.version.slice(0,10)}</p>
     {calc.op!=='interval'&&<p className="muted">До запуска {dayDate(calc.launch,-7)} – {dayDate(calc.launch,0)} · {calc.context.day?'после запуска '+dayDate(calc.launch,0)+' – '+dayDate(calc.launch,Math.min(calc.context.day,7)):'срез на момент запуска'}</p>}
     {calc.op==='build_chart'&&<CustomChart calcId={calc.id} version={calc.context.version} chart={calc.result} launch={calc.launch} day={calc.context.day}/>}
@@ -59,5 +59,5 @@ export function CalculationPage({id}:{id:string}){
     {calc.op==='breakdown'&&Object.entries(calc.result).map(([k,c])=><section key={k}><h2>{segmentNames[k as keyof typeof segmentNames]}</h2><p>{c.title} · {c.formula} {c.reason}</p><Comparisons series={c.series} unit={c.unit} metric={calc.context.metric}/></section>)}
     {calc.op==='funnel'&&<><h2>Шаги воронки</h2><p>{calc.result.definition}</p>{calc.result.missing.length>0&&<p>Нужны {calc.result.missing.join(', ')}</p>}{calc.result.steps.map(s=><p key={s.period}>{s.period==='before'?'До':'После'} · начали {s.checkout} → выставили счёт {s.invoiced} → оплатили {s.paid}</p>)}</>}
     {calc.op==='interval'&&<><h2>{calc.result.title}</h2><p>{calc.result.reason}</p><table className="numbers"><thead><tr><th>Дата</th><th>Значение</th><th>Выборка</th></tr></thead><tbody>{calc.result.rows.map((r,j)=><tr key={j}><td>{dayDate(calc.launch,calc.result.start+j)}</td><td>{fmt(r.value,calc.result.unit)}</td><td>{metricSample(r,calc.result.metric??calc.context.metric)??'—'}</td></tr>)}</tbody></table></>}
-  </main>;
+  </section>;
 }

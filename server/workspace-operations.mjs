@@ -348,7 +348,10 @@ export function workspaceOperation(
       thread(db, user, m.thread);
       const r = JSON.parse(m.body);
       if (r.product !== product) throw Error('Другой продукт');
-      origin = { calc: r.calc, cards: r.cards, full: r.full };
+      if (r.calc) {
+        access(db, user, r.calc);
+        origin = { calc: r.calc, cards: r.cards || ['summary', 'trend'], full: !!r.full };
+      }
     }
     const key = randomUUID();
     db.prepare('INSERT INTO cases VALUES(?,?,?,?,?)').run(
@@ -358,11 +361,15 @@ export function workspaceOperation(
       'Исследуем',
       JSON.stringify({ owner: user.id, responsible: user.name, release: release || null, plan, origin }),
     );
+    if (origin) grant(db, origin.calc, 'user', user.id);
     return { id: key, title, product };
   }
   if (op === 'append_case') {
     const c = current();
-    if (b.rangeId) access(db, user, b.rangeId, !c.body.owner);
+    if (b.rangeId) {
+      access(db, user, b.rangeId, !c.body.owner);
+      grant(db, b.rangeId, c.body.owner ? 'user' : 'case', c.body.owner || c.id);
+    }
     c.body.notes = [
       ...(c.body.notes || []),
       { author: user.name, text: b.note, rangeId: b.rangeId, created: Date.now() },
@@ -569,7 +576,7 @@ export function workspaceOperation(
         user.id,
         JSON.stringify(body),
       );
-      return { id: key, recipient: 'Команда Store', ...body };
+      return { id: key, recipient: thread(db, user, 'group').title, ...body };
     }
     const key = digest(JSON.stringify([user.id, body]));
     return store.tx(() => commitPublication(store, user, key, body));

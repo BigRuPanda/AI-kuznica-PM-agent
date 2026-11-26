@@ -377,7 +377,7 @@ export function effect(db, c) {
   const sample = collect(c.product),
     peer = collect(plan.control);
   if (sample.length < 4 || peer.length < 4)
-    return { state: 'Ожидаем данные после исправления', weeks: sample.length, start, end };
+    return { state: 'Ожидаем данные после исправления', weeks: sample.length, controlWeeks: peer.length, start, end };
   const actual = avg(sample),
     ctrl = delta(avg(peer), plan.controlBase);
   return {
@@ -388,6 +388,8 @@ export function effect(db, c) {
           ? 'Цель достигнута'
           : 'Пересмотреть гипотезу',
     actual,
+    weeks: sample.length,
+    controlWeeks: peer.length,
     ctrl,
     start,
     end,

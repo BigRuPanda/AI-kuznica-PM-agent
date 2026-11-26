@@ -504,6 +504,7 @@ function PageForm({
   );
 }
 export function Tracking({
+  headingRef,
   caseId,
   product,
   title,
@@ -518,6 +519,7 @@ export function Tracking({
   title: string;
   conclusion: string;
   home: Home;
+  headingRef?: React.Ref<HTMLHeadingElement>;
   drafts: TrackerPreview[];
   action: Action;
   reload: () => Promise<void>;
@@ -549,8 +551,8 @@ export function Tracking({
   const site = home.integrations[tab];
   const latest = drafts.find((d) => d.kind === 'issue' && d.state === 'done')?.receipt;
   return (
-    <section className="paper">
-      <h3>Задачи и документация</h3>
+    <section className="paper task-panel">
+      <h3 ref={headingRef} tabIndex={-1}>Задачи и документация</h3>
       <div className="toolbar">
         {(['redmine', 'confluence'] as const).map((t) => (
           <button aria-pressed={t === tab} key={t} onClick={() => select(t)}>

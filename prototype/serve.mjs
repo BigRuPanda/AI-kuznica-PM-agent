@@ -3,6 +3,7 @@ import { readFile } from 'node:fs/promises';
 
 const assets = new Map([
   ['/', ['index.html', 'text/html']],
+  ['/web/palette.css', ['../web/palette.css', 'text/css']],
   ['/dashboard.css', ['dashboard.css', 'text/css']],
   ['/dist/report-fonts.css', ['../dist/report-fonts.css', 'text/css']],
   ...['dashboard.js', 'metrics.js', 'data.js'].map(file=>['/'+file,[file,'text/javascript']])

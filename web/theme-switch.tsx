@@ -1,0 +1,59 @@
+import { useEffect, useState } from 'react';
+import { Icon } from './icons';
+
+type Theme = 'light' | 'dark';
+const storageKey = 'pm-theme';
+
+export function ThemeSwitch() {
+  const root = document.documentElement;
+  const [theme, setTheme] = useState<Theme>(() => root.dataset.theme === 'dark' ? 'dark' : 'light');
+
+  useEffect(() => {
+    const system = matchMedia('(prefers-color-scheme: dark)');
+    function syncSystem() {
+      if (root.dataset.themeOverride) return;
+      const next = system.matches ? 'dark' : 'light';
+      root.dataset.theme = next;
+      setTheme(next);
+    }
+    function syncStorage(event: StorageEvent) {
+      if (event.key !== storageKey && event.key !== null) return;
+      const next = event.newValue;
+      if (next === 'light' || next === 'dark') {
+        root.dataset.theme = next;
+        root.dataset.themeOverride = 'true';
+        setTheme(next);
+      } else {
+        delete root.dataset.themeOverride;
+        syncSystem();
+      }
+    }
+    syncSystem();
+    system.addEventListener('change', syncSystem);
+    window.addEventListener('storage', syncStorage);
+    return () => {
+      system.removeEventListener('change', syncSystem);
+      window.removeEventListener('storage', syncStorage);
+    };
+  }, [root]);
+
+  return (
+    <button
+      className="theme-switch"
+      type="button"
+      aria-pressed={theme === 'dark'}
+      aria-label="Тёмная тема"
+      title={theme === 'dark' ? 'Включить светлую тему' : 'Включить тёмную тему'}
+      onClick={() => {
+        const next = theme === 'dark' ? 'light' : 'dark';
+        root.dataset.theme = next;
+        root.dataset.themeOverride = 'true';
+        setTheme(next);
+        try { localStorage.setItem(storageKey, next); } catch {}
+      }}
+    >
+      <Icon name={theme === 'dark' ? 'moon' : 'sun'} />
+      <span className="menu-label">Тема</span>
+    </button>
+  );
+}

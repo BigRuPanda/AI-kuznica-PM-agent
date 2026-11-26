@@ -25,6 +25,8 @@ import {
   dashboard,
   visibleCase,
   createThread,
+  renameThread,
+  deleteThread,
   enqueue,
   messages,
   thread,
@@ -35,7 +37,7 @@ import { python, metrika, telegram } from './connectors.mjs';
 import { preview, revisePage } from './tracker-workflow.mjs';
 import { configure, connectionInfo, personalConnection, finishOAuth } from './tracker-connections.mjs';
 import { remoteMcp } from './team-mcp.mjs';
-import { readMaterial, attachedMaterials, materialRef, materialPreview } from './materials.mjs';
+import { retainMaterial, readMaterial, attachedMaterials, materialRef, materialPreview } from './materials.mjs';
 import { access } from './chart-ranges.mjs';
 import { resumeJob } from './workbench.mjs';
 
@@ -338,6 +340,8 @@ export function createTeamApp({
           return reply(200, { id });
         }
         if (op === 'thread') return reply(200, { id: createThread(db, user, b.title, !!b.group) });
+        if (op === 'rename-thread') return reply(200, renameThread(db, user, b.thread, b.title));
+        if (op === 'delete-thread') return reply(200, deleteThread(store, user, b.thread));
         if (op === 'messages') return reply(200, messages(db, user, b.thread));
         if (op === 'material') {
           const m = readMaterial(db, user, b.id);
@@ -398,7 +402,10 @@ export function createTeamApp({
                 caseId,
                 b.id,
               );
-            else db.prepare('INSERT OR IGNORE INTO case_materials VALUES(?,?,?)').run(user.id, caseId, b.id);
+            else {
+              retainMaterial(db, user.id, b.id);
+              db.prepare('INSERT OR IGNORE INTO case_materials VALUES(?,?,?)').run(user.id, caseId, b.id);
+            }
             return { pinned: b.remove !== true, caseId };
           });
           return reply(200, result);
@@ -419,8 +426,8 @@ export function createTeamApp({
               db,
               user,
               b.materialIds,
-              true,
-              b.shareMaterials === true ? t.id : undefined,
+              t,
+              b.shareMaterials === true,
             );
             db.prepare("INSERT INTO chat_items(thread,author,role,body,created) VALUES(?,?,'user',?,?)").run(
               t.id,
@@ -482,8 +489,6 @@ export function createTeamApp({
         '/': 'index.html',
         '/app.js': 'app.js',
         '/app.css': 'app.css',
-        '/legacy.js': 'legacy.js',
-        '/legacy.css': 'legacy.css',
         '/report-fonts.css': 'report-fonts.css',
       };
       if (!Object.hasOwn(assets, p)) return reply(404, { error: 'Не найдено' });

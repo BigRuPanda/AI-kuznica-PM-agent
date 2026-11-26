@@ -36,10 +36,32 @@ import {
 } from './agent-research.mjs';
 import { asksToDraw, chartFindings, chartObservations, resolveChartFocus } from './chart-focus.mjs';
 import { dayComparison, explicitDayWindow } from './day-comparison.mjs';
+
+const chatItemColumns = '(seq INTEGER PRIMARY KEY AUTOINCREMENT,thread TEXT,author TEXT,role TEXT,body TEXT,created INTEGER);';
+
+function migrateChatItems(db) {
+  const schema = () => db.prepare("SELECT sql FROM sqlite_schema WHERE type='table' AND name='chat_items'").get().sql;
+  if (/\bAUTOINCREMENT\b/i.test(schema())) return;
+  db.exec('BEGIN IMMEDIATE');
+  try {
+    if (!/\bAUTOINCREMENT\b/i.test(schema())) {
+      db.exec(
+        'CREATE TABLE chat_items_upgrade' + chatItemColumns +
+        'INSERT INTO chat_items_upgrade SELECT seq,thread,author,role,body,created FROM chat_items;' +
+        'DROP TABLE chat_items; ALTER TABLE chat_items_upgrade RENAME TO chat_items;',
+      );
+    }
+    db.exec('COMMIT');
+  } catch (error) {
+    db.exec('ROLLBACK');
+    throw error;
+  }
+}
+
 export function initWorkbench(db) {
   db.exec(
     'CREATE TABLE IF NOT EXISTS conversations(id TEXT PRIMARY KEY,owner TEXT,scope TEXT,title TEXT);' +
-      'CREATE TABLE IF NOT EXISTS chat_items(seq INTEGER PRIMARY KEY,thread TEXT,author TEXT,role TEXT,body TEXT,created INTEGER);' +
+      'CREATE TABLE IF NOT EXISTS chat_items' + chatItemColumns +
       'CREATE TABLE IF NOT EXISTS jobs(id TEXT PRIMARY KEY,thread TEXT,user TEXT,body TEXT,status TEXT,result TEXT,created INTEGER);' +
       'CREATE TABLE IF NOT EXISTS draft_actions(id TEXT PRIMARY KEY,case_id TEXT,user TEXT,body TEXT,state TEXT,external TEXT);' +
       'CREATE TABLE IF NOT EXISTS local_issues(key TEXT PRIMARY KEY,title TEXT,description TEXT,priority TEXT,case_id TEXT,updated INTEGER);' +
@@ -48,6 +70,7 @@ export function initWorkbench(db) {
       'CREATE TABLE IF NOT EXISTS known_updates(id INTEGER PRIMARY KEY);',
   );
   initTracking(db);
+  migrateChatItems(db);
   initRanges(db);
   initMaterials(db);
   db.prepare("INSERT OR IGNORE INTO conversations VALUES('group','','group','Команда Store')").run();
@@ -71,6 +94,16 @@ export function visibleCase(db, user, id) {
   if (c.body.owner && c.body.owner !== user.id) throw Error('Разбор недоступен');
   return c;
 }
+const threadTitleLimit = 120;
+
+function canRenameThread(user, chat) {
+  return chat.owner === user.id || (chat.scope === 'group' && user.role === 'admin');
+}
+
+function canDeleteThread(user, chat) {
+  return chat.id !== 'group' && canRenameThread(user, chat);
+}
+
 export function dashboard(db, user) {
   return {
     user,
@@ -79,7 +112,8 @@ export function dashboard(db, user) {
       .map((c) => ({ ...c, effect: effect(db, c) })),
     threads: db
       .prepare("SELECT * FROM conversations WHERE scope='group' OR owner=? ORDER BY rowid DESC")
-      .all(user.id),
+      .all(user.id)
+      .map((chat) => ({ ...chat, canRename: canRenameThread(user, chat), canDelete: canDeleteThread(user, chat) })),
     sources: db
       .prepare('SELECT file,count(*) versions,max(created) updated FROM documents GROUP BY file')
       .all(),
@@ -101,9 +135,46 @@ export function createThread(db, user, title, group = false) {
     id,
     user.id,
     group ? 'group' : 'private',
-    String(title || 'Личный чат').slice(0, 120),
+    String(title || 'Личный чат').slice(0, threadTitleLimit),
   );
   return id;
+}
+export function renameThread(db, user, id, title) {
+  if (typeof id !== 'string' || !id) throw Error('Выберите чат.');
+  const chat = thread(db, user, id);
+  if (!canRenameThread(user, chat)) throw Error('Нет прав на переименование чата.');
+  const name = typeof title === 'string' ? title.trim() : '';
+  if (!name || name.length > threadTitleLimit) {
+    throw Error('Введите название чата до ' + threadTitleLimit + ' символов.');
+  }
+  db.prepare('UPDATE conversations SET title=? WHERE id=?').run(name, chat.id);
+  return { id: chat.id, title: name };
+}
+export function deleteThread(store, user, id) {
+  if (typeof id !== 'string' || !id) throw Error('Выберите чат.');
+  const { db } = store;
+  return store.tx(() => {
+    const chat = thread(db, user, id);
+    if (!canDeleteThread(user, chat)) throw Error('Нет прав на удаление чата.');
+    if (db.prepare("SELECT 1 FROM jobs WHERE thread=? AND status IN ('queued','running') LIMIT 1").get(id)) {
+      throw Error('Дождитесь ответа помощника и повторите удаление.');
+    }
+    db.prepare('DELETE FROM agent_turns WHERE job IN (SELECT id FROM jobs WHERE thread=?)').run(id);
+    db.prepare('DELETE FROM job_research WHERE job IN (SELECT id FROM jobs WHERE thread=?)').run(id);
+    db.prepare('DELETE FROM agent_steps WHERE job IN (SELECT id FROM jobs WHERE thread=?)').run(id);
+    db.prepare(`DELETE FROM agent_previews WHERE state='pending' AND id IN (
+      SELECT json_extract(action.value,'$.id') FROM chat_items ci, json_each(ci.body,'$.actions') action
+      WHERE ci.thread=? AND ci.role='assistant' AND json_extract(action.value,'$.op')='prepare_publish'
+    ) AND NOT EXISTS (
+      SELECT 1 FROM chat_items ci, json_each(ci.body,'$.actions') action
+      WHERE ci.thread<>? AND json_extract(action.value,'$.id')=agent_previews.id
+    )`).run(id, id);
+    db.prepare('DELETE FROM jobs WHERE thread=?').run(id);
+    db.prepare('DELETE FROM chat_items WHERE thread=?').run(id);
+    db.prepare("DELETE FROM snapshot_access WHERE scope='thread' AND ref=?").run(id);
+    db.prepare('DELETE FROM conversations WHERE id=?').run(id);
+    return { id };
+  });
 }
 export function enqueue(store, user, b) {
   const q = String(b.question || '').trim();
@@ -119,8 +190,8 @@ export function enqueue(store, user, b) {
       store.db,
       user,
       b.materialIds,
-      t.scope === 'group',
-      b.shareMaterials === true ? t.id : undefined,
+      t,
+      b.shareMaterials === true,
     );
     let screen;
     if (b.screen?.calc) {

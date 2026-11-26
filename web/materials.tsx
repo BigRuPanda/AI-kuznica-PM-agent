@@ -34,7 +34,7 @@ type Material = MaterialRef & {
   pins: string[];
 };
 export type ChatAttachment = { material: MaterialRef; range?: Attachment };
-const colors = ['#16766b', '#ad4f31', '#5c6592', '#927028'];
+const colors = ['var(--series-main)', 'var(--series-control)', 'var(--chart-b)', 'var(--positive)'];
 const day = (at: number) =>
   new Date(at).toLocaleDateString('ru-RU', {
     timeZone: 'UTC',
@@ -94,6 +94,15 @@ export function MaterialsProvider({
     [busy, setBusy] = useState(false);
   const cache = useRef(new Map<string, Promise<Material>>()),
     listener = useRef<((a: ChatAttachment) => void) | null>(null);
+  useEffect(() => {
+    const closeDialogs = () => {
+      setStack([]);
+      setPicker(null);
+      fail('');
+    };
+    window.addEventListener('hashchange', closeDialogs);
+    return () => window.removeEventListener('hashchange', closeDialogs);
+  }, []);
   const createRequest = useRef('');
   const load = useCallback((id: string, preview = false) => {
     const key = preview ? 'preview/' + id : id;
