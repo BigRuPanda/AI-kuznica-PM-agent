@@ -5,6 +5,7 @@ import { initEvidence, importDocs } from '../server/evidence.mjs';
 import { initWorkbench, createThread, enqueue, workJobs, messages } from '../server/workbench.mjs';
 import { workspaceOperation } from '../server/workspace-operations.mjs';
 import { apiConfigured } from '../server/agent.mjs';
+import { readMaterial } from '../server/materials.mjs';
 export function evaluationCase(s, user) {
   const facts = [],
     week = 604800000,
@@ -23,6 +24,27 @@ export function evaluationCase(s, user) {
         },
       });
     }
+  for (let i = 0; i < 22; i++) {
+    const date = new Date(start + i * week).toISOString().slice(0, 10);
+    for (const [segment, open, complete] of [
+      ['desktop', 100, i < 14 ? 80 : 75],
+      ['mobile', 50, i < 14 ? 30 : 25],
+    ]) {
+      facts.push({
+        kind: 'metrics',
+        loc: segment + '!A' + (i + 2),
+        row: {
+          product: 'Конфигуратор Астра',
+          metric_id: 'cfg_completion_rate',
+          date,
+          segment,
+          unit: 'ratio',
+          value: complete / open,
+          detail_json: JSON.stringify({ open, complete }),
+        },
+      });
+    }
+  }
   facts.push(
     {
       kind: 'releases',
@@ -78,7 +100,6 @@ async function main() {
     ...process.env,
     LLM_MODEL: opts.model || process.env.LLM_MODEL,
     LLM_DATA_MODE: 'analysis',
-    JIRA_BASE_URL: '',
     NOTIFICATIONS_ENABLED: 'false',
   };
   if (!apiConfigured(env)) throw Error('Заполните настройки LLM в .env');
@@ -95,13 +116,33 @@ async function main() {
       'Почему в B у Kaspersky снизился индекс относительно A сильнее, чем у Astra? Проверь соседние периоды, релизы и свидетельства.',
       'Что могло бы опровергнуть эту гипотезу?',
       'Подготовь по этому выводу ровно один черновик задачи для QA. Никуда не отправляй.',
+      'Покажи график завершения подбора Astra и разбери причины изменения в выбранных периодах.',
     ];
     let saved;
     for (const [i, question] of questions.entries()) {
-      const job = enqueue(s, u, { thread, caseId, question, ...(i === 1 ? { selection } : {}) }),
+      const extra =
+        i === 4
+          ? (() => {
+              const c = workspaceOperation(s, u, 'create-case', {
+                title: 'Синтетическая воронка',
+                product: 'Astra',
+              });
+              const view = workspaceOperation(s, u, 'view', {
+                caseId: c.id,
+                control: 'Kaspersky',
+                from: '2026-06-29',
+              }).view;
+              return {
+                caseId: c.id,
+                thread: createThread(s.db, u, 'Воронка Astra'),
+                selection: { ...selection, calcId: view.id, version: view.id },
+              };
+            })()
+          : {};
+      const job = enqueue(s, u, { thread, caseId, question, ...(i === 1 ? { selection } : {}), ...extra }),
         start = performance.now();
       await workJobs(s, { publicUser: () => u }, env, fetch);
-      const answer = messages(s.db, u, thread).items.at(-1).body,
+      const answer = messages(s.db, u, extra.thread || thread).items.at(-1).body,
         usage = s.one(
           'SELECT count(*) calls, sum(input) input, sum(output) output FROM costs WHERE job=?',
           job,
@@ -109,15 +150,39 @@ async function main() {
       if (i === 1) saved = answer.rangeId;
       const check = [
         () => !!answer.text && !answer.steps?.length,
-        () =>
-          !!answer.rangeId &&
-          answer.steps?.some((n) => ['view', 'search', 'selection_context'].includes(n)) &&
-          /30|70/.test(answer.text),
+        () => {
+          const ref = answer.materials?.find((m) => m.kind === 'report');
+          if (!answer.rangeId || !ref || answer.text.length <= 35 || answer.text.trim().endsWith(':'))
+            return false;
+          const m = readMaterial(s.db, u, ref.id);
+          return (
+            m.findings.some((f) => /Kaspersky.*100 → 70/.test(f)) &&
+            m.sections
+              .find((s) => s.title === 'Значения в соседнем периоде')
+              ?.rows.some((row) => row[2] === 'Kaspersky' && row[3] === '100') &&
+            m.sections
+              .find((s) => s.title === 'Свидетельства')
+              ?.rows.some((row) => row[0].includes('Synthetic evaluation.xlsx'))
+          );
+        },
         () => !!saved && answer.rangeId === saved,
         () =>
           answer.actions?.some((a) => a.op === 'draft') &&
           s.one('SELECT count(*) n FROM draft_actions').n === 1 &&
           s.one('SELECT count(*) n FROM local_issues').n === 0,
+        () => {
+          const report = answer.materials?.find((m) => m.kind === 'report');
+          if (!report || !answer.materials.some((m) => m.kind === 'chart')) return false;
+          const m = readMaterial(s.db, u, report.id);
+          const mobile = m.sections
+            .find((s) => s.title === 'Завершение подбора')
+            ?.rows.find((row) => row[0] === 'Телефоны');
+          return (
+            JSON.stringify(m.ranges) === JSON.stringify(selection.ranges) &&
+            mobile?.[1].includes('90/150') &&
+            mobile?.[2].includes('100/200')
+          );
+        },
       ][i]();
       const pin =
           opts['input-price'] ?? (env.LLM_MODEL === process.env.LLM_MODEL ? env.PRICE_INPUT_MILLION : null),
@@ -130,7 +195,7 @@ async function main() {
       result.push({
         question,
         answer: answer.text,
-        passed: !!check && !answer.warning,
+        passed: !!check && !answer.warning && answer.outcome === 'done',
         steps: answer.steps,
         wallMs: Math.round(performance.now() - start),
         ...usage,

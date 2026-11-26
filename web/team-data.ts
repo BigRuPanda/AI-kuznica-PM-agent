@@ -33,7 +33,7 @@ export type Release = {
   related_task_ids: string;
 };
 export type Home = {
-  issueMode: 'jira' | 'local';
+  integrations: Record<'redmine' | 'confluence', import('./tracking').Integration>;
   user: User;
   cases: Case[];
   threads: Thread[];
@@ -89,13 +89,12 @@ export type Detail = {
   view: View;
   effect: Watch | null;
   backlog: Issue[];
-  published: { id: string; user: string; body: { calc?: string; rangeId?: string; cards: string[] } }[];
-  drafts: {
+  published: {
     id: string;
-    body: { title: string; description: string; key: string; priority: string };
-    external: string;
-    state: string;
+    user: string;
+    body: { calc?: string; rangeId?: string; cards: string[]; conclusion?: string };
   }[];
+  drafts: import('./tracking').TrackerPreview[];
 };
 export type Msg = {
   seq: number;
@@ -103,6 +102,12 @@ export type Msg = {
   role: string;
   body: {
     text: string;
+    materials?: import('./materials').MaterialRef[];
+    checks?: string[];
+    jobId?: string;
+    canResume?: boolean;
+    mode?: string;
+    outcome?: string;
     calc?: string;
     caseId?: string;
     product?: string;

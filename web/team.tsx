@@ -1,13 +1,28 @@
+import { ChatTrackerPreview, Connections, DemoObject, Tracking } from './tracking';
 import { RangeResult } from './range-result';
 import { rangeLabel, RangeChart, DAY } from './range-chart';
 import type { Attachment } from './range-chart';
+import { Answer } from './answer';
+import { Dialog } from './dialog';
 import { SavedChart } from './calculations';
+import {
+  MaterialCard,
+  MaterialDetail,
+  MiniPlot,
+  MaterialsProvider,
+  PinnedMaterials,
+  pastedMaterial,
+  useMaterials,
+  type ChatAttachment,
+  type MaterialRef,
+} from './materials';
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { createRoot } from 'react-dom/client';
 import { post, jump, num } from './team-data';
 import type { Home, User, Case, Detail, View, Msg, Thread } from './team-data';
 import { Cards, initialCards, labels } from './work-cards';
 import './team.css';
+import './tracking.css';
 
 type Action = (fn: () => Promise<void>) => void;
 function useRoute() {
@@ -112,6 +127,32 @@ function CaseList({ items }: { items: Case[] }) {
     </div>
   );
 }
+const stepNames: Record<string, string> = {
+  overview: 'Открыт обзор',
+  metrics: 'Проверен каталог метрик',
+  selection_context: 'Проверен соседний период и источники',
+  search: 'Найдены свидетельства',
+  view: 'Сопоставлены продукт и контроль',
+  calc: 'Открыт сохранённый расчёт',
+  chart: 'Построен график',
+  funnel: 'Рассчитаны этапы воронки',
+  range_read: 'Проверены выбранные даты',
+  range_compare: 'Сопоставлены периоды',
+  draft: 'Сохранён черновик',
+  issue_search: 'Проверены похожие задачи',
+  issue_read: 'Прочитана задача',
+  page_search: 'Найдены страницы',
+  page_read: 'Прочитана страница',
+  page_draft: 'Подготовлена публикация в Confluence',
+  'create-case': 'Создан личный разбор',
+  set_view: 'Обновлён личный экран',
+  prepare_publish: 'Подготовлена публикация',
+  append_case: 'Сохранён вывод',
+  feedback: 'Сохранена поправка',
+  watch: 'Назначена проверка',
+  decide: 'Изменён статус',
+};
+const stepLabel = (name: string) => stepNames[name] || name;
 function Chat({
   id,
   userId,
@@ -123,7 +164,7 @@ function Chat({
   clearContext,
   attachment,
   screen,
-  onAdd,
+  onAttachFocus,
 }: {
   id: string;
   userId: string;
@@ -135,8 +176,15 @@ function Chat({
   clearContext?: () => void;
   attachment?: Attachment;
   screen?: { calc: string; full: boolean; control?: string; cards: string[] };
-  onAdd?: (s: NonNullable<Msg['body']['suggestions']>[number]) => void;
+  onAttachFocus?: () => void;
 }) {
+  const { open: openMaterial, load: loadMaterial, listen } = useMaterials();
+  const [progress, setProgress] = useState<string[]>([]);
+  const [jobIssue, setJobIssue] = useState('');
+  const [material, setMaterial] = useState<MaterialRef | null>(null);
+  const [sharing, setSharing] = useState(false);
+  const focusHandler = useRef(onAttachFocus);
+  focusHandler.current = onAttachFocus;
   const pendingKey = 'pm-pending/' + userId + '/' + id;
   const readPending = () => {
     try {
@@ -165,6 +213,52 @@ function Chat({
   const box = useRef<HTMLTextAreaElement>(null),
     request = useRef<{ id: string; body: string; text: string } | null>(readPending());
   useEffect(() => {
+    function accept(a: ChatAttachment) {
+      setMaterial(a.material);
+      sessionStorage.setItem('pm-material-draft/' + id, JSON.stringify(a));
+      if (a.range) {
+        setAttached(a.range);
+        sessionStorage.setItem('pm-attachment/' + id, JSON.stringify(a.range));
+      } else {
+        setAttached(undefined);
+        sessionStorage.removeItem('pm-attachment/' + id);
+      }
+      setSharing(false);
+      focusHandler.current?.();
+      box.current?.focus();
+    }
+    const saved = sessionStorage.getItem('pm-material-draft/' + id);
+    if (saved) {
+      try {
+        accept(JSON.parse(saved));
+      } catch {
+        sessionStorage.removeItem('pm-material-draft/' + id);
+      }
+    }
+    return listen(accept);
+  }, [id, listen]);
+  const pasted = pastedMaterial(q);
+  const [linkMaterial, setLinkMaterial] = useState<MaterialRef | null>(null);
+  const needsShare =
+    threads.find((t) => t.id === id)?.scope === 'group' &&
+    [material, linkMaterial].some((m) => m && !m.shared);
+  useEffect(() => {
+    let valid = true;
+    setLinkMaterial(null);
+    setSharing(false);
+    if (pasted)
+      loadMaterial(pasted)
+        .then((m) => {
+          if (valid) setLinkMaterial(m);
+        })
+        .catch((e) => {
+          if (valid) setErr(e.message);
+        });
+    return () => {
+      valid = false;
+    };
+  }, [pasted, loadMaterial]);
+  useEffect(() => {
     if (attachment) {
       setAttached(attachment);
       sessionStorage.setItem('pm-attachment/' + id, JSON.stringify(attachment));
@@ -178,28 +272,44 @@ function Chat({
     setAttached(undefined);
     sessionStorage.removeItem('pm-attachment/' + id);
   }
-  const last = useRef(-1),
+  const followChat = useRef(true),
+    resultHandler = useRef(onResult),
     end = useRef<HTMLDivElement>(null);
+  resultHandler.current = onResult;
   const refresh = useCallback(async () => {
-    return await post<{ items: Msg[]; jobs: unknown[] }>('messages', { thread: id });
+    return await post<{ items: Msg[]; jobs: { steps: string[]; issue?: string }[] }>('messages', {
+      thread: id,
+    });
   }, [id]);
   useEffect(() => {
-    let valid = true;
-    last.current = -1;
+    let valid = true,
+      fetching = false,
+      initial = true;
+    const seen = new Map<number, string | undefined>();
+    followChat.current = true;
     setItems([]);
     setErr('');
     const read = async () => {
+      if (fetching) return;
+      fetching = true;
       try {
         const data = await refresh();
         if (!valid) return;
         setItems(data.items);
         work(!!data.jobs.length);
-        const latest = data.items.at(-1);
-        if (latest && last.current >= 0 && latest.seq > last.current && latest.role === 'assistant')
-          onResult?.(latest.body);
-        last.current = latest?.seq || 0;
+        setProgress(data.jobs.flatMap((j) => j.steps || []));
+        setJobIssue(data.jobs.find((j) => j.issue)?.issue || '');
+        for (const m of data.items)
+          if (m.role === 'assistant') {
+            if (!initial && (!seen.has(m.seq) || seen.get(m.seq) !== m.body.outcome))
+              resultHandler.current?.(m.body);
+            seen.set(m.seq, m.body.outcome);
+          }
+        initial = false;
       } catch (e) {
         if (valid) setErr((e as Error).message);
+      } finally {
+        fetching = false;
       }
     };
     void read();
@@ -208,9 +318,10 @@ function Chat({
       valid = false;
       clearInterval(t);
     };
-  }, [id, refresh, onResult]);
+  }, [id, refresh]);
   useEffect(() => {
-    if (items.length) end.current?.scrollIntoView({ block: 'nearest' });
+    if (items.length && followChat.current && !document.querySelector('dialog[open]'))
+      end.current?.scrollIntoView({ block: 'nearest' });
   }, [items.length]);
   return (
     <section className="chat-box">
@@ -220,13 +331,45 @@ function Chat({
         </small>
         <h3>{caseId ? 'Обсудить разбор' : threads.find((t) => t.id === id)?.title || 'Чат'}</h3>
       </header>
-      <div className="chat-history">
+      <div
+        className="chat-history"
+        onScroll={(e) => {
+          const el = e.currentTarget;
+          followChat.current = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
+        }}
+      >
         {!items.length && <p className="muted">Задайте вопрос о продукте, данных или следующей задаче.</p>}
         {items.map((m) => (
           <article className={'bubble ' + m.role} key={m.seq}>
             <b>{m.author}</b>
-            <p>{m.body.text}</p>
-            {m.body.rangeId && (
+            {m.role === 'assistant' ? (
+              <Answer text={m.body.text} openMaterial={openMaterial} />
+            ) : (
+              <p>{m.body.text}</p>
+            )}
+            {m.body.materials?.map((item) => (
+              <MaterialCard key={item.id} item={item} />
+            ))}
+            {!m.body.materials?.length &&
+              m.body.suggestions?.map((s) =>
+                s.source === 'metric' ? (
+                  <Snapshot key={s.calc} id={s.calc} previewTitle={s.title} />
+                ) : s.source === 'release' ? (
+                  <SavedChart key={s.calc} id={s.calc} preview />
+                ) : (
+                  <a
+                    key={s.calc}
+                    href={
+                      s.source === 'range'
+                        ? '#range/' + s.calc
+                        : '#snapshot/' + s.calc + '/' + s.cards.join(',')
+                    }
+                  >
+                    {s.title}
+                  </a>
+                ),
+              )}
+            {m.body.rangeId && !m.body.materials?.length && (
               <a href={'#range/' + m.body.rangeId}>
                 Выделенный участок
                 {m.body.selection
@@ -239,23 +382,6 @@ function Chat({
                   : ''}
               </a>
             )}
-            {m.body.suggestions?.map((s) => (
-              <div className="tool-receipt" key={s.calc}>
-                <a
-                  href={
-                    (s.source === 'release'
-                      ? '/?legacy=1#calc/'
-                      : s.source === 'range'
-                        ? '#range/'
-                        : '#snapshot/') + s.calc
-                  }
-                  onClick={s.source === 'release' ? () => setTimeout(() => location.reload(), 0) : undefined}
-                >
-                  {s.title}
-                </a>
-                {onAdd && <button onClick={() => onAdd(s)}>Добавить на экран</button>}
-              </div>
-            ))}
             {m.body.actions?.map((a, i) => (
               <div className="tool-receipt" key={a.id || i}>
                 <b>
@@ -283,11 +409,8 @@ function Chat({
                     ))}
                   </details>
                 )}
-                {a.destination && (
-                  <small>
-                    {a.destination} ·{' '}
-                    {a.key ? 'Изменить ' + a.key + ' · приоритет ' + a.priority : 'Новая задача'}
-                  </small>
+                {a.id && a.canConfirm !== false && ['draft', 'page_draft'].includes(a.op) && (
+                  <ChatTrackerPreview id={a.id} action={action} />
                 )}
                 {a.recipient && <small>Получатели: {a.recipient}</small>}
                 {a.rangeId && <a href={'#range/' + a.rangeId}>Проверить выделенные периоды</a>}
@@ -296,34 +419,52 @@ function Chat({
                 ) : null}
                 {a.id &&
                   a.canConfirm !== false &&
-                  ['draft', 'prepare_publish'].includes(a.op) &&
+                  a.op === 'prepare_publish' &&
                   (a.state === 'done' || receipts[a.id] ? (
                     <small>{receipts[a.id] || a.external || 'Подтверждено'}</small>
                   ) : (
                     <button
                       onClick={() =>
                         action(async () => {
-                          const r = await post<{ key?: string; id?: string }>(
-                            a.op === 'draft' ? 'confirm' : 'approve_preview',
-                            { id: a.id },
-                          );
+                          const r = await post<{ key?: string; id?: string }>('approve_preview', {
+                            id: a.id,
+                          });
                           showReceipt((prev) => ({ ...prev, [a.id!]: r.key || 'Опубликовано' }));
                         })
                       }
                     >
-                      {a.op === 'draft' ? 'Подтвердить задачу' : 'Подтвердить публикацию'}
+                      Подтвердить публикацию
                     </button>
                   ))}
               </div>
             ))}
-            {!!m.body.steps?.length && (
+            {!!(m.body.steps?.length || m.body.checks?.length) && (
               <details>
                 <summary>Выполненные проверки</summary>
-                <small>{m.body.steps.join(' → ')}</small>
+                <ul>
+                  {[...new Set([...(m.body.checks || []), ...(m.body.steps || []).map(stepLabel)])].map(
+                    (s) => (
+                      <li key={s}>{s}</li>
+                    ),
+                  )}
+                </ul>
               </details>
             )}
-            {m.body.warning && <small>{m.body.warning}</small>}
-            {m.body.calc && (
+            {m.body.warning && !m.body.text.includes(m.body.warning) && <small>{m.body.warning}</small>}
+            {m.body.canResume && (
+              <button
+                disabled={running}
+                onClick={() =>
+                  action(async () => {
+                    await post('resume-job', { id: m.body.jobId });
+                    work(true);
+                  })
+                }
+              >
+                Продолжить с сохранённого шага
+              </button>
+            )}
+            {m.body.calc && !m.body.materials?.length && (
               <a href={'#snapshot/' + m.body.calc + '/' + (m.body.cards || initialCards).join(',')}>
                 Открыть расчёт
               </a>
@@ -350,7 +491,14 @@ function Chat({
           </article>
         ))}
         {err && <p role="alert">{err}</p>}
-        {running && <p role="status">Агент отвечает…</p>}
+        {running && (
+          <p role="status">
+            {jobIssue ||
+              (progress.length
+                ? 'Выполнено · ' + [...new Set(progress.map(stepLabel))].join(' · ')
+                : 'Агент отвечает…')}
+          </p>
+        )}
         <div ref={end} />
       </div>
       <form
@@ -360,11 +508,14 @@ function Chat({
           const groupMessage = (e.nativeEvent as SubmitEvent).submitter?.getAttribute('value') === 'message';
           action(async () => {
             setSending(true);
+            followChat.current = true;
             const body = {
               thread: id,
               question: (context ? 'О графике «' + context + '». ' : '') + q,
               caseId,
               screen,
+              materialIds: [...new Set([material?.id, pasted].filter(Boolean))],
+              shareMaterials: !!needsShare && sharing,
               ...(attached?.id
                 ? { rangeId: attached.id }
                 : attached
@@ -383,12 +534,47 @@ function Chat({
             request.current = null;
             sessionStorage.removeItem(pendingKey);
             clearAttachment();
+            setMaterial(null);
+            sessionStorage.removeItem('pm-material-draft/' + id);
             setQ('');
             work(!groupMessage);
             clearContext?.();
           });
         }}
       >
+        {(material || linkMaterial) && (
+          <div className="range-attachment">
+            <span>{(material || linkMaterial)?.title}</span>
+            <button
+              type="button"
+              aria-label="Убрать материал"
+              onClick={() => {
+                setMaterial(null);
+                sessionStorage.removeItem('pm-material-draft/' + id);
+                if (pasted)
+                  setQ(
+                    q
+                      .split(/\s+/)
+                      .filter((w) => pastedMaterial(w) !== pasted)
+                      .join(' '),
+                  );
+              }}
+            >
+              ×
+            </button>
+          </div>
+        )}
+        {needsShare && (
+          <label>
+            <input
+              type="checkbox"
+              checked={sharing}
+              required
+              onChange={(e) => setSharing(e.target.checked)}
+            />{' '}
+            Открыть участникам команды доступ к приложенным материалам
+          </label>
+        )}
         {attached && (
           <div className="range-attachment">
             <span>{attached.label}</span>
@@ -453,13 +639,10 @@ function Investigation({
     [pinned, pin] = useState<string[]>([]),
     [ctx, ask] = useState(''),
     [attachment, attach] = useState<Attachment>(),
-    [additional, addCheck] = useState<NonNullable<Msg['body']['suggestions']>>([]),
     [tid, thread] = useState(''),
     [preview, show] = useState(false),
     [conclusion, writeConclusion] = useState(''),
     [selection, select] = useState<string[]>([]),
-    [hits, search] = useState<{ key: string; title: string }[]>([]),
-    [key, setKey] = useState(''),
     [err, fail] = useState('');
   const prefix = 'pm-view/' + home.user.id + '/' + id;
   const load = useCallback(
@@ -523,7 +706,7 @@ function Investigation({
         if (m.personal.control) control(m.personal.control);
         if (m.personal.pin) pin([...new Set([...pinned, ...m.personal.cards])]);
       }
-      if (m.cards && !m.rangeId) {
+      if (m.mode !== 'analysis' && m.cards && !m.rangeId) {
         const next = [...new Set([...pinned, ...m.cards])];
         layout(next);
         filter(!!m.full);
@@ -638,105 +821,17 @@ function Investigation({
               localStorage.setItem(prefix, JSON.stringify({ cards, full, pinned: next }));
             }}
           />
-          {additional.map((s) => (
-            <section className="paper" key={s.calc}>
-              <button onClick={() => addCheck((xs) => xs.filter((x) => x.calc !== s.calc))}>
-                Убрать дополнительную проверку
-              </button>
-              {s.source === 'release' ? (
-                <SavedChart id={s.calc} />
-              ) : s.source === 'range' ? (
-                <RangeResult id={s.calc} />
-              ) : (
-                <Snapshot id={s.calc} selected={s.cards.join(',')} embedded />
-              )}
-            </section>
-          ))}
-          <section className="paper">
-            <h3>Решение по задаче</h3>
-            <p className="muted">
-              {home.issueMode === 'local'
-                ? 'Локальный демо-бэклог · запись останется на этом стенде'
-                : 'Jira · запись после подтверждения'}
-            </p>
-            <button
-              onClick={() =>
-                action(async () => {
-                  const r = await post<{ items: typeof hits }>('jira-search', { query: c.product });
-                  search(r.items);
-                })
-              }
-            >
-              Найти похожие задачи
-            </button>
-            {hits.map((h) => (
-              <label key={h.key}>
-                <input type="radio" name="issue" checked={key === h.key} onChange={() => setKey(h.key)} />
-                {h.key} · {h.title}
-              </label>
-            ))}
-            <form
-              onSubmit={(e) => {
-                e.preventDefault();
-                const b = Object.fromEntries(new FormData(e.currentTarget));
-                action(async () => {
-                  await post('draft', { ...b, key, caseId: id });
-                  await load();
-                });
-              }}
-            >
-              <label>
-                Заголовок
-                <input name="title" defaultValue={'Проверить путь покупки · ' + c.product} required />
-              </label>
-              <label>
-                Проверка и критерий успеха
-                <textarea
-                  name="description"
-                  defaultValue={
-                    'Проверить выбор лицензии, фактическое добавление в корзину и доставку события в аналитику. Источник: ' +
-                    v.id
-                  }
-                />
-              </label>
-              {key && (
-                <>
-                  <label>
-                    Приоритет для {key}
-                    <input name="priority" required placeholder="High" />
-                  </label>
-                  <button type="button" onClick={() => setKey('')}>
-                    Создать отдельную задачу
-                  </button>
-                </>
-              )}
-              <button>Подготовить черновик</button>
-            </form>
-            {d.drafts.map((r) => (
-              <div key={r.id} className="excerpt">
-                <b>{r.body.title}</b>
-                <p>{r.body.description}</p>
-                <small>
-                  {r.body.key || 'Новая задача'} {r.body.priority} · сгенерирована ИИ-помощником
-                </small>
-                {r.state === 'done' ? (
-                  <strong>{r.external}</strong>
-                ) : (
-                  <button
-                    className="primary"
-                    onClick={() =>
-                      action(async () => {
-                        await post('confirm', { id: r.id });
-                        await load();
-                      })
-                    }
-                  >
-                    Подтвердить запись
-                  </button>
-                )}
-              </div>
-            ))}
-          </section>
+          <PinnedMaterials caseId={id} />
+          <Tracking
+            caseId={id}
+            product={c.product}
+            title={c.title}
+            conclusion={conclusion || d.published.find((p) => p.body.conclusion)?.body.conclusion || ''}
+            home={home}
+            drafts={d.drafts}
+            action={action}
+            reload={load}
+          />
           <details className="paper">
             <summary>Проверка эффекта</summary>
             <p>{d.effect?.state || 'Укажите дату подтверждённой выкладки.'}</p>
@@ -840,12 +935,12 @@ function Investigation({
             context={ctx}
             attachment={attachment}
             screen={{ calc: v.id, full, control: peer || v.summary[1]?.product, cards }}
-            onAdd={(s) => addCheck((xs) => (xs.some((x) => x.calc === s.calc) ? xs : [...xs, s]))}
             clearContext={() => {
               ask('');
               attach(undefined);
             }}
             onResult={result}
+            onAttachFocus={() => chatMode(true)}
           />
         )}
       </div>
@@ -907,6 +1002,7 @@ function Settings({ home, action, refresh }: { home: Home; action: Action; refre
       <div className="page-head">
         <h1>Настройки команды</h1>
       </div>
+      <Connections home={home} action={action} refresh={refresh}/>
       {admin && (
         <section className="paper">
           <h3>Источники</h3>
@@ -1028,13 +1124,34 @@ function Settings({ home, action, refresh }: { home: Home; action: Action; refre
     </>
   );
 }
-function Snapshot({ id, selected, embedded = false }: { id: string; selected?: string; embedded?: boolean }) {
+function Snapshot({
+  id,
+  selected,
+  embedded = false,
+  previewTitle,
+}: {
+  id: string;
+  selected?: string;
+  embedded?: boolean;
+  previewTitle?: string;
+}) {
   const [v, set] = useState<View | null>(null),
-    [err, fail] = useState('');
+    [err, fail] = useState(''),
+    [open, setOpen] = useState(false);
   useEffect(() => {
+    let active = true;
+    set(null);
+    fail('');
     post<View>('calc', { id })
-      .then(set)
-      .catch((e) => fail(e.message));
+      .then((result) => {
+        if (active) set(result);
+      })
+      .catch((e) => {
+        if (active) fail(e.message);
+      });
+    return () => {
+      active = false;
+    };
   }, [id]);
   const custom = v as unknown as {
     kind?: string;
@@ -1061,30 +1178,60 @@ function Snapshot({ id, selected, embedded = false }: { id: string; selected?: s
     const pts = custom.points.map((p) => ({ at: Date.parse(p.date + 'T00:00:00Z'), value: p.value }));
     const step =
       custom.step || (pts.length > 1 ? Math.min(...pts.slice(1).map((p, i) => p.at - pts[i].at)) : DAY);
-    return (
+    const unit = custom.unit === 'ratio' ? '%' : custom.unit;
+    const lines = [
+      {
+        key: custom.segment,
+        name: custom.segment,
+        color: '#568683',
+        points: pts.map((p) => ({
+          ...p,
+          value: p.value != null && custom.unit === 'ratio' ? 100 * p.value : p.value,
+        })),
+      },
+    ];
+    const detail = (
       <section className="paper">
         <h2>{custom.title}</h2>
         <RangeChart
           title={custom.title}
-          unit={custom.unit === 'ratio' ? '%' : custom.unit}
+          unit={unit}
           step={step}
           pick={(series, ranges) => ({
             label: custom.title,
             selection: { source: 'metric', calcId: id, version: id, metric: custom.metric, series, ranges },
           })}
-          lines={[
-            {
-              key: custom.segment,
-              name: custom.segment,
-              color: '#568683',
-              points: pts.map((p) => ({
-                ...p,
-                value: p.value != null && custom.unit === 'ratio' ? 100 * p.value : p.value,
-              })),
-            },
-          ]}
+          lines={lines}
         />
       </section>
+    );
+    if (!previewTitle) return detail;
+    return (
+      <div className="material-card chart">
+        <a
+          className="material-preview"
+          href={'#snapshot/' + id}
+          aria-haspopup="dialog"
+          onClick={(e) => {
+            if (!e.ctrlKey && !e.metaKey && !e.shiftKey) {
+              e.preventDefault();
+              setOpen(true);
+            }
+          }}
+        >
+          <strong>{previewTitle}</strong>
+          <MiniPlot plot={{ unit, step, lines }} />
+          <span>Раскрыть график ↗</span>
+        </a>
+        {open && (
+          <Dialog title={previewTitle} close={() => setOpen(false)} wide>
+            {detail}
+            <a href={'#snapshot/' + id} target="_blank" rel="noreferrer">
+              Открыть по ссылке ↗
+            </a>
+          </Dialog>
+        )}
+      </div>
     );
   }
   return (
@@ -1135,7 +1282,7 @@ function Workspace({ user, onLogout }: { user: User; onLogout: () => void }) {
     ['chats', 'Чаты'],
     ['cases', 'Разборы'],
   ];
-  return (
+  const content = (
     <div className="team-app">
       <aside className="side">
         <div className="brand">
@@ -1180,6 +1327,12 @@ function Workspace({ user, onLogout }: { user: User; onLogout: () => void }) {
         )}
         {!home ? (
           <p>Загрузка рабочего пространства…</p>
+        ) : route === 'demo-page' || route === 'demo-issue' ? (
+          <DemoObject key={route+id} service={route} id={id}/>
+        ) : route === 'material' ? (
+          <section className="paper">
+            <MaterialDetail id={id} />
+          </section>
         ) : route === 'case' ? (
           <Investigation key={id} id={id} home={home} action={action} refresh={refresh} />
         ) : route === 'range' ? (
@@ -1409,6 +1562,11 @@ function Workspace({ user, onLogout }: { user: User; onLogout: () => void }) {
         )}
       </main>
     </div>
+  );
+  return (
+    <MaterialsProvider home={home} caseId={route === 'case' ? id : undefined} refresh={refresh}>
+      {content}
+    </MaterialsProvider>
   );
 }
 function Root() {

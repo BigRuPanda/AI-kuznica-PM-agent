@@ -1,5 +1,17 @@
 import { createHash } from 'node:crypto';
 export const digest = (value) => createHash('sha256').update(value).digest('hex');
+export function productFamily(value = '') {
+  const p = value.toLowerCase().trim();
+  if (/astra|астр/.test(p)) return 'astra';
+  if (/kaspersky|каспер/.test(p)) return 'kaspersky';
+  return p;
+}
+export const metricStepDays = (metric) =>
+  ['orders_index', 'family_orders_idx', 'cfg_option_share', 'cfg_step_dropoff', 'lk_reco_ctr'].includes(
+    metric,
+  )
+    ? 7
+    : 1;
 const WEEK = 7 * 86400000;
 const dateMs = (s) => Date.parse(s + 'T00:00:00Z');
 const iso = (t) => new Date(t).toISOString().slice(0, 10);
@@ -299,6 +311,12 @@ export function analysisView(
     : 'Определение события добавления в корзину пока не загружено.';
   const result = {
     product,
+    metricVersions: db
+      .prepare(
+        "SELECT version FROM documents WHERE version IN (SELECT version FROM facts WHERE kind='metrics') ORDER BY rowid",
+      )
+      .all()
+      .map((row) => row.version),
     base,
     pivot,
     cut,

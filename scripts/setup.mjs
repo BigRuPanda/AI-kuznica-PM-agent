@@ -14,10 +14,10 @@ const current = parseEnv(original),
   template = parseEnv(await readFile(example, 'utf8'));
 const add = [];
 for (const [key, defaultValue] of Object.entries(template)) {
-  if (Object.hasOwn(current, key) && (!['ADMIN_INVITE_KEY', 'DEMO_INVITE_KEY'].includes(key) || current[key]))
+  if (Object.hasOwn(current, key) && (!['ADMIN_INVITE_KEY', 'DEMO_INVITE_KEY', 'INTEGRATION_KEY'].includes(key) || current[key]))
     continue;
-  const value = ['ADMIN_INVITE_KEY', 'DEMO_INVITE_KEY'].includes(key)
-    ? randomBytes(24).toString('base64url')
+  const value = ['ADMIN_INVITE_KEY', 'DEMO_INVITE_KEY', 'INTEGRATION_KEY'].includes(key)
+    ? randomBytes(key === 'INTEGRATION_KEY' ? 32 : 24).toString('base64url')
     : defaultValue;
   add.push(key + '=' + JSON.stringify(value));
 }

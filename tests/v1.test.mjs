@@ -19,9 +19,9 @@ test('Gemini Developer API uses the selected URL and a server-side key header',a
     assert.equal(url,'https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent');
     assert.equal(init.headers['x-goog-api-key'],'fixture-key');
     assert.ok(!init.headers.Authorization);assert.match(init.body,/get_release/);
-    return Response.json({candidates:[{content:{parts:[{text:'Готово'}]}}]});
+    return Response.json({candidates:[{content:{parts:[{text:'По'},{thought:true,text:'служебная часть'},{text:'казательным графиком'},{text:' являются визиты.\n\n'},{text:'- Первый период\n- Второй период'}]}}]});
   });
-  assert.equal(response.content,'Готово');
+  assert.equal(response.content,'Показательным графиком являются визиты.\n\n- Первый период\n- Второй период');
 });
 
 test('Gemini on Google Cloud: project endpoint, ADC headers and opaque thought signature on the second turn',async()=>{

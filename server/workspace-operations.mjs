@@ -6,16 +6,20 @@ import {
   effect,
   search,
   facts,
+  metricStepDays,
   rankBacklog,
   updateCase,
   setting,
   defaultRules,
   digest,
 } from './evidence.mjs';
-import { visibleCase, dashboard, draft, confirm, thread, cardTypes } from './workbench.mjs';
+import { visibleCase, dashboard, thread, cardTypes } from './workbench.mjs';
 import { access, grant, readSnapshot, readRange, compareRanges, neighboring } from './chart-ranges.mjs';
-import { jira } from './connectors.mjs';
+import { targetFor } from './tracker-connections.mjs';
+import { trackerClient, prepareTracker, confirmTracker, preview, publicPage, caseLinks } from './tracker-workflow.mjs';
 import { runTool } from './analytics.mjs';
+import { prepareResearch, researchContext } from './agent-research.mjs';
+import { saveMaterial } from './materials.mjs';
 
 const text = z.string().min(1).max(2400),
   id = z.string().min(1).max(150),
@@ -55,10 +59,15 @@ const createInput = {
 };
 const issueInput = {
   caseId: id,
-  title: text,
-  description: z.string().max(4000),
+  title: z.string().max(240).optional(),
+  description: z.string().max(4000).optional(),
   key: optional,
   priority: optional,
+  priorityId: optional,
+  statusId: optional,
+  trackerId: optional,
+  assigneeId: optional,
+  comment: z.string().max(4000).optional(),
   rangeId: id.optional(),
 };
 const publishInput = {
@@ -75,6 +84,16 @@ const watchInput = {
   control: optional,
 };
 export const operations = {
+  funnel: [
+    'Рассчитать по счётчикам этапы подбора, завершение и корзину, проверить сегменты и покрытие. Используй для вопросов о пути покупки. В чате thread и rangeId подставит сервер.',
+    {
+      thread: id.optional(),
+      caseId: id.optional(),
+      product: optional,
+      rangeId: id.optional(),
+      calc: id.optional(),
+    },
+  ],
   overview: ['Найти активные сигналы, разборы и беседы команды', {}],
   metrics: ['Список доступных семейств, метрик и разрезов', {}],
   view: ['Посчитать недельный индекс и контроль, открыть разбор, проверить соседние периоды', viewInput],
@@ -92,19 +111,40 @@ export const operations = {
       kinds: z.array(z.enum(['interview', 'competitor', 'backlog', 'releases', 'dictionary'])).optional(),
     },
   ],
-  'jira-search': ['Поиск дубликатов и открытых задач', { query: text }],
+  case_links: ['Доступные участнику задачи и страницы этого разбора', { caseId: id }],
+  issue_search: ['Найти задачи в проекте Redmine', { query: z.string().max(400) }],
+  issue_read: [
+    'Прочитать задачу с комментариями и разрешёнными переходами',
+    { key: id, local: z.boolean().optional() },
+  ],
+  issue_options: ['Приоритеты, исполнители и типы задач Redmine', {}],
+  page_search: ['Найти страницы Confluence в пространстве команды', { query: z.string().max(400) }],
+  page_read: ['Прочитать страницу Confluence и её версию', { key: id, local: z.boolean().optional() }],
+  page_draft: [
+    'Предпросмотр изменения страницы Confluence. fragment — уникальный исходный текст для замены, иначе content добавляется в конец. issueKey связывает страницу с задачей.',
+    {
+      caseId: id,
+      key: optional,
+      title: z.string().max(255).optional(),
+      content: z.string().max(30000).optional(),
+      fragment: z.string().max(10000).optional(),
+      issueKey: optional,
+      baseVersion: z.number().int().positive().optional(),
+    },
+  ],
   'create-case': ['Создать личный разбор по явному поручению', createInput],
   append_case: [
     'Дополнить разбор выводом и ссылкой на доказательство',
     { ...caseInput, note: text, rangeId: id.optional() },
   ],
   chart: [
-    'Построить график из доступных агрегатов (метрика, продукт, сегмент) или архивных событий для count, sum, mean, median, p90',
+    'Построить график. Для агрегатов скопируй сочетание metric, product, segment из metrics. Для недельного индекса заказов используй orders_index и семейство продукта. Параметры field и stat относятся к архивному releaseId.',
     {
       metric: optional,
       product: optional,
       segment: optional,
       releaseId: id.optional(),
+      calc: id.optional(),
       day: z.number().int().optional(),
       field: z.enum(['events', 'amount', 'duration']).optional(),
       stat: z.enum(['count', 'sum', 'mean', 'median', 'p90']).optional(),
@@ -123,7 +163,10 @@ export const operations = {
       pin: z.boolean().optional(),
     },
   ],
-  draft: ['Подготовить и сохранить черновик QA или Jira. Записи в Jira не выполняет.', issueInput],
+  draft: [
+    'Подготовить изменение или создание задачи Redmine. Для изменения передай key и изменяемые поля, ID возьми из справочников.',
+    issueInput,
+  ],
   prepare_publish: ['Подготовить предпросмотр публикации в команду; потребуется подтверждение', publishInput],
   feedback: [
     'Сохранить явно высказанную поправку к источнику',
@@ -141,6 +184,7 @@ export const writes = new Set([
   'set_view',
   'draft',
   'prepare_publish',
+  'page_draft',
   'feedback',
   'watch',
   'decide',
@@ -173,6 +217,39 @@ function commitPublication(store, user, key, data) {
   }
   return { ok: true, id: key, caseId: c.id };
 }
+function metricCatalog(db) {
+  return db
+    .prepare(
+      `SELECT DISTINCT json_extract(body,'$.metric_id') metric,json_extract(body,'$.product') product,
+    json_extract(body,'$.segment') segment FROM facts WHERE kind='metrics' ORDER BY metric,product,segment`,
+    )
+    .all();
+}
+
+function resolveSeries(db, input) {
+  const catalog = metricCatalog(db);
+  const metrics = catalog.filter((r) => r.metric === input.metric);
+  const products = metrics.filter((r) => !input.product || r.product === input.product);
+  const matches = products.filter((r) => !input.segment || r.segment === input.segment);
+  if (matches.length === 1) return matches[0];
+  const options = products.length
+    ? products
+    : metrics.length
+      ? metrics
+      : catalog.filter((r) => !input.product || input.product === r.product);
+  const choices = (options.length ? options : catalog)
+    .slice(0, 8)
+    .map((r) => [r.metric, r.product, r.segment].join(' / '));
+  throw Object.assign(
+    Error(
+      choices.length
+        ? 'Уточните ряд. Доступные сочетания: ' + choices.join('; ')
+        : 'В источниках пока нет рядов метрик.',
+    ),
+    { code: 'CHART_SERIES_UNAVAILABLE' },
+  );
+}
+
 export function workspaceOperation(
   store,
   user,
@@ -181,20 +258,50 @@ export function workspaceOperation(
   env = process.env,
   send = fetch,
   sharedOnly = false,
+  requestId,
 ) {
   const db = store.db;
   const meta = operations[op];
   const b = meta ? z.object(meta[1]).parse(input) : input;
   const current = () => visibleCase(db, user, b.caseId);
+  if (op === 'funnel') {
+    if (!b.thread) throw Error('Укажите беседу для сохранения результата');
+    const shared = thread(db, user, b.thread).scope === 'group';
+    if (b.caseId && current().body.owner && shared) throw Error('Личный разбор недоступен в группе');
+    const r = prepareResearch(
+      store,
+      user,
+      { ...b, question: 'Проверь воронку', screen: b.calc ? { calc: b.calc } : undefined },
+      [],
+      null,
+    );
+    if (!r) throw Error('Уточните семейство продукта или приложите доступный график');
+    const ref = saveMaterial(db, b.thread, {
+      kind: 'report',
+      title: 'Воронка · ' + r.product,
+      product: r.product,
+      contextCalc: r.contextCalc,
+      summary:
+        r.findings.find((s) => s.includes('Завершение подбора')) ||
+        r.findings[0] ||
+        'В выбранном периоде отсутствуют наблюдения.',
+      ranges: r.periods,
+      findings: r.findings,
+      sections: r.sections,
+      children: r.children,
+      checks: r.checks,
+    });
+    return { material: ref, chart: r.requestedChart, available: r.funnelAvailable, ...researchContext(r) };
+  }
   if (op === 'overview') return dashboard(db, user);
   if (op === 'metrics') {
-    const rows = db
-      .prepare(
-        "SELECT DISTINCT json_extract(body,'$.metric_id') metric,json_extract(body,'$.product') product,json_extract(body,'$.segment') segment FROM facts WHERE kind='metrics'",
-      )
-      .all();
     return {
-      metrics: rows,
+      metrics: metricCatalog(db),
+      ordersIndex: {
+        metric: 'orders_index',
+        products: [...new Set(facts(db, 'sales').map((f) => f.data.product_family))],
+        segment: 'all',
+      },
       definitions: facts(db, 'dictionary').map((f) => f.data),
       releases: store.releases().map((r) => ({ id: r.id, title: r.title })),
     };
@@ -222,10 +329,12 @@ export function workspaceOperation(
         .prepare('SELECT * FROM published WHERE case_id=? ORDER BY created DESC LIMIT 6')
         .all(c.id)
         .map((x) => ({ ...x, body: JSON.parse(x.body) })),
-      drafts: db
-        .prepare("SELECT * FROM draft_actions WHERE case_id=? AND (user=? OR state='done')")
-        .all(c.id, user.id)
-        .map((x) => ({ ...x, body: JSON.parse(x.body) })),
+      drafts: sharedOnly
+        ? []
+        : db
+            .prepare('SELECT * FROM draft_actions WHERE case_id=? AND user=? ORDER BY rowid DESC')
+            .all(c.id, user.id)
+            .map(preview),
     };
   }
   if (op === 'create-case') {
@@ -293,24 +402,56 @@ export function workspaceOperation(
         formula: g.result.formula,
       };
     }
-    if (!b.metric || !b.product || !b.segment)
-      throw Error('Выберите metric, product и segment из каталога метрик');
+    if (['orders_index', 'family_orders_idx'].includes(b.metric)) {
+      if (b.segment && b.segment !== 'all')
+        throw Error(
+          'Индекс заказов доступен по семейству для всех устройств. Для этого ряда укажите segment=all.',
+        );
+      let view;
+      if (b.calc) {
+        access(db, user, b.calc, sharedOnly);
+        view = { ...readSnapshot(db, user, b.calc), id: b.calc };
+      } else {
+        if (!b.product || !facts(db, 'sales').some((f) => f.data.product_family === b.product))
+          throw Error('Для индекса заказов выберите семейство из ordersIndex.products.');
+        view = analysisView(db, { product: b.product });
+      }
+      if (
+        (b.product && b.product !== view.product) ||
+        !view.summary?.[0]?.rows?.some((r) => Number.isFinite(r.value))
+      )
+        throw Error('Для выбранного семейства в снимке нет ряда индекса заказов.');
+      grant(db, view.id, 'user', user.id);
+      return {
+        id: view.id,
+        source: 'weekly',
+        metric: 'orders_index',
+        cards: ['summary', 'trend'],
+        title: 'Индекс заказов · ' + view.product,
+        product: view.product,
+        segment: 'all',
+        unit: 'п. индекса',
+        summary: view.summary.map(({ product, before, after }) => ({ product, before, after })),
+      };
+    }
+    const series = resolveSeries(db, b);
     const rows = facts(db, 'metrics')
       .filter(
-        (r) => r.data.metric_id === b.metric && r.data.product === b.product && r.data.segment === b.segment,
+        (r) =>
+          r.data.metric_id === series.metric &&
+          r.data.product === series.product &&
+          r.data.segment === series.segment,
       )
       .sort((a, b) => a.data.date.localeCompare(b.data.date));
     if (!rows.length) throw Error('В этом разрезе нет наблюдений');
-    const step = ['cfg_option_share', 'cfg_step_dropoff', 'lk_reco_ctr'].includes(b.metric)
-      ? 7 * 86400000
-      : 86400000;
+    const step = metricStepDays(b.metric) * 86400000;
     const view = {
       kind: 'metric-chart',
       step,
-      product: b.product,
+      product: series.product,
       title: b.title || b.metric,
       metric: b.metric,
-      segment: b.segment,
+      segment: series.segment,
       unit: rows[0].data.unit,
       points: rows.map((r) => ({
         date: r.data.date,
@@ -322,41 +463,88 @@ export function workspaceOperation(
         version: r.version,
       })),
     };
+    const observed = view.points.filter((p) => Number.isFinite(p.value));
+    if (!observed.length)
+      throw Object.assign(Error('Для ряда пока нет числовых наблюдений.'), {
+        code: 'CHART_SERIES_UNAVAILABLE',
+      });
     const hash = digest(JSON.stringify(view));
     db.prepare('INSERT OR IGNORE INTO evidence_calcs VALUES(?,?)').run(hash, JSON.stringify(view));
     grant(db, hash, 'user', user.id);
-    return { id: hash, source: 'metric', title: view.title, unit: view.unit, points: view.points.length };
-  }
-  if (op === 'jira-search') {
-    if (user.role !== 'judge' && env.JIRA_BASE_URL)
-      return jira(env, send)
-        .search(b.query)
-        .then((items) => ({ local: false, items }));
+    const sample = (p) => ({ date: p.date, value: p.value, partial: p.partial, source: p.source });
     return {
-      local: true,
-      items: [
-        ...new Map([
-          ...search(db, b.query, ['backlog']).map((f) => [f.key, { title: f.data.title, key: f.key }]),
-          ...db
-            .prepare('SELECT key,title,priority FROM local_issues WHERE title LIKE ? OR key=?')
-            .all('%' + b.query + '%', b.query)
-            .map((f) => [f.key, f]),
-        ]).values(),
-      ],
+      id: hash,
+      source: 'metric',
+      title: view.title,
+      metric: view.metric,
+      product: view.product,
+      segment: view.segment,
+      unit: view.unit,
+      points: view.points.length,
+      observations: observed.length,
+      first: sample(observed[0]),
+      last: sample(observed.at(-1)),
+      min: sample(observed.reduce((a, b) => (a.value <= b.value ? a : b))),
+      max: sample(observed.reduce((a, b) => (a.value >= b.value ? a : b))),
     };
   }
-  if (op === 'draft') {
-    if (b.rangeId) {
-      readRange(db, user, b.rangeId);
-      b.description = b.description.slice(0, 3800) + '\nДоказательство: #range/' + b.rangeId;
+  if (op === 'case_links') {
+    current();
+    return caseLinks(store, user, b.caseId, env, send, sharedOnly);
+  }
+  if (
+    [
+      'issue_search',
+      'issue_read',
+      'issue_options',
+      'page_search',
+      'page_read',
+      'draft',
+      'page_draft',
+    ].includes(op)
+  ) {
+    const service = op.startsWith('page_') ? 'confluence' : 'redmine';
+    const target = b.local ? { service, local: true } : targetFor(db, user, service);
+    if (
+      sharedOnly &&
+      (!target.local || (op === 'page_draft' && b.issueKey && !targetFor(db, user, 'redmine').local))
+    )
+      throw Error('Откройте личный чат для работы с задачами и страницами');
+    if (op === 'draft' || op === 'page_draft') {
+      current();
+      if (b.rangeId) {
+        readRange(db, user, b.rangeId);
+        const evidence = '\nДоказательство: #range/' + b.rangeId;
+        if (!b.key || b.description !== undefined)
+          b.description = (b.description || '').slice(0, 3800) + evidence;
+        else if (b.comment) b.comment = b.comment.slice(0, 3800) + evidence;
+      }
+      return prepareTracker(
+        store,
+        user,
+        op === 'draft' ? 'issue' : 'page',
+        b,
+        env,
+        send,
+        requestId,
+        sharedOnly,
+      );
     }
-    return {
-      ...draft(store, user, b),
-      destination:
-        user.role === 'judge' || !env.JIRA_BASE_URL ? 'локальный демо-бэклог' : 'Jira · ' + env.JIRA_PROJECT,
-    };
+    return Promise.resolve(trackerClient(store, user, target, env, send, undefined, sharedOnly)).then(
+      async (api) => {
+        if (op.endsWith('_search')) return { local: !!target.local, items: await api.search(b.query) };
+        if (op === 'issue_options') return api.options();
+        const value = await api.read(b.key);
+        return op === 'page_read' ? publicPage(value) : value;
+      },
+    );
   }
-  if (op === 'confirm') return confirm(store, user, b.id, env, send);
+  if (op === 'confirm') {
+    const row = db.prepare('SELECT * FROM draft_actions WHERE id=? AND user=?').get(b.id, user.id);
+    if (!row) throw Error('Черновик недоступен');
+    visibleCase(db, user, row.case_id);
+    return confirmTracker(store, user, row, b.revision, env, send);
+  }
   if (['prepare_publish', 'publish'].includes(op)) {
     const c = current();
     const range = b.rangeId ? readRange(db, user, b.rangeId) : null;

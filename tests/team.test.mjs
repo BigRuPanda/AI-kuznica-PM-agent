@@ -8,7 +8,7 @@ import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/
 import { openStore } from '../server/store.mjs';
 import { initEvidence, importDocs, cases, analysisView, effect, updateCase } from '../server/evidence.mjs';
 import { createTeamApp } from '../server/team-http.mjs';
-import { jira, metrika } from '../server/connectors.mjs';
+import { metrika } from '../server/connectors.mjs';
 import { initWorkbench, deliver, createThread, enqueue, messages, workJobs } from '../server/workbench.mjs';
 const WEEK = 604800000;
 const date = (i) => new Date(Date.UTC(2026, 0, 5) + i * WEEK).toISOString().slice(0, 10);
@@ -330,6 +330,33 @@ test('accounts, private and group chat, isolated judges, publish, MCP parity, du
       );
       const result = await mcp.callTool({ name: 'analyze_case', arguments: { caseId: c.id } });
       assert.equal(JSON.parse(result.content[0].text).id, v.id);
+      const task = await call(
+        'draft',
+        { caseId: c.id, title: 'Для проверки MCP', description: 'Сверить данные' },
+        a.cookie,
+      );
+      const issue = (await call('confirm', { id: task.b.id }, a.cookie)).b;
+      const prepared = await mcp.callTool({
+        name: 'page_draft',
+        arguments: { caseId: c.id, title: 'Страница из MCP', content: 'Вывод', issueKey: issue.key },
+      });
+      const preview = JSON.parse(prepared.content[0].text);
+      assert.ok(preview.revision);
+      assert.notEqual(
+        (await call('confirm', { id: preview.id, revision: preview.revision }, b.cookie)).s,
+        200,
+      );
+      const page = (await call('confirm', { id: preview.id, revision: preview.revision }, a.cookie)).b;
+      for (const [name, args] of [
+        ['issue_read', { key: issue.key }],
+        ['page_read', { key: page.key }],
+        ['page_search', { query: 'Страница из MCP' }],
+      ]) {
+        const http = await call(name, args, a.cookie);
+        const tool = await mcp.callTool({ name, arguments: args });
+        assert.equal(http.s, 200);
+        assert.deepEqual(JSON.parse(tool.content[0].text), http.b);
+      }
     } finally {
       await mcp.close();
     }
@@ -345,29 +372,7 @@ test('accounts, private and group chat, isolated judges, publish, MCP parity, du
     await app.close();
   }
 });
-test('Jira Cloud and Data Center select matching APIs and tag confirmed issues; Metrika paginates with sampling metadata', async () => {
-  for (const edition of ['cloud', 'dc']) {
-    const calls = [];
-    const api = jira(
-      {
-        JIRA_EDITION: edition,
-        JIRA_BASE_URL: 'https://example.invalid',
-        JIRA_EMAIL: 'pm@example.invalid',
-        JIRA_TOKEN: 'fixture',
-        JIRA_PROJECT: 'PM',
-      },
-      async (url, init) => {
-        calls.push({ url, init });
-        return Response.json(url.includes('search') ? { issues: [] } : { key: 'PM-1' });
-      },
-    );
-    await api.search('лицензия');
-    await api.create('Проверить', 'Описание', 'pm-123');
-    assert.ok(calls[0].url.endsWith(edition === 'cloud' ? '/3/search/jql' : '/2/search'));
-    const fields = JSON.parse(calls[1].init.body).fields;
-    assert.ok(fields.labels.includes('ai-generated'));
-    assert.match(JSON.stringify(fields.description), /сгенерирована ИИ-помощником/);
-  }
+test('Metrika paginates with sampling metadata', async () => {
   let n = 0;
   const r = await metrika({ METRIKA_COUNTER_IDS: '123', METRIKA_TOKEN: 'fixture' }, async (url, init) => {
     assert.equal(init.headers.Authorization, 'OAuth fixture');

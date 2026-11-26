@@ -1,0 +1,36 @@
+.tracker-text,
+.tracker-diff del,
+.tracker-diff ins {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.tracker-diff {
+  display: grid;
+  gap: 0.25rem;
+  margin-block: 0.65rem;
+}
+.tracker-diff del,
+.tracker-diff ins {
+  padding: 0.35rem 0.65rem;
+  border-inline-start: 3px solid;
+}
+.tracker-diff del {
+  color: #79383a;
+  background: #fcf1ef;
+}
+.tracker-diff ins {
+  color: #28583d;
+  background: #eef7f0;
+  text-decoration: none;
+}
+.tracker-preview > a {
+  display: inline-block;
+  margin-block: 0.45rem;
+}
+.tracker-preview h4 {
+  margin-block: 0.4rem;
+}
+.toolbar button[aria-pressed='true'] {
+  font-weight: 700;
+  border-color: currentColor;
+}

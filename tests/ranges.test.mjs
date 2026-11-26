@@ -178,6 +178,39 @@ function model(fn) {
     });
   };
 }
+test('case follow-ups receive the displayed figures and retry an unrelated greeting', async () => {
+  const s = open();
+  try {
+    seed(s);
+    const { c, v } = scene(s);
+    const thread = createThread(s.db, a, 'Обсуждение разбора');
+    const accounts = { publicUser: () => a };
+    const screen = { calc: v.id, cards: ['trend'] };
+    const questions = ['Что об этом думаешь?', 'То думаешь об этом разборе?'];
+    for (const [i, question] of questions.entries()) {
+      let calls = 0;
+      enqueue(s, a, { thread, caseId: c.id, question, screen });
+      await workJobs(s, accounts, env, model((req) => {
+        const current = JSON.parse(req.messages.at(-1).content);
+        assert.equal(current.question, question);
+        assert.equal(current.context.investigation.title, c.title);
+        assert.equal(current.context.visible.calc, v.id);
+        assert.equal(current.context.visible.period.comparisonWeek, v.pivot);
+        assert.equal(current.context.visible.ordersIndex[0].after, v.summary[0].after);
+        assert.equal(current.context.visible.ordersIndex[0].before, 0);
+        assert.equal(current.context.visible.ordersIndex[0].rows, undefined);
+        if (++calls === 1 || i === 1) return say('Привет!');
+        assert.match(req.messages[0].content, /Дай содержательный ответ/);
+        return say('После контрольной недели индекс вырос. Проверьте, сохраняется ли рост без неполной недели.');
+      }));
+      const reply = messages(s.db, a, thread).items.at(-1).body;
+      assert.equal(calls, 2);
+      assert.match(reply.text, i === 0 ? /индекс вырос/ : /что оценить в разборе/);
+    }
+  } finally {
+    s.close();
+  }
+});
 test('conversation, selection investigation, follow-up, a single persisted draft and crash replay', async () => {
   const s = open();
   try {
@@ -408,6 +441,7 @@ test('temporary provider outage repeats only the model turn and preserves the se
     const answer = messages(s.db, a, id).items.at(-1).body;
     assert.equal(attempts, 3);
     assert.match(answer.warning, /503/);
+    assert.match(answer.text.split('\n')[0],/^Не удалось.*503/);
     assert.match(answer.text, /A · Product/);
     assert.equal(s.one('select count(*) n from draft_actions').n, 1);
     assert.equal(answer.actions.filter((x) => x.op === 'draft').length, 1);

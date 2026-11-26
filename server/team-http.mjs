@@ -31,8 +31,13 @@ import {
   workJobs,
   deliver,
 } from './workbench.mjs';
-import { python, metrika, jira, telegram } from './connectors.mjs';
+import { python, metrika, telegram } from './connectors.mjs';
+import { preview, revisePage } from './tracker-workflow.mjs';
+import { configure, connectionInfo, personalConnection, finishOAuth } from './tracker-connections.mjs';
 import { remoteMcp } from './team-mcp.mjs';
+import { readMaterial, attachedMaterials, materialRef, materialPreview } from './materials.mjs';
+import { access } from './chart-ranges.mjs';
+import { resumeJob } from './workbench.mjs';
 
 export function createTeamApp({
   base = databasePath(),
@@ -219,6 +224,17 @@ export function createTeamApp({
       }
       const token = req.headers.cookie?.match(/(?:^|;\s*)pm_session=([A-Za-z0-9_-]+)/)?.[1] || '';
       const user = accounts.sessionUser(token);
+      if (p === '/api/integrations/confluence/callback' && method === 'GET') {
+        if (!user) return reply(401, { error: 'Войдите и повторите подключение Confluence' });
+        await finishOAuth(space(user.space).db, user, url.searchParams, env, send);
+        res.writeHead(303, {
+          Location: '/#settings',
+          'Cache-Control': 'no-store',
+          'Referrer-Policy': 'no-referrer',
+        });
+        res.end();
+        return;
+      }
       if (p === '/mcp') {
         const actor = accounts.bearer(req.headers.authorization?.replace(/^Bearer /, ''));
         if (!actor)
@@ -273,10 +289,24 @@ export function createTeamApp({
           accounts.logout(token);
           return reply(200, {}, { 'Set-Cookie': tokenCookie('', 0) });
         }
+        if (op === 'tracker-preview' || op === 'tracker-revise') {
+          const row = db.prepare('SELECT * FROM draft_actions WHERE id=? AND user=?').get(b.id, user.id);
+          if (!row) throw Error('Черновик недоступен');
+          visibleCase(db, user, row.case_id);
+          return reply(
+            200,
+            op === 'tracker-revise' ? await revisePage(store, user, row, b, env, send) : preview(row),
+          );
+        }
+        if (op === 'integration-config') {
+          configure(db, user, b);
+          return reply(200, connectionInfo(db, user));
+        }
+        if (op === 'integration-access') return reply(200, await personalConnection(db, user, b, env, send));
         if (op === 'overview')
           return reply(200, {
             ...dashboard(db, user),
-            issueMode: user.role === 'judge' || !env.JIRA_BASE_URL ? 'local' : 'jira',
+            integrations: connectionInfo(db, user),
           });
         if (op === 'invite') {
           admin(user);
@@ -309,18 +339,96 @@ export function createTeamApp({
         }
         if (op === 'thread') return reply(200, { id: createThread(db, user, b.title, !!b.group) });
         if (op === 'messages') return reply(200, messages(db, user, b.thread));
+        if (op === 'material') {
+          const m = readMaterial(db, user, b.id);
+          const pins = db
+            .prepare('SELECT case_id FROM case_materials WHERE user=? AND material=?')
+            .all(user.id, b.id);
+          let shared = true;
+          try {
+            access(db, user, b.id, true);
+          } catch {
+            shared = false;
+          }
+          return reply(200, {
+            ...(b.preview ? materialPreview(m) : m),
+            shared,
+            pins: pins.map((p) => p.case_id),
+          });
+        }
+        if (op === 'case-materials') {
+          visibleCase(db, user, b.caseId);
+          const rows = db
+            .prepare('SELECT material FROM case_materials WHERE user=? AND case_id=? ORDER BY rowid')
+            .all(user.id, b.caseId);
+          return reply(200, {
+            items: rows.map((r) => materialRef(r.material, readMaterial(db, user, r.material))),
+          });
+        }
+        if (op === 'pin-material') {
+          const result = store.tx(() => {
+            const m = readMaterial(db, user, b.id);
+            let caseId = b.caseId;
+            if (
+              !caseId &&
+              typeof b.createRequest === 'string' &&
+              b.createRequest.length <= 100 &&
+              b.createRequest &&
+              !b.remove
+            ) {
+              caseId = db
+                .prepare('SELECT case_id FROM material_case_requests WHERE user=? AND request=?')
+                .get(user.id, b.createRequest)?.case_id;
+              if (!caseId) {
+                caseId = workspaceOperation(store, user, 'create-case', {
+                  title: m.title,
+                  product: m.product || b.product,
+                }).id;
+                db.prepare('INSERT INTO material_case_requests VALUES(?,?,?)').run(
+                  user.id,
+                  b.createRequest,
+                  caseId,
+                );
+              }
+            }
+            visibleCase(db, user, caseId);
+            if (b.remove === true)
+              db.prepare('DELETE FROM case_materials WHERE user=? AND case_id=? AND material=?').run(
+                user.id,
+                caseId,
+                b.id,
+              );
+            else db.prepare('INSERT OR IGNORE INTO case_materials VALUES(?,?,?)').run(user.id, caseId, b.id);
+            return { pinned: b.remove !== true, caseId };
+          });
+          return reply(200, result);
+        }
+        if (op === 'resume-job')
+          return reply(
+            200,
+            store.tx(() => resumeJob(db, user, b.id)),
+          );
         if (op === 'say') {
           const t = thread(db, user, b.thread),
             text = String(b.question || '')
               .trim()
               .slice(0, 2400);
           if (t.scope !== 'group' || !text) throw Error('Выберите группу и введите сообщение');
-          db.prepare("INSERT INTO chat_items(thread,author,role,body,created) VALUES(?,?,'user',?,?)").run(
-            t.id,
-            user.name,
-            JSON.stringify({ text }),
-            Date.now(),
-          );
+          store.tx(() => {
+            const materials = attachedMaterials(
+              db,
+              user,
+              b.materialIds,
+              true,
+              b.shareMaterials === true ? t.id : undefined,
+            );
+            db.prepare("INSERT INTO chat_items(thread,author,role,body,created) VALUES(?,?,'user',?,?)").run(
+              t.id,
+              user.name,
+              JSON.stringify({ text, materials }),
+              Date.now(),
+            );
+          });
           return reply(200, { ok: true });
         }
         if (op === 'ask') return reply(200, { id: enqueue(store, user, b) });
@@ -349,7 +457,7 @@ export function createTeamApp({
           admin(user);
           return reply(200, {
             metrika: !!env.METRIKA_TOKEN,
-            jira: !!env.JIRA_BASE_URL,
+            integrations: connectionInfo(db,user),
             telegram: !!env.TELEGRAM_BOT_TOKEN,
             smtp: !!env.SMTP_HOST,
             llm: env.LLM_MODEL || '',

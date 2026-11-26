@@ -4,8 +4,9 @@ import { DatabaseSync, backup } from 'node:sqlite';
 import { databasePath } from '../server/config.mjs';
 import { openStore } from '../server/store.mjs';
 import { initEvidence, importDocs, cases, analysisView, setSetting, digest } from '../server/evidence.mjs';
-import { jira, metrika, telegram, python, mail } from '../server/connectors.mjs';
-import { openAccounts } from '../server/accounts.mjs';
+import { metrika, telegram, python, mail } from '../server/connectors.mjs';
+import { openAccounts, workspacePath } from '../server/accounts.mjs';
+import { initConnections, personalConnection, targetFor } from '../server/tracker-connections.mjs';
 const [op, file] = process.argv.slice(2),
   base = databasePath(),
   env = process.env;
@@ -71,9 +72,25 @@ async function main() {
     }
     return;
   }
-  if (op === 'check-jira') {
-    const r = await jira().check();
-    console.log('Чтение проекта Jira подтверждено: ' + r.key);
+  if (op === 'check-redmine' || op === 'check-confluence') {
+    if (!env.MCP_ACCESS_TOKEN) throw Error('Укажите свой персональный ключ приложения в MCP_ACCESS_TOKEN');
+    const accounts = openAccounts(join(dirname(base), 'accounts.sqlite'));
+    try {
+      const user = accounts.bearer(env.MCP_ACCESS_TOKEN);
+      if (!user) throw Error('Персональный ключ приложения недействителен');
+      const service = op.slice('check-'.length);
+      const db = new DatabaseSync(workspacePath(base, user.space));
+      try {
+        initConnections(db);
+        if (targetFor(db, user, service).local) throw Error('Выбрано локальное демо. Настройте адрес сервиса');
+        await personalConnection(db, user, {service, action:'check'}, env, fetch);
+        console.log('Личный доступ подтверждён · ' + service);
+      } finally {
+        db.close();
+      }
+    } finally {
+      accounts.db.close();
+    }
     return;
   }
   if (op === 'check-metrika') {
@@ -191,7 +208,7 @@ async function main() {
       return;
     }
     throw Error(
-      'Доступно: backup | import <file> | audit | invite | cost | check-jira | check-metrika | check-telegram | check-smtp | test-smtp | register-webhook',
+      'Доступно: backup | import <file> | audit | invite | cost | check-redmine | check-confluence | check-metrika | check-telegram | check-smtp | test-smtp | register-webhook',
     );
   } finally {
     store.close();

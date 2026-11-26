@@ -16,7 +16,26 @@ import {
   digest,
 } from './evidence.mjs';
 import { apiConfigured, providerCall } from './agent.mjs';
-import { jira, mail, telegram } from './connectors.mjs';
+import { initTracking } from './tracker-workflow.mjs';
+import { mail, telegram } from './connectors.mjs';
+import {
+  initMaterials,
+  attachedMaterials,
+  materialsFromReply,
+  readMaterial,
+  saveMaterial,
+  selectionForMaterial,
+  telegramParts,
+} from './materials.mjs';
+import {
+  newTopic,
+  prepareResearch,
+  researchIntent,
+  resetsChartTopic,
+  screenRequest,
+} from './agent-research.mjs';
+import { asksToDraw, chartFindings, chartObservations, resolveChartFocus } from './chart-focus.mjs';
+import { dayComparison, explicitDayWindow } from './day-comparison.mjs';
 export function initWorkbench(db) {
   db.exec(
     'CREATE TABLE IF NOT EXISTS conversations(id TEXT PRIMARY KEY,owner TEXT,scope TEXT,title TEXT);' +
@@ -28,7 +47,9 @@ export function initWorkbench(db) {
       'CREATE TABLE IF NOT EXISTS costs(id INTEGER PRIMARY KEY,job TEXT,model TEXT,elapsed INTEGER,input INTEGER,output INTEGER);' +
       'CREATE TABLE IF NOT EXISTS known_updates(id INTEGER PRIMARY KEY);',
   );
+  initTracking(db);
   initRanges(db);
+  initMaterials(db);
   db.prepare("INSERT OR IGNORE INTO conversations VALUES('group','','group','Команда Store')").run();
   db.prepare("UPDATE jobs SET status='queued' WHERE status='running'").run();
   db.prepare("UPDATE draft_actions SET state='uncertain' WHERE state='sending'").run();
@@ -94,6 +115,13 @@ export function enqueue(store, user, b) {
       throw Error('Сначала опубликуйте личный разбор');
     const id = digest([user.id, t.id, b.requestId || randomUUID()].join('/'));
     if (store.db.prepare('SELECT id FROM jobs WHERE id=?').get(id)) return id;
+    const materials = attachedMaterials(
+      store.db,
+      user,
+      b.materialIds,
+      t.scope === 'group',
+      b.shareMaterials === true ? t.id : undefined,
+    );
     let screen;
     if (b.screen?.calc) {
       access(store.db, user, b.screen.calc, t.scope === 'group');
@@ -110,7 +138,11 @@ export function enqueue(store, user, b) {
     }
     let range = null;
     if (b.selection) {
-      range = compareRanges(store, user, b.selection, { sharedOnly: t.scope === 'group' });
+      const selection = materials.reduce(
+        (s, m) => selectionForMaterial(store.db, user, m.id, s, t.scope === 'group'),
+        b.selection,
+      );
+      range = compareRanges(store, user, selection, { sharedOnly: t.scope === 'group' });
     } else if (b.rangeId) {
       access(store.db, user, b.rangeId, t.scope === 'group');
       range = readRange(store.db, user, b.rangeId);
@@ -136,10 +168,18 @@ export function enqueue(store, user, b) {
         }
       : {};
     if (range) grant(store.db, range.id, 'thread', t.id);
+    const askedAt = Date.now();
+    const requestedPeriod = explicitDayWindow(q, askedAt);
     const questionSeq = Number(
       store.db
         .prepare('INSERT INTO chat_items(thread,author,role,body,created) VALUES(?,?,?,?,?)')
-        .run(t.id, user.name, 'user', JSON.stringify({ text: q, ...attachment }), Date.now()).lastInsertRowid,
+        .run(
+          t.id,
+          user.name,
+          'user',
+          JSON.stringify({ text: q, ...attachment, materials, contextReset: resetsChartTopic(q) }),
+          askedAt,
+        ).lastInsertRowid,
     );
     store.db
       .prepare('INSERT INTO jobs VALUES(?,?,?,?,?,?,?)')
@@ -147,7 +187,7 @@ export function enqueue(store, user, b) {
         id,
         t.id,
         user.id,
-        JSON.stringify({ ...b, screen, ...attachment, question: q, questionSeq }),
+        JSON.stringify({ ...b, screen, ...attachment, question: q, questionSeq, requestedPeriod }),
         'queued',
         null,
         Date.now(),
@@ -163,11 +203,17 @@ export function messages(db, user, id) {
       .all(id)
       .map((x) => {
         const body = JSON.parse(x.body);
+        if (body.mode !== 'daily' && body.jobId && ['partial', 'failed'].includes(body.outcome))
+          body.canResume = !!db.prepare('SELECT 1 FROM jobs WHERE id=? AND user=?').get(body.jobId, user.id);
+        if (x.role === 'assistant' && !body.materials) {
+          body.materials = materialsFromReply(db, user, id, body);
+          db.prepare('UPDATE chat_items SET body=? WHERE seq=?').run(JSON.stringify(body), x.seq);
+        }
         if (body.actions)
           body.actions = body.actions.map((a) => {
-            if (!['draft', 'prepare_publish'].includes(a.op)) return a;
+            if (!['draft', 'page_draft', 'prepare_publish'].includes(a.op)) return a;
             const row =
-              a.op === 'draft'
+              a.op !== 'prepare_publish'
                 ? db.prepare('SELECT user owner,state,external FROM draft_actions WHERE id=?').get(a.id)
                 : db.prepare('SELECT owner,state FROM agent_previews WHERE id=?').get(a.id);
             return {
@@ -179,7 +225,19 @@ export function messages(db, user, id) {
           });
         return { ...x, body };
       }),
-    jobs: db.prepare("SELECT id,status FROM jobs WHERE thread=? AND status IN ('queued','running')").all(id),
+    jobs: db
+      .prepare(
+        `SELECT j.id,j.status,json_extract(t.body,'$.completed') completed,json_extract(r.body,'$.checks') checks,json_extract(t.body,'$.issues') issues
+      FROM jobs j LEFT JOIN agent_turns t ON t.job=j.id LEFT JOIN job_research r ON r.job=j.id
+      WHERE thread=? AND status IN ('queued','running')`,
+      )
+      .all(id)
+      .map((j) => ({
+        id: j.id,
+        status: j.status,
+        issue: Object.values(JSON.parse(j.issues || '{}'))[0],
+        steps: [...JSON.parse(j.checks || '[]'), ...JSON.parse(j.completed || '[]')],
+      })),
   };
 }
 const planTool = {
@@ -200,6 +258,7 @@ const planTool = {
   },
 };
 const chatInstructions = [
+  'Если результат получить нельзя, скажи об этом первой фразой и укажи причину. Всегда соблюдай период запроса.',
   'Ты помощник продакта Softline Store. Разговаривай по-русски, естественно и по существу. Учитывай предыдущие реплики этой беседы.',
   'На приветствие поздоровайся. На вопросы о своих возможностях, понятиях и методах отвечай обычным текстом. Если собеседник просто уточняет твою мысль, продолжай разговор.',
   'Вызывай investigate, когда нужны факты рабочего пространства: реальные числа, сравнение, график, документы, релизы или бэклог. Для рекомендаций в ЛК и их CTR используй ctr. Для объяснения чисел из предыдущего расчёта можешь запросить его показатели повторно.',
@@ -221,7 +280,7 @@ function recentDialogue(db, threadId, questionSeq) {
 
 function modelHistory(history, includeFacts) {
   return history.map(({ role, body }) => {
-    if (body.calc && !includeFacts) {
+    if (!includeFacts && role === 'assistant' && (body.calc || body.rangeId || body.materials?.length)) {
       // Selection mode keeps the underlying report, quotes and figures on this server.
       return { role, content: JSON.stringify({ product: body.product, cards: body.cards, full: body.full }) };
     }
@@ -336,16 +395,91 @@ function factsForCards(view, cards, backlog) {
     lines.push(...view.corrections.map((x) => 'Поправка PM к ' + x.source + ': ' + x.comment));
   return lines;
 }
-export async function answer(store, user, b, env = process.env, send = fetch, job = '') {
+export async function answer(store, user, b, env = process.env, send = fetch, job = randomUUID()) {
+  const db = store.db;
+  const { scope } = thread(db, user, b.thread);
+  const shared = scope === 'group';
+  let focus;
+  if (!b.rangeId && b.materialIds?.length === 1) {
+    if (readMaterial(db, user, b.materialIds[0], shared).plot) focus = { id: b.materialIds[0] };
+  } else if (!b.rangeId && !screenRequest(b.question) && !newTopic(b.question)) {
+    focus = resolveChartFocus(db, user, b, shared);
+  }
+  if (focus?.choices)
+    return {
+      mode: 'clarification',
+      chartChoices: focus.choices.map((c) => c.id),
+      text:
+        'Какой график вы имеете в виду?\n' + focus.choices.map((c, i) => i + 1 + '. ' + c.label).join('\n'),
+    };
+  if (focus?.id) b = { ...b, materialIds: [focus.id], screen: undefined };
+  const history = recentDialogue(db, b.thread, b.questionSeq);
+  if (b.caseId) visibleCase(db, user, b.caseId);
+  const daily = store.tx(() => dayComparison(db, user, b, history, shared));
+  if (daily) return daily;
+  const intent = researchIntent(b.question);
+  if (focus?.id && !asksToDraw(b.question)) {
+    intent.chart = false;
+    if (!/проверь.*воронк|разбери.*воронк/i.test(b.question)) intent.funnel = false;
+    intent.analytical = true;
+  }
+  const result = await answerTurn(store, user, b, env, send, job, history, intent);
+  return focus?.id ? { ...result, focusMaterialId: focus.id } : result;
+}
+
+async function answerTurn(store, user, b, env, send, job, history, intent) {
   const db = store.db,
     c = b.caseId ? visibleCase(db, user, b.caseId) : null;
-  thread(db, user, b.thread);
-  const history = recentDialogue(db, b.thread, b.questionSeq);
-  if (env.LLM_DATA_MODE === 'analysis' && apiConfigured(env)) {
-    const { runAssistant } = await import('./workspace-agent.mjs');
-    return runAssistant(store, user, b, env, send, job, history);
+  const analyticalModel = env.LLM_DATA_MODE === 'analysis' && apiConfigured(env);
+  const research =
+    analyticalModel || intent.chart || intent.report || intent.funnel
+      ? store.tx(() => prepareResearch(store, user, b, history, job, intent))
+      : null;
+  if (
+    b.screen?.calc &&
+    screenRequest(b.question) &&
+    !intent.chart &&
+    !intent.report &&
+    !b.rangeId &&
+    !b.materialIds?.length
+  ) {
+    const v = readSnapshot(db, user, b.screen.calc),
+      cards = b.screen.cards?.length ? b.screen.cards : ['summary'];
+    return {
+      text: factsForCards(v, cards, v.backlog || []).join('\n'),
+      calc: b.screen.calc,
+      cards,
+      full: v.full,
+      caseId: b.caseId,
+      product: v.product,
+      mode: 'calculation',
+    };
   }
-  const rangeId = b.rangeId || history.findLast((m) => m.body.rangeId)?.body.rangeId;
+  if (analyticalModel) {
+    const { runAssistant } = await import('./workspace-agent.mjs');
+    return runAssistant(store, user, b, env, send, job, history, research, intent);
+  }
+  if (research?.intent.funnel || (intent.chart && research?.requestedChart))
+    return {
+      text: research.findings.join('\n') || 'За выбранные даты нет сопоставимых наблюдений.',
+      product: research.product,
+      rangeId: b.rangeId,
+      mode: 'calculation',
+      outcome: research.intent.chart && !research.requestedChart ? 'partial' : 'done',
+      caseId: b.caseId,
+    };
+  if (b.materialIds?.length && !b.rangeId) {
+    const m = readMaterial(db, user, b.materialIds[0]);
+    return {
+      text: m.plot ? chartFindings(m, chartObservations(m)).join('\n') || m.title : m.summary || m.title,
+      product: m.product,
+      materials: [{ id: m.id, title: m.title, kind: m.kind }],
+      mode: 'calculation',
+    };
+  }
+  const rangeId =
+    b.rangeId ||
+    (!newTopic(b.question) && history.findLast((m) => m.body.rangeId || m.body.contextReset)?.body.rangeId);
   if (rangeId && (b.rangeId || /здесь|почему|участ|период|гипотез|вывод|опроверг/i.test(b.question))) {
     const range = readRange(db, user, rangeId);
     const lines = range.periods.flatMap((p, i) =>
@@ -405,6 +539,7 @@ export async function answer(store, user, b, env = process.env, send = fetch, jo
               context,
               question: b.question,
               previousCards: previous?.cards,
+              requestedPeriod:b.requestedPeriod || undefined,
             }),
           },
         ],
@@ -433,13 +568,16 @@ export async function answer(store, user, b, env = process.env, send = fetch, jo
     plan = fallbackPlan(b.question, products, context);
     if (plan.text) return { text: plan.text, mode: 'local', warning };
   }
-  const view = analysisView(db, {
-    caseId: b.caseId,
-    product: plan.product,
-    full: plan.full,
-    control: b.control,
-    sourceQuery: plan.cards.includes('evidence') ? plan.query : '',
-  });
+  const view =
+    b.screen?.calc && plan.product === context.product && plan.full === b.screen.full
+      ? { ...readSnapshot(db, user, b.screen.calc), id: b.screen.calc }
+      : analysisView(db, {
+          caseId: b.caseId,
+          product: plan.product,
+          full: plan.full,
+          control: b.control ?? b.screen?.control,
+          sourceQuery: plan.cards.includes('evidence') ? plan.query : '',
+        });
   grant(db, view.id, 'thread', b.thread);
   const backlog = rankBacklog(db, view.product),
     lines = factsForCards(view, plan.cards, backlog);
@@ -457,6 +595,144 @@ export async function answer(store, user, b, env = process.env, send = fetch, jo
     caseId: b.caseId,
   };
 }
+function briefConclusion(text, findings) {
+  const paragraphs = text.trim().split(/\n\s*\n/);
+  const lead = paragraphs.find((p) => p.length > 35 && !/[:：]\s*$/.test(p)) || findings[0] || text;
+  if (lead.length <= 480) return lead;
+  const sentences = lead.match(/.+?[.!?](?=\s|$)/gs);
+  return sentences?.length ? sentences.slice(0, 2).join(' ').trim() : lead;
+}
+
+function completeMaterials(store, user, job, b, result) {
+  if (result.mode === 'daily') return result;
+  if (result.chartChoices) return { ...result, materials: [] };
+  const db = store.db;
+  const r = JSON.parse(db.prepare('SELECT body FROM job_research WHERE job=?').get(job)?.body || 'null');
+  const intent = r?.intent || researchIntent(b.question);
+  if (result.focusMaterialId && !asksToDraw(b.question)) intent.chart = false;
+  const refs = materialsFromReply(db, user, b.thread, { ...result, text: '' });
+  const children = new Map(
+    [...(r?.children || []), ...(result.materials || []), ...refs].map((m) => [m.id, m]),
+  );
+  const chartTitles = new Set(
+    (result.suggestions || []).filter((s) => ['metric', 'release'].includes(s.source)).map((s) => s.title),
+  );
+  let chart =
+    (result.chartMaterial?.kind === 'chart' ? result.chartMaterial : null) ||
+    r?.requestedChart ||
+    result.funnelChart ||
+    refs.find((m) => m.kind === 'chart' && chartTitles.has(m.title));
+  if (chart && r?.chartMetric && readMaterial(db, user, chart.id).plot?.base.metric !== r.chartMetric)
+    chart = r.requestedChart || undefined;
+  const chartClaim = /график (?:построен|создан|готов)|(?:построил[аи]?|построен) график/i.test(result.text);
+  const draftClaim =
+    /черновик.{0,18}(?:создан|сохран[её]н|подготовлен)|(?:создал|сохранил|подготовил)[аи]? черновик/i.test(
+      result.text,
+    );
+  if (!chart && chartClaim) {
+    result = {
+      ...result,
+      text: 'Для запрошенного графика пока нет сохранённого расчёта. Уточните метрику или выберите участок с наблюдениями.',
+      outcome: 'partial',
+    };
+  } else if (draftClaim && !result.actions?.some((a) => a.op === 'draft')) {
+    result = {
+      ...result,
+      text: 'Черновик пока не сохранён. Можно продолжить поручение или подготовить его в разделе «Решение по задаче».',
+      outcome: 'partial',
+    };
+  }
+  let text = result.text,
+    materials = result.materials || refs;
+  if (result.warning && !text.includes(result.warning)) text = result.warning + '\n\n' + text;
+  if (
+    r?.intent.funnel &&
+    !r.funnelAvailable &&
+    !result.funnelChecked &&
+    !result.warning &&
+    result.outcome !== 'failed' &&
+    !text.trim().endsWith('?')
+  ) {
+    result.outcome = 'partial';
+    if (!/^Не удалось проверить воронку/.test(text))
+      text = 'Не удалось проверить воронку: за выбранный период нет наблюдений по этапам.\n\n' + text;
+  }
+  if (
+    intent.chart &&
+    !chart &&
+    result.outcome !== 'failed' &&
+    !text.trim().endsWith('?') &&
+    !/^(?:Не удалось|Для запрошенного графика|Поручение выполнено частично)/i.test(text)
+  ) {
+    result.outcome = 'partial';
+    text = 'Не удалось построить запрошенный график: нет подтверждённого ряда с наблюдениями.\n\n' + text;
+  }
+  const successful = !result.warning && !['partial', 'failed'].includes(result.outcome);
+  if (successful && r?.intent.funnel && r.funnelAvailable) {
+    const metricTitle = chart && readMaterial(db, user, chart.id).plot?.title.split(' · ')[0];
+    const focus = r.findings.find((s) => s.includes(metricTitle || 'Завершение подбора')) || r.findings[0];
+    const loss = r.findings.find((s) => s.startsWith('Наибольшая наблюдаемая потеря'));
+    if (focus) text = [focus, intent.report && loss].filter(Boolean).join(' ');
+  }
+  if (intent.chart && chart) {
+    if (successful && result.mode === 'analysis') {
+      const { id, ...frozen } = readMaterial(db, user, chart.id);
+      children.delete(id);
+      chart = saveMaterial(db, b.thread, { ...frozen, analysis: result.text });
+      children.set(chart.id, chart);
+    }
+    materials = [chart];
+    if (successful) text = briefConclusion(text, r?.findings || []);
+  }
+  if (intent.report && (children.size || r?.sections.length) && !result.actions?.length) {
+    if (successful) text = briefConclusion(text, r?.findings || []);
+    const report = saveMaterial(db, b.thread, {
+      kind: 'report',
+      title: 'Разбор · ' + (r?.product || result.product || b.question).slice(0, 120),
+      product: r?.product || result.product,
+      summary: text,
+      analysis: result.mode === 'analysis' ? result.text : undefined,
+      question: b.question,
+      ranges: r?.periods,
+      contextCalc: r?.contextCalc,
+      findings: r?.findings,
+      sections: r?.sections || [],
+      children: [...children.values()],
+      checks: [...(r?.checks || []), ...(result.steps || [])],
+    });
+    materials = intent.chart && chart ? [chart, report] : [report];
+  }
+  const charts = materials.filter((m) => m.kind === 'chart');
+  const focusMaterialId = charts.length > 1 ? undefined : charts[0]?.id || result.focusMaterialId;
+  return {
+    ...result,
+    text,
+    materials,
+    focusMaterialId,
+    checks: r?.checks,
+    contextReset: resetsChartTopic(b.question),
+  };
+}
+
+export function resumeJob(db, user, id) {
+  const j = db.prepare('SELECT * FROM jobs WHERE id=? AND user=?').get(id, user.id);
+  if (!j) throw Error('Поручение недоступно');
+  if (!['failed', 'partial'].includes(j.status)) return { id };
+  const row = db.prepare('SELECT body FROM agent_turns WHERE job=?').get(id);
+  if (row) {
+    const state = JSON.parse(row.body);
+    delete state.final;
+    delete state.providerRetried;
+    delete state.reminder;
+    state.round = 0;
+    state.failures = {};
+    state.issues = {};
+    db.prepare('UPDATE agent_turns SET body=? WHERE job=?').run(JSON.stringify(state), id);
+  }
+  db.prepare("UPDATE jobs SET status='queued' WHERE id=?").run(id);
+  return { id };
+}
+
 export async function workJobs(store, accounts, env, send) {
   const db = store.db,
     job = db.prepare("SELECT * FROM jobs WHERE status='queued' ORDER BY created,rowid LIMIT 1").get();
@@ -471,111 +747,58 @@ export async function workJobs(store, accounts, env, send) {
     status = 'done';
   try {
     result = await answer(store, user, b, env, send, job.id);
+    result = store.tx(() => completeMaterials(store, user, job.id, b, result));
+    status = result.outcome || (result.warning ? 'partial' : 'done');
   } catch (e) {
     result = { text: 'Не удалось завершить поручение: ' + e.message };
     status = 'failed';
   }
   store.tx(() => {
     db.prepare('UPDATE jobs SET status=?,result=? WHERE id=?').run(status, JSON.stringify(result), job.id);
-    db.prepare('INSERT INTO chat_items(thread,author,role,body,created) VALUES(?,?,?,?,?)').run(
-      job.thread,
-      'Агент',
-      'assistant',
-      JSON.stringify({ ...result, inReplyTo: b.questionSeq }),
-      Date.now(),
-    );
-    if (b.telegramChat)
-      db.prepare(
-        "INSERT OR IGNORE INTO deliveries(id,channel,state,body) VALUES(?,'telegram','queued',?)",
-      ).run(
-        job.id,
-        JSON.stringify({ chat: b.telegramChat, text: result.text.slice(0, 3000), caseId: b.caseId }),
-      );
-  });
-}
-export function draft(store, user, b) {
-  visibleCase(store.db, user, b.caseId);
-  const id = randomUUID();
-  const body = {
-    title: String(b.title || '')
-      .trim()
-      .slice(0, 240),
-    description: String(b.description || '').slice(0, 4000),
-    key: String(b.key || '').trim(),
-    priority: String(b.priority || '').trim(),
-  };
-  if (!body.title || (body.key && !body.priority))
-    throw Error('Нужны заголовок и приоритет для изменения существующей задачи');
-  store.db
-    .prepare("INSERT INTO draft_actions VALUES(?,?,?,?,'draft',NULL)")
-    .run(id, b.caseId, user.id, JSON.stringify(body));
-  return { id, ...body, state: 'draft' };
-}
-export async function confirm(store, user, id, env, send) {
-  const db = store.db,
-    r = db.prepare('SELECT * FROM draft_actions WHERE id=? AND user=?').get(id, user.id);
-  if (!r) throw Error('Черновик недоступен');
-  visibleCase(db, user, r.case_id);
-  if (r.state === 'done') return { key: r.external };
-  const body = JSON.parse(r.body),
-    local = user.role === 'judge' || !env.JIRA_BASE_URL;
-  if (local) {
-    return store.tx(() => {
-      const key = body.key || 'DEMO-' + id.slice(0, 8);
-      const existing = db.prepare('SELECT * FROM local_issues WHERE key=?').get(key);
-      const imported = body.key && facts(db, 'backlog').find((f) => f.key === key)?.data;
-      if (body.key && !existing && !imported) throw Error('Задача не найдена в локальном бэклоге');
-      const title = existing?.title || imported?.title || body.title;
-      const description =
-        existing?.description ||
-        imported?.description_short ||
-        body.description + '\nсгенерирована ИИ-помощником';
-      db.prepare('INSERT OR REPLACE INTO local_issues VALUES(?,?,?,?,?,?)').run(
-        key,
-        title,
-        description,
-        body.priority || 'Normal',
-        r.case_id,
+    const body = JSON.stringify({
+      ...result,
+      materials: result.materials || [],
+      outcome: status,
+      jobId: job.id,
+      inReplyTo: b.questionSeq,
+    });
+    const existing = db
+      .prepare(
+        "SELECT seq FROM chat_items WHERE thread=? AND role='assistant' AND json_extract(body,'$.inReplyTo')=?",
+      )
+      .get(job.thread, b.questionSeq);
+    if (existing) db.prepare('UPDATE chat_items SET body=? WHERE seq=?').run(body, existing.seq);
+    else
+      db.prepare('INSERT INTO chat_items(thread,author,role,body,created) VALUES(?,?,?,?,?)').run(
+        job.thread,
+        'Агент',
+        'assistant',
+        body,
         Date.now(),
       );
-      db.prepare("UPDATE draft_actions SET state='done',external=? WHERE id=?").run(key, id);
-      return { key, local: true };
-    });
-  }
-  if (!local && r.state === 'uncertain') {
-    const api = jira(env, send),
-      found = body.key
-        ? (await api.get(body.key)).fields.priority?.name === body.priority
-          ? body.key
-          : null
-        : await api.findMarker('pm-' + id);
-    if (!found)
-      throw Error('Результат записи не подтверждён. Сверьте состояние Jira перед повторной записью.');
-    db.prepare("UPDATE draft_actions SET state='done',external=? WHERE id=?").run(found, id);
-    return { key: found };
-  }
-  if (!local && body.key) await jira(env, send).get(body.key);
-  if (!db.prepare("UPDATE draft_actions SET state='sending' WHERE id=? AND state='draft'").run(id).changes)
-    throw Error('Проверяется результат предыдущей записи');
-  try {
-    const key = body.key
-      ? (await jira(env, send).prioritize(body.key, body.priority), body.key)
-      : (await jira(env, send).create(body.title, body.description, 'pm-' + id)).key;
-    db.prepare("UPDATE draft_actions SET state='done',external=? WHERE id=?").run(key, id);
-    return { key, local };
-  } catch (e) {
-    db.prepare('UPDATE draft_actions SET state=? WHERE id=?').run(
-      e.status && e.status < 500 ? 'draft' : 'uncertain',
-      id,
-    );
-    throw e;
-  }
+    if (b.telegramChat) {
+      const base = env.APP_BASE_URL || 'http://127.0.0.1:8090';
+      const message = b.caseId
+        ? { ...result, text: result.text + '\n' + base + '/#case/' + b.caseId }
+        : result;
+      let previous;
+      for (const [i, text] of telegramParts(message, base).entries()) {
+        const id = digest(job.id + '/' + body) + '/' + i;
+        db.prepare(
+          "INSERT OR IGNORE INTO deliveries(id,channel,state,body) VALUES(?,'telegram','queued',?)",
+        ).run(id, JSON.stringify({ chat: b.telegramChat, text, after: previous }));
+        previous = id;
+      }
+    }
+  });
 }
 export async function deliver(store, env, send, mailSend = mail) {
   const db = store.db;
   const d = db
     .prepare(
-      "SELECT * FROM deliveries WHERE state='queued' AND next<=? AND (?=1 OR json_extract(body,'$.chat') IS NOT NULL) ORDER BY rowid LIMIT 1",
+      `SELECT * FROM deliveries d WHERE state='queued' AND next<=? AND (?=1 OR json_extract(body,'$.chat') IS NOT NULL)
+       AND (json_extract(body,'$.after') IS NULL OR EXISTS(SELECT 1 FROM deliveries prev WHERE prev.id=json_extract(d.body,'$.after') AND prev.state='delivered'))
+       ORDER BY rowid LIMIT 1`,
     )
     .get(Date.now(), env.NOTIFICATIONS_ENABLED === 'true' ? 1 : 0);
   if (!d) return;
