@@ -16,6 +16,7 @@ import {
   digest,
 } from './evidence.mjs';
 import { apiConfigured, providerCall } from './agent.mjs';
+import { destination } from './notification-contacts.mjs';
 import { initTracking } from './tracker-workflow.mjs';
 import { mail, telegram } from './connectors.mjs';
 import {
@@ -36,7 +37,7 @@ import {
 } from './agent-research.mjs';
 import { asksToDraw, chartFindings, chartObservations, resolveChartFocus } from './chart-focus.mjs';
 import { dayComparison, explicitDayWindow } from './day-comparison.mjs';
-export function initWorkbench(db) {
+export function initWorkbench(db, env = process.env) {
   db.exec(
     'CREATE TABLE IF NOT EXISTS conversations(id TEXT PRIMARY KEY,owner TEXT,scope TEXT,title TEXT);' +
       'CREATE TABLE IF NOT EXISTS chat_items(seq INTEGER PRIMARY KEY,thread TEXT,author TEXT,role TEXT,body TEXT,created INTEGER);' +
@@ -47,7 +48,7 @@ export function initWorkbench(db) {
       'CREATE TABLE IF NOT EXISTS costs(id INTEGER PRIMARY KEY,job TEXT,model TEXT,elapsed INTEGER,input INTEGER,output INTEGER);' +
       'CREATE TABLE IF NOT EXISTS known_updates(id INTEGER PRIMARY KEY);',
   );
-  initTracking(db);
+  initTracking(db, env);
   initRanges(db);
   initMaterials(db);
   db.prepare("INSERT OR IGNORE INTO conversations VALUES('group','','group','Команда Store')").run();
@@ -792,17 +793,22 @@ export async function workJobs(store, accounts, env, send) {
     }
   });
 }
-export async function deliver(store, env, send, mailSend = mail) {
+export async function deliver(store, env, send, mailSend = mail, accounts) {
   const db = store.db;
   const d = db
     .prepare(
-      `SELECT * FROM deliveries d WHERE state='queued' AND next<=? AND (?=1 OR json_extract(body,'$.chat') IS NOT NULL)
+      `SELECT * FROM deliveries d WHERE state='queued' AND next<=? AND (?=1 OR json_extract(body,'$.chat') IS NOT NULL OR json_extract(body,'$.owner') IS NOT NULL)
        AND (json_extract(body,'$.after') IS NULL OR EXISTS(SELECT 1 FROM deliveries prev WHERE prev.id=json_extract(d.body,'$.after') AND prev.state='delivered'))
        ORDER BY rowid LIMIT 1`,
     )
     .get(Date.now(), env.NOTIFICATIONS_ENABLED === 'true' ? 1 : 0);
   if (!d) return;
   const b = JSON.parse(d.body);
+  const personal = b.owner && accounts ? destination(accounts,b.owner,d.channel) : null;
+  if (b.owner && (!personal || digest(personal) !== b.addressHash)) {
+    db.prepare("UPDATE deliveries SET state='cancelled' WHERE id=?").run(d.id);
+    return;
+  }
   const destinations = [
     ...new Set(
       [...String(env.TELEGRAM_CHAT_IDS || '').split(','), env.TELEGRAM_CHANNEL_ID]
@@ -811,7 +817,7 @@ export async function deliver(store, env, send, mailSend = mail) {
         .filter(Boolean),
     ),
   ];
-  if (d.channel === 'telegram' && !b.chat && destinations.length > 1) {
+  if (d.channel === 'telegram' && !b.owner && !b.chat && destinations.length > 1) {
     store.tx(() => {
       for (const chat of destinations)
         db.prepare(
@@ -821,10 +827,10 @@ export async function deliver(store, env, send, mailSend = mail) {
     });
     return;
   }
-  const addr = b.chat || destinations[0];
+  const addr = personal || b.chat || destinations[0];
   if (
     (d.channel === 'telegram' && (!env.TELEGRAM_BOT_TOKEN || !addr)) ||
-    (d.channel === 'smtp' && (!env.SMTP_HOST || !env.SMTP_TO))
+    (d.channel === 'smtp' && (!env.SMTP_HOST || !(personal || env.SMTP_TO)))
   ) {
     db.prepare('UPDATE deliveries SET next=? WHERE id=?').run(Date.now() + 60000, d.id);
     return;
@@ -835,11 +841,14 @@ export async function deliver(store, env, send, mailSend = mail) {
       .run(d.id).changes
   )
     return;
-  const text =
-    b.text + (b.caseId ? '\n' + (env.APP_BASE_URL || 'http://127.0.0.1:8090') + '/#case/' + b.caseId : '');
+  const appUrl = env.APP_BASE_URL || 'http://127.0.0.1:8090';
+  const links = [b.issueUrl, b.caseId && appUrl + '/#case/' + b.caseId].filter(Boolean);
+  const accessibleLinks = d.channel === 'telegram' && b.owner
+    ? links.filter(link => !['localhost','127.0.0.1','[::1]'].includes(new URL(link).hostname)) : links;
+  const text = [b.text, ...accessibleLinks].join('\n');
   try {
     if (d.channel === 'telegram') await telegram('sendMessage', { chat_id: addr, text }, env, send);
-    else await mailSend(text, env);
+    else await mailSend(text, env, personal || env.SMTP_TO);
     db.prepare("UPDATE deliveries SET state='delivered' WHERE id=?").run(d.id);
   } catch (e) {
     db.prepare('UPDATE deliveries SET state=?,next=? WHERE id=?').run(

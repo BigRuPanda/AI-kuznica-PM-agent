@@ -6,7 +6,7 @@ import { readFile } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { root, databasePath, liveModelEnv } from './config.mjs';
 import { openStore } from './store.mjs';
-import { openAccounts, workspacePath, secret } from './accounts.mjs';
+import { openAccounts, workspacePath } from './accounts.mjs';
 import { application } from './http.mjs';
 import {
   initEvidence,
@@ -31,7 +31,11 @@ import {
   workJobs,
   deliver,
 } from './workbench.mjs';
-import { python, metrika, telegram } from './connectors.mjs';
+import { bindTelegram, contactAction, initContacts } from './notification-contacts.mjs';
+import { collectClosures, knowledge } from './redmine-bridge.mjs';
+import { syncWatches } from './redmine-watch.mjs';
+import { excelSources, sourceRows } from './knowledge.mjs';
+import { python, metrika, mail, telegram } from './connectors.mjs';
 import { preview, revisePage } from './tracker-workflow.mjs';
 import { configure, connectionInfo, personalConnection, finishOAuth } from './tracker-connections.mjs';
 import { remoteMcp } from './team-mcp.mjs';
@@ -43,6 +47,7 @@ export function createTeamApp({
   base = databasePath(),
   env = liveModelEnv,
   send = fetch,
+  sendMail = mail,
   background = true,
 } = {}) {
   const accounts = openAccounts(join(dirname(base), 'accounts.sqlite')),
@@ -50,13 +55,16 @@ export function createTeamApp({
     legacy = new Map(),
     busy = new Set(),
     authAttempts = new Map();
+  initContacts(accounts.db);
+  let nextClosures = 0,
+    nextTelegram = 0;
   const urlBase = new URL(env.APP_BASE_URL || 'http://127.0.0.1:8090'),
     secure = urlBase.protocol === 'https:';
   function space(id) {
     if (!spaces.has(id)) {
       const s = openStore(workspacePath(base, id));
       initEvidence(s.db);
-      initWorkbench(s.db);
+      initWorkbench(s.db, env);
 
       spaces.set(id, s);
     }
@@ -93,6 +101,49 @@ export function createTeamApp({
       chunks.push(b);
     }
     return Buffer.concat(chunks);
+  }
+  function handleTelegram(update) {
+    const msg = update.message,
+      db = space('team').db;
+    if (
+      !msg?.text ||
+      !msg.from ||
+      !msg.chat ||
+      db.prepare('SELECT id FROM known_updates WHERE id=?').get(update.update_id)
+    )
+      return;
+    const chat = String(msg.chat.id),
+      sender = String(msg.from.id),
+      group = msg.chat.type !== 'private';
+    if (!group && msg.text.startsWith('/start ')) {
+      bindTelegram(accounts.db, msg);
+    } else {
+      const bind = accounts.db.prepare('SELECT user FROM telegram WHERE chat=?').get(sender),
+        allowed = String(env.TELEGRAM_CHAT_IDS || '')
+          .split(',')
+          .map((x) => x.trim());
+      if (
+        bind &&
+        (!group || allowed.includes(chat)) &&
+        (!group || msg.text.startsWith('/ask') || msg.reply_to_message?.from?.is_bot)
+      ) {
+        const user = accounts.publicUser(bind.user),
+          tid = group ? 'tg-group-' + chat : 'tg-' + user.id;
+        db.prepare('INSERT OR IGNORE INTO conversations VALUES(?,?,?,?)').run(
+          tid,
+          user.id,
+          group ? 'group' : 'private',
+          'Telegram · ' + (group ? 'Команда' : user.name),
+        );
+        enqueue(space('team'), user, {
+          question: msg.text.replace(/^\/ask(?:@\w+)?\s*/, '').trim() || 'Обзор',
+          thread: tid,
+          requestId: 'tg' + update.update_id,
+          telegramChat: chat,
+        });
+      }
+    }
+    db.prepare('INSERT OR IGNORE INTO known_updates VALUES(?)').run(update.update_id);
   }
   async function tick() {
     if (spaces.size === 0) return;
@@ -132,7 +183,41 @@ export function createTeamApp({
             });
           }
         }
-        if (id === 'team') await deliver(s, env, send);
+        if (id === 'team') {
+          await syncWatches(s, accounts, env, send);
+          if (env.SIGNAL_BRIDGE_URL && Date.now() >= nextClosures) {
+            nextClosures = Date.now() + 60000;
+            try {
+              await collectClosures(s, accounts.db, env, send);
+              setSetting(s.db, 'redmine_sync', { ok: true, at: Date.now() });
+            } catch {
+              setSetting(s.db, 'redmine_sync', { ok: false, at: Date.now() });
+            }
+          }
+          if (
+            env.TELEGRAM_BIND_POLLING === 'true' &&
+            env.TELEGRAM_BOT_TOKEN &&
+            !env.TELEGRAM_WEBHOOK_SECRET &&
+            Date.now() >= nextTelegram
+          ) {
+            nextTelegram = Date.now() + 5000;
+            try {
+              const updates = await telegram(
+                'getUpdates',
+                { offset: setting(s.db, 'telegram_offset', 0), timeout: 0, allowed_updates: ['message'] },
+                env,
+                send,
+              );
+              for (const update of updates) {
+                handleTelegram(update);
+                setSetting(s.db, 'telegram_offset', update.update_id + 1);
+              }
+            } catch {
+              nextTelegram = Date.now() + 60000;
+            }
+          }
+          await deliver(s, env, send, sendMail, accounts.db);
+        }
       })()
         .catch(() => console.error('Фоновое поручение завершилось ошибкой'))
         .finally(() => busy.delete(id));
@@ -174,52 +259,7 @@ export function createTeamApp({
           req.headers['x-telegram-bot-api-secret-token'] !== env.TELEGRAM_WEBHOOK_SECRET
         )
           return reply(403, { error: 'Недоступно' });
-        const update = JSON.parse((await readBody(req, 100000)).toString()),
-          msg = update.message,
-          db = space('team').db;
-        if (!msg?.text || db.prepare('SELECT id FROM known_updates WHERE id=?').get(update.update_id))
-          return reply(200, { ok: true });
-        const chat = String(msg.chat.id),
-          sender = String(msg.from.id),
-          group = msg.chat.type !== 'private';
-        if (!group && msg.text.startsWith('/start ')) {
-          const code = digest(msg.text.slice(7).trim()),
-            link = accounts.db
-              .prepare('SELECT user FROM bindings WHERE code=? AND expires>?')
-              .get(code, Date.now());
-          if (link) {
-            accounts.db
-              .prepare('INSERT OR REPLACE INTO telegram VALUES(?,?,?,?)')
-              .run(sender, link.user, 'team', 'private');
-            accounts.db.prepare('DELETE FROM bindings WHERE code=?').run(code);
-          }
-        } else {
-          const bind = accounts.db.prepare('SELECT user FROM telegram WHERE chat=?').get(sender),
-            allowed = String(env.TELEGRAM_CHAT_IDS || '')
-              .split(',')
-              .map((x) => x.trim());
-          if (
-            bind &&
-            (!group || allowed.includes(chat)) &&
-            (!group || msg.text.startsWith('/ask') || msg.reply_to_message?.from?.is_bot)
-          ) {
-            const user = accounts.publicUser(bind.user),
-              tid = group ? 'tg-group-' + chat : 'tg-' + user.id;
-            db.prepare('INSERT OR IGNORE INTO conversations VALUES(?,?,?,?)').run(
-              tid,
-              user.id,
-              group ? 'group' : 'private',
-              'Telegram · ' + (group ? 'Команда' : user.name),
-            );
-            enqueue(space('team'), user, {
-              question: msg.text.replace(/^\/ask(?:@\w+)?\s*/, '').trim() || 'Обзор',
-              thread: tid,
-              requestId: 'tg' + update.update_id,
-              telegramChat: chat,
-            });
-          }
-        }
-        db.prepare('INSERT OR IGNORE INTO known_updates VALUES(?)').run(update.update_id);
+        handleTelegram(JSON.parse((await readBody(req, 100000)).toString()));
         return reply(200, { ok: true });
       }
       const token = req.headers.cookie?.match(/(?:^|;\s*)pm_session=([A-Za-z0-9_-]+)/)?.[1] || '';
@@ -300,27 +340,35 @@ export function createTeamApp({
         }
         if (op === 'integration-config') {
           configure(db, user, b);
-          return reply(200, connectionInfo(db, user));
+          return reply(200, connectionInfo(db, user, env));
         }
         if (op === 'integration-access') return reply(200, await personalConnection(db, user, b, env, send));
         if (op === 'overview')
           return reply(200, {
             ...dashboard(db, user),
-            integrations: connectionInfo(db, user),
+            integrations: connectionInfo(db, user, env),
           });
         if (op === 'invite') {
           admin(user);
           return reply(200, { code: accounts.invite(user.space) });
         }
         if (op === 'mcp-key') return reply(200, { key: accounts.issueKey(user.id) });
-        if (op === 'bind') {
-          if (user.role === 'judge') throw Error('Используйте командный аккаунт');
-          const code = secret();
-          accounts.db
-            .prepare('INSERT INTO bindings VALUES(?,?,?)')
-            .run(digest(code), user.id, Date.now() + 600000);
-          return reply(200, { command: '/start ' + code });
-        }
+        if (op === 'knowledge') return reply(200, knowledge(db, user));
+        if (op === 'knowledge-sources') return reply(200, excelSources(db));
+        if (op === 'knowledge-source') return reply(200, sourceRows(db, b.version, b.offset));
+        if (['bind', 'contacts', 'contact-unlink', 'email-request', 'email-confirm'].includes(op))
+          return reply(
+            200,
+            await contactAction(
+              op,
+              b,
+              user,
+              accounts.db,
+              env,
+              (text, address) => sendMail(text, env, address),
+              async () => (await telegram('getMe', {}, env, send)).username,
+            ),
+          );
         if (op === 'rules') {
           admin(user);
           const threshold = Number(b.threshold);
@@ -457,7 +505,11 @@ export function createTeamApp({
           admin(user);
           return reply(200, {
             metrika: !!env.METRIKA_TOKEN,
-            integrations: connectionInfo(db,user),
+            integrations: connectionInfo(db, user, env),
+            redmineSync: setting(db, 'redmine_sync', null),
+            redmineWatchErrors: db
+              .prepare('SELECT count(*) n FROM redmine_watches WHERE error IS NOT NULL')
+              .get().n,
             telegram: !!env.TELEGRAM_BOT_TOKEN,
             smtp: !!env.SMTP_HOST,
             llm: env.LLM_MODEL || '',

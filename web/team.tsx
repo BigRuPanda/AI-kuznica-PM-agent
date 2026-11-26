@@ -1,5 +1,7 @@
 import { ChatTrackerPreview, Connections, DemoObject, Tracking } from './tracking';
 import { RangeResult } from './range-result';
+import { Knowledge, NotificationSettings } from './notifications';
+import { SourceExtract } from './knowledge-source';
 import { rangeLabel, RangeChart, DAY } from './range-chart';
 import type { Attachment } from './range-chart';
 import { Answer } from './answer';
@@ -622,11 +624,13 @@ function Chat({
 }
 function Investigation({
   id,
+  section,
   home,
   action,
   refresh,
 }: {
   id: string;
+  section?: string;
   home: Home;
   action: Action;
   refresh: () => Promise<void>;
@@ -823,6 +827,7 @@ function Investigation({
           />
           <PinnedMaterials caseId={id} />
           <Tracking
+            documentation={section?.startsWith('documentation?') ? new URLSearchParams(section.slice(14)) : undefined}
             caseId={id}
             product={c.product}
             title={c.title}
@@ -997,14 +1002,18 @@ function Investigation({
 function Settings({ home, action, refresh }: { home: Home; action: Action; refresh: () => Promise<void> }) {
   const [notice, say] = useState('');
   const admin = home.user.role === 'admin';
+  useEffect(()=>{
+    if(location.hash==='#settings/sources') document.getElementById('upload-sources')?.scrollIntoView();
+  },[]);
   return (
     <>
       <div className="page-head">
         <h1>Настройки команды</h1>
       </div>
       <Connections home={home} action={action} refresh={refresh}/>
+      {home.user.role !== 'judge' && <NotificationSettings />}
       {admin && (
-        <section className="paper">
+        <section className="paper" id="upload-sources">
           <h3>Источники</h3>
           <form
             onSubmit={(e) => {
@@ -1107,13 +1116,6 @@ function Settings({ home, action, refresh }: { home: Home; action: Action; refre
           >
             Выпустить ключ MCP
           </button>
-          {home.user.role !== 'judge' && (
-            <button
-              onClick={() => action(async () => say((await post<{ command: string }>('bind')).command))}
-            >
-              Привязать Telegram
-            </button>
-          )}
         </div>
       </section>
       {notice && (
@@ -1302,6 +1304,7 @@ function Workspace({ user, onLogout }: { user: User; onLogout: () => void }) {
           ))}
         </nav>
         <div className="side-bottom">
+          <a href="#knowledge">База знаний</a>
           <a href="#settings">Настройки</a>
           <small>
             {user.name} ·{' '}
@@ -1334,11 +1337,15 @@ function Workspace({ user, onLogout }: { user: User; onLogout: () => void }) {
             <MaterialDetail id={id} />
           </section>
         ) : route === 'case' ? (
-          <Investigation key={id} id={id} home={home} action={action} refresh={refresh} />
+          <Investigation key={id+'/' + (selected || '')} id={id} section={selected} home={home} action={action} refresh={refresh} />
         ) : route === 'range' ? (
           <RangeResult id={id} />
         ) : route === 'snapshot' ? (
           <Snapshot id={id} selected={selected} />
+        ) : route === 'knowledge' ? (
+          <Knowledge admin={home.user.role==='admin'} />
+        ) : route === 'knowledge-source' ? (
+          <SourceExtract key={id} version={id} />
         ) : route === 'settings' ? (
           <Settings home={home} action={action} refresh={refresh} />
         ) : route === 'chats' ? (

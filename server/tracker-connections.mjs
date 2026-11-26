@@ -10,11 +10,14 @@ const services = ['redmine', 'confluence'];
 function siteId(target) {
   return createHash('sha256').update(JSON.stringify(target)).digest('hex');
 }
-export function targetFor(db, user, service) {
+export function targetFor(db, user, service, env = process.env) {
   if (!services.includes(service)) throw Error('Неизвестный сервис');
   const cfg =
     user.role !== 'judge' && db.prepare('SELECT config FROM integration_sites WHERE service=?').get(service);
-  return cfg ? JSON.parse(cfg.config) : { service, local: true };
+  if (cfg) return JSON.parse(cfg.config);
+  if (service === 'redmine' && user.role !== 'judge' && env.SIGNAL_BRIDGE_URL)
+    return { service, bridge: true, url: env.SIGNAL_BRIDGE_URL.replace(/\/+$/, ''), scope: 'Signal Bridge' };
+  return { service, local: true };
 }
 export function configure(db, user, b) {
   if (user.role !== 'admin') throw Error('Требуются права администратора');
@@ -70,17 +73,20 @@ function adapter(target, credential, send) {
     ? redmine(target, credential.token, send)
     : confluence(target, credential, send);
 }
-export function connectionInfo(db, user) {
+export function connectionInfo(db, user, env = process.env) {
   return Object.fromEntries(
     services.map((service) => {
-      const t = targetFor(db, user, service);
+      const t = targetFor(db, user, service, env);
       return [
         service,
         {
           ...t,
           connected:
-            !t.local &&
-            !!db.prepare('SELECT 1 FROM integration_tokens WHERE user=? AND site=?').get(user.id, siteId(t)),
+            !!t.bridge ||
+            (!t.local &&
+              !!db
+                .prepare('SELECT 1 FROM integration_tokens WHERE user=? AND site=?')
+                .get(user.id, siteId(t))),
         },
       ];
     }),
@@ -104,7 +110,7 @@ async function oauthToken(env, send, data) {
 }
 const refreshing = new WeakMap();
 export async function remoteClient(db, user, target, env, send) {
-  if (target.local || siteId(targetFor(db, user, target.service)) !== siteId(target))
+  if (target.local || siteId(targetFor(db, user, target.service, env)) !== siteId(target))
     throw Error('Назначение изменилось. Создайте новый черновик');
   const site = siteId(target),
     ctx = user.id + site;
@@ -141,8 +147,9 @@ export async function remoteClient(db, user, target, env, send) {
   return adapter(target, cred, send);
 }
 export async function personalConnection(db, user, b, env, send) {
-  const target = targetFor(db, user, b.service);
-  if (target.local) throw Error('Сначала настройте адрес сервиса для команды');
+  const target = targetFor(db, user, b.service, env);
+  if (target.local || target.bridge)
+    throw Error('Сначала настройте адрес персонального подключения для команды');
   const site = siteId(target);
   if (b.action === 'disconnect') {
     db.prepare('DELETE FROM integration_tokens WHERE user=? AND site=?').run(user.id, site);
@@ -184,7 +191,7 @@ export async function personalConnection(db, user, b, env, send) {
     await adapter(target, credential, send).check();
     remember(db, user, target, env, credential);
   } else throw Error('Неизвестное действие подключения');
-  return connectionInfo(db, user);
+  return connectionInfo(db, user, env);
 }
 export async function finishOAuth(db, user, params, env, send) {
   const target = targetFor(db, user, 'confluence'),

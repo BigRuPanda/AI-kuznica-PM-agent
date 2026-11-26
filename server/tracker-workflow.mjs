@@ -2,18 +2,45 @@ import { randomUUID } from 'node:crypto';
 import { targetFor, remoteClient, initConnections, connectionInfo } from './tracker-connections.mjs';
 import { escapeXml, plain, decodeText, storageOffset } from './tracker-clients.mjs';
 import { demoClient, initTrackerDemo, localHref } from './tracker-demo.mjs';
+import { initRedmine, bridgeTracker, draftReport } from './redmine-bridge.mjs';
+import { initWatches, watchIssue } from './redmine-watch.mjs';
+import { sourceLinks } from './knowledge.mjs';
 
-export function initTracking(db) {
+export function initTracking(db, env = process.env) {
   initConnections(db);
   initTrackerDemo(db);
+  initRedmine(db);
+  initWatches(db);
   for (const row of db
-    .prepare("SELECT id,body,external,state FROM draft_actions WHERE json_extract(body,'$.target') IS NULL")
+    .prepare(
+      "SELECT id,case_id,body,external,state FROM draft_actions WHERE json_extract(body,'$.target') IS NULL",
+    )
     .all()) {
     const b = JSON.parse(row.body);
-    b.target = { service: 'redmine', local: true };
+    const tracked = db.prepare('SELECT reference,report FROM redmine_drafts WHERE draft=?').get(row.id);
+    b.target = tracked
+      ? {
+          service: 'redmine',
+          bridge: true,
+          url: env.SIGNAL_BRIDGE_URL?.replace(/\/+$/, ''),
+          scope: 'Signal Bridge',
+        }
+      : { service: 'redmine', local: true };
+    if (tracked) b.report = { id: tracked.report };
     b.kind = 'issue';
-    if (row.state === 'done' && row.external)
-      b.receipt = { key: row.external, url: localHref('redmine', row.external) };
+    if (row.state === 'done' && row.external) {
+      const result =
+        tracked &&
+        db
+          .prepare(
+            "SELECT json_extract(body,'$.url') AS url FROM redmine_results WHERE json_extract(body,'$.reference')=? LIMIT 1",
+          )
+          .get(tracked.reference);
+      b.receipt = {
+        key: row.external,
+        url: tracked ? result?.url || '#case/' + row.case_id : localHref('redmine', row.external),
+      };
+    }
     b.diff = b.key
       ? [{ field: 'Приоритет', before: '', after: b.priority }]
       : [{ field: 'Описание', before: '', after: b.description }];
@@ -22,6 +49,12 @@ export function initTracking(db) {
   }
 }
 export function trackerClient(store, user, target, env, send, caseId, sharedOnly = false) {
+  if (target.bridge) {
+    const current = targetFor(store.db, user, 'redmine', env);
+    if (sharedOnly || !current.bridge || (target.url && current.url !== target.url))
+      throw Error('Назначение Signal Bridge изменилось или недоступно');
+    return bridgeTracker(store.db, user, env, send);
+  }
   if (!target.local) return remoteClient(store.db, user, target, env, send);
   const api = demoClient(store.db, user, target.service, caseId, sharedOnly);
   return {
@@ -36,8 +69,11 @@ export function trackerClient(store, user, target, env, send, caseId, sharedOnly
   };
 }
 function locationName(t) {
+  if (t.bridge) return 'Redmine · Signal Bridge';
   return t.local
-    ? 'Локальное демо · ' + (t.service === 'redmine' ? 'задачи' : 'страницы')
+    ? t.service === 'redmine'
+      ? 'Локальный демо-бэклог'
+      : 'Встроенная база знаний'
     : t.url + ' · ' + t.scope;
 }
 export function preview(row) {
@@ -176,6 +212,14 @@ function pageDraft(input, current, target, issue, marker) {
     storage += '<p><a href="' + escapeXml(issue.url) + '">Задача ' + escapeXml(issue.key) + '</a></p>';
     diff.push({ field: 'Ссылка на задачу', before: '', after: issue.url });
   }
+  for (const source of input.sources || []) {
+    if (storage.includes('href="' + escapeXml(source.url) + '"')) continue;
+    const label = source.file + ' · ' + source.version.slice(0, 12);
+    storage += '<p><a href="' + escapeXml(source.url) + '">' + escapeXml(label) + '</a></p>';
+    diff.push({ field: 'Источник Excel', before: '', after: label });
+  }
+  const linkOnly = !!current && !!issue && !diff.length;
+  if (issue) diff.push({ field: 'Обратная ссылка в Redmine', before: '', after: issue.url });
   if (!diff.length && !issue) throw Error('Укажите изменение страницы');
   storage +=
     '<ac:structured-macro ac:name="anchor"><ac:parameter ac:name="">' +
@@ -191,6 +235,7 @@ function pageDraft(input, current, target, issue, marker) {
     storage,
     diff,
     input: { ...input, title: input.title === current?.title ? undefined : input.title },
+    ...(linkOnly && { linkOnly: true }),
     issue,
     revision: randomUUID(),
   };
@@ -200,23 +245,54 @@ export async function prepareTracker(store, user, kind, input, env, send, reques
     id = requestId || randomUUID();
   const existing = db.prepare('SELECT * FROM draft_actions WHERE id=? AND user=?').get(id, user.id);
   if (existing) return preview(existing);
-  const target = targetFor(db, user, kind === 'page' ? 'confluence' : 'redmine');
+  const target = targetFor(db, user, kind === 'page' ? 'confluence' : 'redmine', env);
   const client = await trackerClient(store, user, target, env, send, input.caseId, sharedOnly);
   let body;
-  if (kind === 'issue') body = await issueDraft(client, input, target);
-  else {
+  if (kind === 'issue') {
+    body = await issueDraft(client, input, target);
+    if (!input.key && !target.local && env.SIGNAL_BRIDGE_URL) {
+      if (target.bridge && !body.description.trim())
+        throw Error('Укажите описание проверки для задачи с отчётом Метрики');
+      body.report = await draftReport(env, send);
+      const report = body.report;
+      const source = [report.start + ' — ' + report.end, report.status, report.web].join('\n');
+      body.diff.push({ field: 'Снимок Метрики', before: '', after: source });
+      if (!target.bridge)
+        body.changes.description = [body.description, 'Снимок Метрики', source].filter(Boolean).join('\n');
+    }
+  } else {
     let issue;
     if (input.issueKey) {
-      const t = targetFor(db, user, 'redmine');
-      if (!!t.local !== !!target.local)
-        throw Error('Для взаимных ссылок настройте обе системы в одном режиме');
+      const t = targetFor(db, user, 'redmine', env);
+      if (t.local && !target.local)
+        throw Error('Для публикации в корпоративном Confluence выберите реальную задачу Redmine');
       const i = await (
         await trackerClient(store, user, t, env, send, input.caseId, sharedOnly)
       ).read(input.issueKey);
       issue = { key: i.key, url: i.url, target: t };
     }
     const current = input.key ? await client.read(input.key) : null;
-    body = pageDraft(input, current, target, issue, 'pm-' + id);
+    const originKey = input.resultPage || (target.local && input.key);
+    const versions = new Set(input.sourceVersions);
+    if (originKey) {
+      const origin = demoClient(db, user, 'confluence', input.caseId, sharedOnly).read(originKey);
+      const result = db
+        .prepare(
+          `SELECT r.body,r.case_id FROM redmine_results r JOIN redmine_result_pages rp ON rp.result=r.id
+        WHERE rp.page=? ORDER BY r.created DESC LIMIT 1`,
+        )
+        .get(originKey);
+      if (result && (result.case_id !== input.caseId || (issue && JSON.parse(result.body).url !== issue.url)))
+        throw Error('Страница закрытия относится к другой задаче или разбору');
+      if (input.resultPage && !target.local) {
+        for (const link of publicPage(origin).links) {
+          const match = link.url.match(/^#knowledge-source\/([a-f0-9]{64})$/);
+          if (match) versions.add(match[1]);
+        }
+      }
+    }
+    const sources = sourceLinks(db, versions, target, env);
+    body = pageDraft({ ...input, sources }, current, target, issue, 'pm-' + id);
     if (current && input.baseVersion !== undefined && input.baseVersion !== current.version)
       body.conflict = 'Страница изменилась. Сравните с версией ' + current.version;
   }
@@ -272,6 +348,7 @@ export async function confirmTracker(store, user, row, revision, env, send) {
     }
     delete b.inFlight;
     Object.assign(b, fresh, {
+      linkOnly: !!fresh.linkOnly,
       latestPage: publicPage(current),
       conflict: 'Страница изменилась. Проверьте изменения для версии ' + current.version,
       reason: '',
@@ -294,7 +371,9 @@ export async function confirmTracker(store, user, row, revision, env, send) {
           const current = await api.read(b.key);
           if (b.kind === 'page' && current.version !== b.version) return await refreshPage(api);
         }
-        if (b.kind === 'page') {
+        if (b.kind === 'page' && b.linkOnly) {
+          result = { key: b.key, url: b.sourceUrl };
+        } else if (b.kind === 'page') {
           try {
             result = await api.save(b.key, b.title, b.storage, b.version, beforeWrite);
           } catch (e) {
@@ -318,17 +397,25 @@ export async function confirmTracker(store, user, row, revision, env, send) {
       const api = await getClient(b.issue.target),
         backMarker = marker + '-link';
       const issue = await api.read(b.issue.key);
+      const pageUrl =
+        b.target.local && !b.issue.target.local
+          ? new URL(b.receipt.url, env.APP_BASE_URL || 'http://127.0.0.1:8090').href
+          : b.receipt.url;
+      const note = (b.target.local ? 'База знаний · ' : 'Confluence · ') + pageUrl;
       const linked =
-        issue.comments.some((c) => c.text.split(/\r?\n/).includes('Confluence · ' + b.receipt.url)) ||
+        issue.comments.some((c) =>
+          c.text.split(/\r?\n/).some((line) => line === note || line === 'Confluence · ' + b.receipt.url),
+        ) ||
         (uncertain && (await api.recover(b.issue.key, backMarker)));
       if (!linked) {
         if (uncertain) throw Error('Проверьте обратную ссылку в задаче и повторите сверку');
-        await api.save(b.issue.key, { comment: 'Confluence · ' + b.receipt.url }, backMarker, beforeWrite);
+        await api.save(b.issue.key, { comment: note }, backMarker, beforeWrite);
       }
     }
     delete b.inFlight;
     b.reason = '';
     b.uncertain = false;
+    watchIssue(db, row, b);
     persist('done');
     return { ...b.receipt, state: 'done', local: !!b.target.local };
   } catch (e) {
@@ -379,10 +466,10 @@ export async function caseLinks(store, user, caseId, env, send, sharedOnly) {
     if (b.receipt) candidates.set(b.receipt.url, { ...b.receipt, target: b.target });
     if (b.issue) candidates.set(b.issue.url, b.issue);
   }
-  const settings = connectionInfo(store.db, user),
+  const settings = connectionInfo(store.db, user, env),
     items = [];
   for (const { target, key } of candidates.values()) {
-    const current = targetFor(store.db, user, target.service);
+    const current = targetFor(store.db, user, target.service, env);
     if (
       !target.local &&
       (sharedOnly ||
@@ -415,6 +502,6 @@ export function publicPage(page) {
     ),
     links: [...page.storage.matchAll(/<a\b[^>]*\bhref="([^"]+)"[^>]*>([\s\S]*?)<\/a>/gi)]
       .map((m) => ({ url: plain(m[1]), title: plain(m[2]) }))
-      .filter((l) => /^(https?:\/\/|#demo-(issue|page)\/)/i.test(l.url)),
+      .filter((l) => /^(https?:\/\/|#demo-(issue|page)\/|#knowledge-source\/[a-f0-9]{64}$)/i.test(l.url)),
   };
 }

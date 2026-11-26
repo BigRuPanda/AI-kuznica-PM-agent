@@ -129,6 +129,8 @@ export const operations = {
       content: z.string().max(30000).optional(),
       fragment: z.string().max(10000).optional(),
       issueKey: optional,
+      sourceVersions: z.array(z.string().regex(/^[a-f0-9]{64}$/)).max(8).optional(),
+      resultPage: id.optional(),
       baseVersion: z.number().int().positive().optional(),
     },
   ],
@@ -504,10 +506,10 @@ export function workspaceOperation(
     ].includes(op)
   ) {
     const service = op.startsWith('page_') ? 'confluence' : 'redmine';
-    const target = b.local ? { service, local: true } : targetFor(db, user, service);
+    const target = b.local ? { service, local: true } : targetFor(db, user, service, env);
     if (
       sharedOnly &&
-      (!target.local || (op === 'page_draft' && b.issueKey && !targetFor(db, user, 'redmine').local))
+      (!target.local || (op === 'page_draft' && b.issueKey && !targetFor(db, user, 'redmine', env).local))
     )
       throw Error('Откройте личный чат для работы с задачами и страницами');
     if (op === 'draft' || op === 'page_draft') {
