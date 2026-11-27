@@ -12,7 +12,7 @@ export function ChatThreadRow({ thread, current, onSelect, onAction }: {
   onAction: (thread: Thread, action: ChatAction) => void;
 }) {
   const [hovered, setHovered] = useState(false);
-  const [focused, setFocused] = useState(false);
+  const [keyboardFocused, setKeyboardFocused] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
   const [touched, setTouched] = useState(false);
   const [placement, setPlacement] = useState<Placement>();
@@ -20,7 +20,7 @@ export function ChatThreadRow({ thread, current, onSelect, onAction }: {
   const row = useRef<HTMLDivElement>(null);
   const label = useRef<HTMLSpanElement>(null);
   const text = useRef<HTMLSpanElement>(null);
-  const highlighted = !touched && (hovered || focused || menuOpen);
+  const highlighted = !touched && (hovered || keyboardFocused || menuOpen);
 
   useLayoutEffect(() => {
     const anchor = slot.current;
@@ -77,20 +77,16 @@ export function ChatThreadRow({ thread, current, onSelect, onAction }: {
         }}
         onKeyDownCapture={event => { if (event.key === 'Tab') setTouched(false); }}
         onPointerLeave={() => setHovered(false)}
-        onFocus={() => setFocused(true)}
+        onFocus={event => setKeyboardFocused(event.target.matches(':focus-visible'))}
         onBlur={event => {
           if (event.currentTarget.contains(event.relatedTarget)) return;
-          setFocused(false);
+          setKeyboardFocused(false);
           setTouched(false);
         }}>
-        <a aria-current={current ? 'page' : undefined} href={'#chats/' + thread.id} onClick={onSelect}
-          onKeyDown={event => {
-            const title = label.current;
-            if (!placement || !title || title.scrollWidth <= title.clientWidth ||
-                event.altKey || event.ctrlKey || event.metaKey || event.shiftKey ||
-                !['ArrowLeft', 'ArrowRight'].includes(event.key)) return;
-            event.preventDefault();
-            title.scrollBy({ left: event.key === 'ArrowLeft' ? -48 : 48 });
+        <a aria-current={current ? 'page' : undefined} href={'#chats/' + thread.id}
+          onClick={event => {
+            if (event.detail > 0) setKeyboardFocused(false);
+            onSelect();
           }}>
           <span className="thread-icon"><Icon name={thread.scope === 'group' ? 'people' : 'chat'} /></span>
           <span ref={label} className="thread-title" title={placement ? undefined : thread.title}>

@@ -78,7 +78,7 @@
   border-radius: var(--button-radius);
   transition: background-color var(--fast);
 }
-.thread-row:is(:hover, :focus-within, [data-expanded='true'], :has(> a[aria-current='page'], > button[aria-expanded='true'])) {
+.thread-row:is(:hover, [data-expanded='true'], :has(:focus-visible, > a[aria-current='page'], > button[aria-expanded='true'])) {
   --thread-ink: var(--accent-text);
   background: var(--accent-soft);
 }
@@ -99,9 +99,8 @@
   transition: color var(--fast), background-color var(--fast);
 }
 .thread-list a[aria-current='page'] { font-weight: 620; }
-.thread-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.thread-title { overflow: clip; text-overflow: ellipsis; white-space: nowrap; }
 .thread-title-text { white-space: nowrap; }
-.thread-row[data-expanded='true'] .thread-title { overflow-x: auto; scrollbar-width: thin; text-overflow: clip; }
 .thread-icon { display: grid; place-items: center; }
 .thread-menu-trigger {
   display: inline-grid;
@@ -127,7 +126,7 @@
 }
 .thread-row .thread-menu-trigger:focus-visible { outline-offset: -2px; }
 @media (hover: hover) and (pointer: fine) {
-  .thread-row:where(:not(:hover):not(:focus-within)) .thread-menu-trigger:where(:not([aria-expanded='true'])) {
+  .thread-row:where(:not(:hover):not(:has(:focus-visible))) .thread-menu-trigger:where(:not([aria-expanded='true'])) {
     opacity: 0;
     pointer-events: none;
   }
