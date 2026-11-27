@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { once } from 'node:events';
 import { mkdtemp, rm } from 'node:fs/promises';
+import { createServer as createSocketServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -346,4 +347,147 @@ test('the Telegram queue retries a provider limit, skips definite refusals, and 
   assert.equal(read('ambiguous').state, 'uncertain');
   await dispatch();
   assert.deepEqual(requests, ['limit', 'limit', 'definite', 'ambiguous']);
+});
+
+test('proactive Telegram omits invalid and loopback links and keeps public links', async t => {
+  const store = openStore(':memory:');
+  t.after(() => store.close());
+  initEvidence(store.db);
+  initWorkbench(store.db);
+  const env = { NOTIFICATIONS_ENABLED:'true', TELEGRAM_BOT_TOKEN:'fixture', TELEGRAM_CHAT_IDS:'31' };
+  const messages = [];
+  const dispatch = () => deliver(store, env, async (_url, {body}) => {
+    messages.push(JSON.parse(body));
+    return Response.json({ok:true,result:{message_id:messages.length}});
+  });
+  const enqueueNotice = (id, issueUrl) => store.db
+    .prepare("INSERT INTO deliveries(id,channel,state,body) VALUES(?,'telegram','queued',?)")
+    .run(id, JSON.stringify({ caseId:'sample', text:'Проверка доставки', broadcast:true, issueUrl }));
+  enqueueNotice('local', '/issues/17');
+  await dispatch();
+  assert.deepEqual(messages[0], { chat_id:'31', text:'Проверка доставки' });
+  env.APP_BASE_URL = 'https://app.example.invalid';
+  enqueueNotice('public', 'https://tracker.example.invalid/issues/17');
+  await dispatch();
+  assert.deepEqual(messages[1], { chat_id:'31', text:
+    'Проверка доставки\nhttps://tracker.example.invalid/issues/17\nhttps://app.example.invalid/#case/sample' });
+});
+
+test('SMTP status and delivery wait for a configured sender', async t => {
+  const { store, env, messages, contact, dispatch } = await fixture(t, { SMTP_FROM:'' });
+  store.db.prepare("INSERT INTO deliveries(id,channel,state,body) VALUES('mail','smtp','queued',?)")
+    .run(JSON.stringify({ caseId:'sample', text:'Тест', broadcast:true }));
+  await dispatch();
+  assert.equal((await contact('contacts')).smtpReady, false);
+  assert.equal((await contact('status')).smtp, false);
+  assert.equal(store.db.prepare("SELECT attempts FROM deliveries WHERE id='mail'").get().attempts, 0);
+  assert.deepEqual(messages, []);
+  env.SMTP_FROM = 'sender@example.invalid';
+  store.db.exec("UPDATE deliveries SET next=0 WHERE id='mail'");
+  await dispatch();
+  assert.equal((await contact('status')).smtp, true);
+  assert.deepEqual(messages, [
+    { method:'smtp', text:'Тест\nhttp://127.0.0.1:8090/#case/sample', to:'shared@example.invalid' },
+  ]);
+});
+
+async function smtpQueue(t, outcomes) {
+  let accepted = 0;
+  const sink = createSocketServer(socket => {
+    const outcome = outcomes.shift();
+    const send = line => socket.write(line + '\r\n');
+    let text = '', data = false;
+    socket.setEncoding('utf8');
+    socket.on('error', () => {});
+    socket.on('data', chunk => {
+      text += chunk;
+      let end;
+      while ((end = text.indexOf('\r\n')) >= 0) {
+        const line = text.slice(0, end).toUpperCase();
+        text = text.slice(end + 2);
+        if (data) {
+          if (line !== '.') continue;
+          data = false;
+          accepted++;
+          if (outcome === 'disconnect') return socket.destroy();
+          send('250 Accepted');
+        } else if (line.startsWith('EHLO ') || line.startsWith('MAIL FROM:') || line === 'RSET') {
+          send('250 OK');
+        } else if (line.startsWith('RCPT TO:')) {
+          send(outcome === 'temporary' ? '451 Try later' : outcome === 'rejected' ? '550 Unknown user' : '250 OK');
+        } else if (line === 'DATA') {
+          data = true;
+          send('354 Send Message');
+        } else if (line === 'QUIT') {
+          socket.end(outcome === 'quit-error' ? '500 Unexpected command\r\n' : '221 Bye\r\n');
+        } else send('500 Unexpected command');
+      }
+    });
+    send('220 Local SMTP fixture');
+  });
+  await once(sink.listen(0, '127.0.0.1'), 'listening');
+  t.after(() => new Promise(resolve => sink.close(resolve)));
+  const port = String(sink.address().port);
+  const env = {
+    NOTIFICATIONS_ENABLED:'true', DATA_PROFILE:'local',
+    SMTP_HOST:'127.0.0.1', SMTP_PORT:port, LOCAL_SMTP_TARGET:'127.0.0.1:' + port,
+    SMTP_TLS:'plain', SMTP_FROM:'sender@example.invalid', SMTP_TO:'recipient@example.invalid',
+    PYTHON_BIN:process.env.PYTHON_BIN,
+  };
+  const store = openStore(':memory:', { seedDemo:false });
+  t.after(() => store.close());
+  initEvidence(store.db);
+  initWorkbench(store.db);
+  store.db.prepare("INSERT INTO deliveries(id,channel,state,body) VALUES('mail','smtp','queued',?)")
+    .run(JSON.stringify({ text:'Проверка SMTP' }));
+  return {
+    accepted: () => accepted,
+    run: () => deliver(store, env, () => assert.fail('Unexpected HTTP request')),
+    state: () => store.one("SELECT state,attempts,next FROM deliveries WHERE id='mail'"),
+    makeDue: () => store.db.exec("UPDATE deliveries SET next=0 WHERE id='mail'"),
+  };
+}
+
+test('SMTP retries a known temporary rejection without duplicating an accepted mail', async t => {
+  const queue = await smtpQueue(t, ['temporary', 'accepted']);
+  const started = Date.now();
+  await queue.run();
+  assert.equal(queue.state().state, 'queued');
+  assert.ok(queue.state().next >= started + 60_000);
+  assert.equal(queue.accepted(), 0);
+  await queue.run();
+  assert.equal(queue.state().attempts, 1);
+  queue.makeDue();
+  await queue.run();
+  await queue.run();
+  assert.equal(queue.state().state, 'delivered');
+  assert.equal(queue.state().attempts, 2);
+  assert.equal(queue.accepted(), 1);
+});
+
+test('SMTP preserves the final DATA acknowledgement if QUIT fails', async t => {
+  const queue = await smtpQueue(t, ['quit-error']);
+  await queue.run();
+  await queue.run();
+  assert.equal(queue.state().state, 'delivered');
+  assert.equal(queue.state().attempts, 1);
+  assert.equal(queue.accepted(), 1);
+});
+
+test('SMTP marks definite permanent rejections as failed', async t => {
+  const queue = await smtpQueue(t, ['rejected']);
+  await queue.run();
+  await queue.run();
+  assert.equal(queue.state().state, 'failed');
+  assert.equal(queue.state().attempts, 1);
+  assert.equal(queue.accepted(), 0);
+});
+
+test('SMTP never retries automatically after losing the final acknowledgement', async t => {
+  const queue = await smtpQueue(t, ['disconnect']);
+  await queue.run();
+  await queue.run();
+  assert.equal(queue.state().state, 'uncertain');
+  assert.equal(queue.state().attempts, 1);
+  assert.equal(queue.accepted(), 1);
 });

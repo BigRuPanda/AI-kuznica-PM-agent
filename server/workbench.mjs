@@ -1064,7 +1064,11 @@ export async function deliver(store, env, send, mailSend = mail, accounts) {
   const links = [b.issueUrl, b.caseId && (env.APP_BASE_URL || 'http://127.0.0.1:8090') + '/#case/' + b.caseId]
     .filter(link => {
       const url = link && URL.parse(link);
-      return url && ['http:', 'https:'].includes(url.protocol);
+      if (!url || !['http:', 'https:'].includes(url.protocol)) return false;
+      if (d.channel !== 'telegram') return true;
+      const host = url.hostname.replace(/\.$/, '');
+      return host !== 'localhost' && !host.endsWith('.localhost') && host !== '[::1]' &&
+        !/^127(?:\.\d{1,3}){3}$/.test(host) && !/^\[::ffff:7f[\da-f]{2}:/.test(host);
     });
   const text = [b.text, ...links].join('\n');
   try {

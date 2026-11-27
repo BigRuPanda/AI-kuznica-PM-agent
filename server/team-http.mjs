@@ -36,7 +36,7 @@ import {
   workJobs,
   deliver,
 } from './workbench.mjs';
-import { mail, python, probeMetrika, telegram } from './connectors.mjs';
+import { mail, python, probeMetrika, smtpConfigured, telegram } from './connectors.mjs';
 import { bindTelegram, contactAction, initContacts, notificationAudience, telegramGroupAllowed, telegramPolling } from './notification-contacts.mjs';
 import { configureSignalAudience } from './signal-history.mjs';
 import { initMetrikaSync, metrikaStatus, syncMetrika } from './metrika-sync.mjs';
@@ -583,7 +583,7 @@ export function createTeamApp({
             redmineSync: setting(db, 'redmine_sync', null),
             redmineWatchErrors: db.prepare('SELECT count(*) AS n FROM redmine_watches WHERE error IS NOT NULL').get().n,
             telegram: !!env.TELEGRAM_BOT_TOKEN,
-            smtp: !!env.SMTP_HOST,
+            smtp: smtpConfigured(env),
             llm: env.LLM_MODEL || '',
             notifications: env.NOTIFICATIONS_ENABLED === 'true',
           });
