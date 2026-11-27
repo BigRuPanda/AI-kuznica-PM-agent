@@ -21,7 +21,7 @@ export async function prepareInvestigationDraft(store, user, input, env = proces
   const {caseId, runId, plan, outcomes, title, selection} = draftInput.parse(input);
   const {db} = store;
   requireActionableRun(db, user, caseId, runId);
-  const target = targetFor(db, user, 'redmine');
+  const target = targetFor(db, user, 'redmine', env);
   const description = ['План проверки', plan,
     ...(outcomes.length ? ['', 'Как интерпретировать результат', ...outcomes.map(line => '• ' + line)] : []),
   ].join('\n');

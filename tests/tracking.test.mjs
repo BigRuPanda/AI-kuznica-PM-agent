@@ -17,6 +17,10 @@ import {
 import { confluence } from '../server/tracker-clients.mjs';
 import { initTracking, revisePage } from '../server/tracker-workflow.mjs';
 import { teamTools } from '../server/team-mcp.mjs';
+import { openAccounts } from '../server/accounts.mjs';
+import { initContacts } from '../server/notification-contacts.mjs';
+import { collectClosures } from '../server/redmine-bridge.mjs';
+import { syncWatches } from '../server/redmine-watch.mjs';
 
 const owner = { id: 'one', role: 'admin', name: 'Автор' },
   peer = { id: 'two', role: 'member', name: 'Коллега' };
@@ -54,7 +58,7 @@ function siteMock() {
     if (p === '/pm/users/current.json') return json({ user: { id: 5 } });
     if (p.endsWith('/rest/api/user/current')) return json({ type: 'known', userKey: 'fixture' });
     if (p === '/pm/projects/store.json')
-      return json({ project: { id: 7, trackers: [{ id: 1, name: 'Задача' }] } });
+      return json({ project: { id: 7, trackers: [{ id: 1, name: 'Задача' }], issue_custom_fields: remote.customFields } });
     if (p === '/pm/enumerations/issue_priorities.json')
       return json({ issue_priorities: [{ id: 4, name: 'Высокий' }] });
     if (p === '/pm/projects/store/memberships.json')
@@ -62,8 +66,8 @@ function siteMock() {
     if (p.endsWith('/search.json'))
       return json({ results: remote.issues.map((i) => ({ type: 'issue', id: i.id })) });
     if (p === '/pm/issues.json' && method === 'GET') {
-      const origin = !remote.ignoreFilter && u.searchParams.get('cf_17');
-      return json({ issues: remote.issues.filter(i => !origin || i.custom_fields?.some(f => f.id === 17 && f.value === origin)) });
+      const field = !remote.ignoreFilter && [...u.searchParams].find(([name]) => name.startsWith('cf_'));
+      return json({ issues: remote.issues.filter(i => !field || i.custom_fields?.some(f => 'cf_' + f.id === field[0] && f.value === field[1])) });
     }
     if (p === '/pm/issues.json' && method === 'POST') {
       assert.equal(b.issue.project_id, 7);
@@ -301,6 +305,34 @@ test('the signal draft is scoped to the participant and the current signal revis
   } finally { store.close(); }
 });
 
+test('direct demo Redmine checks the boolean AI field, keeps the saved ID and filters the repaired issue', async () => {
+  const store = dbAt(), remote = siteMock(), s = scenario(store, remote);
+  try {
+    s.env.REDMINE_REQUIRE_AI_FLAG = 'true';
+    s.env.REDMINE_DEMO_URL = 'http://127.0.0.1:18881';
+    configure(store.db, owner, { service: 'redmine', url: s.env.REDMINE_DEMO_URL, scope: 'signal-demo' }, s.env);
+    configure(store.db, owner, { service: 'redmine', url: config.redmine.url, scope: config.redmine.scope }, s.env);
+    await personalConnection(store.db, owner, { service: 'redmine', token: 'owner-key', action: 'connect' }, s.env, remote.send);
+    await assert.rejects(s.draft('draft', { title: 'Проверить закрытие', description: 'Описание' }), /поле-флаг/);
+    remote.customFields = [{ id: 48, name: 'сгенерирована ИИ-помощником' }];
+    remote.ignoreOrigin = true;
+    const draft = await s.draft('draft', { title: 'Проверить закрытие', description: 'Описание' });
+    const partial = await s.confirm(draft);
+    assert.equal(partial.state, 'partial');
+    assert.equal(partial.key, '1');
+    remote.ignoreOrigin = false;
+    const saved = await s.confirm(draft);
+    assert.equal(saved.state, 'done');
+    assert.equal(saved.key, partial.key);
+    assert.equal(remote.issues.length, 1);
+    assert.deepEqual(remote.issues[0].custom_fields, [{ id: 48, value: '1' }]);
+    const found = await s.run('issue_search', { query: '', origin: 'ai-generated' });
+    assert.deepEqual(found.items.map(item => item.key), [saved.key]);
+  } finally {
+    store.close();
+  }
+});
+
 test('unverified Redmine origin keeps the created ID and repairs one issue after a restart', async () => {
   const store = dbAt(), m = siteMock(), s = scenario(store, m);
   try {
@@ -520,6 +552,160 @@ test('older persisted drafts stay local after upgrading and activating a provide
     await s.connect('redmine');
     assert.match((await s.confirm({ id: 'legacy' })).key, /^DEMO-/);
     assert.equal(m.issues.length, 0);
+  } finally {
+    store.close();
+  }
+});
+
+test('Bridge keeps the draft report across confirmation, restart and two closure episodes', async () => {
+  const path = join(await mkdtemp(join(tmpdir(), 'redmine-bridge-')), 'workspace.sqlite');
+  let store = dbAt(path);
+  const tasks = new Map();
+  let loseReply = true;
+  const closures = [];
+  const report = { id: 'A', start: '2026-11-01', end: '2026-11-14', periods: [[40, 2], [60, 5]], status: 'Наблюдение', web: 'https://metrika.example/' };
+  const remote = { send: async (url, opts) => {
+    const u = new URL(url);
+    if (u.pathname === '/reports/latest') return Response.json(report);
+    if (u.pathname === '/closures') return Response.json(closures.filter(row => row.seq > Number(u.searchParams.get('after'))));
+    if (u.pathname === '/tasks') {
+      const body = JSON.parse(opts.body);
+      if (!tasks.has(body.reference)) tasks.set(body.reference, { ...body, redmine_id: 17, url: 'http://localhost:18881/issues/17' });
+      if (loseReply) {
+        loseReply = false;
+        throw Error('Таймаут после записи');
+      }
+      return Response.json(tasks.get(body.reference));
+    }
+    throw Error('Unexpected request: ' + url);
+  } };
+  try {
+    const s = scenario(store, remote);
+    Object.assign(s.env, { SIGNAL_BRIDGE_URL: 'http://localhost:18880', DATA_PROFILE: 'local', LOCAL_HTTP_ORIGINS: 'http://localhost:18880', NOTIFICATION_CHANNELS: 'telegram' });
+    const draft = await s.draft('draft', { title: 'Проверить корзину', description: 'Проверить отчёт', includeReport: true });
+    assert.ok(draft.diff.some(row => row.field === 'Снимок Метрики'));
+    const firstReport = { ...report };
+    report.id = 'B';
+    await assert.rejects(s.confirm(draft), /Таймаут после записи/);
+    const accounts = openAccounts(':memory:');
+    initContacts(accounts.db);
+    try {
+      const run = (op, input, user = owner) => workspaceOperation(store, user, op, input, s.env, remote.send);
+      store.close();
+      store = dbAt(path);
+      const confirm = () => run('confirm', { id: draft.id });
+      const receipt = await confirm();
+      assert.equal((await confirm()).key, receipt.key);
+      assert.equal(receipt.key, 'Redmine #17');
+      assert.equal(tasks.size, 1);
+      const [task] = tasks.values();
+      assert.equal(task.report_id, 'A');
+      closures.push({
+        seq: 1, episode: 1, reference: task.reference, issue: task.redmine_id, title: task.title,
+        status: 'Closed', closing_note: { text: 'Первый вывод', author: 'QA' },
+        url: task.url, observed: '2026-11-20T08:00:00Z', report: firstReport,
+      });
+      const collect = () => collectClosures(store, accounts.db, s.env, remote.send);
+      await collect();
+      await collect();
+      const read = () => store.db.prepare('SELECT * FROM demo_pages').all();
+      const [page] = read();
+      assert.equal(page.version, 1);
+      assert.match(page.storage, /Первый вывод/);
+      store.close();
+      store = dbAt(path);
+      closures.push({ ...closures[0], seq: 2, episode: 2, closing_note: { text: 'Второй вывод', author: 'QA' } });
+      await collect();
+      await collect();
+      const pages = read();
+      assert.equal(pages.length, 1);
+      assert.equal(pages[0].key, page.key);
+      assert.equal(pages[0].version, 2);
+      assert.match(pages[0].storage, /Второй вывод/);
+      const deliveries = store.db.prepare("SELECT body FROM deliveries WHERE id LIKE 'web-draft-%'").all().map(r => JSON.parse(r.body));
+      assert.deepEqual(deliveries.map(row => row.owner), [owner.id, owner.id]);
+    } finally {
+      accounts.db.close();
+    }
+  } finally {
+    store.close();
+  }
+});
+
+test('direct Redmine tracks a reopened issue and keeps closing notes and the page private', async () => {
+  const path = join(await mkdtemp(join(tmpdir(), 'redmine-watch-')), 'workspace.sqlite');
+  let store = dbAt(path);
+  const remote = siteMock(),
+    s = scenario(store, remote);
+  try {
+    store.db.prepare("UPDATE cases SET body=json_remove(body,'$.owner') WHERE id=?").run(s.caseId);
+    await s.connect('redmine');
+    const receipt = await s.confirm(await s.draft('draft', { title: 'Статус оплаты', description: 'Первоначальный отчёт' }));
+    const issue = remote.issues[0];
+    const close = (note) => {
+      issue.status = { id: 6, name: 'Выполнена', is_closed: true };
+      issue.journals.push(
+        { details: [{ name: 'status_id', new_value: '6' }], notes: note + '\npm-fixture', user: { name: 'QA' } },
+        { notes: 'Обсуждение после закрытия' },
+      );
+    };
+    close('Первый итог');
+    const accounts = openAccounts(':memory:');
+    initContacts(accounts.db);
+    accounts.publicUser = (id) => id === owner.id ? owner : null;
+    try {
+      const sync = async () => {
+        store.db.exec('UPDATE redmine_watches SET next=0');
+        await syncWatches(store, accounts, s.env, remote.send);
+      };
+      const results = () => store.db.prepare('SELECT body FROM redmine_results').all().map(r => JSON.parse(r.body));
+      await sync();
+      await sync();
+      assert.deepEqual(results().map(r => r.closing_note.text), ['Первый итог']);
+      const [page] = store.db.prepare('SELECT * FROM demo_pages').all();
+      store.close();
+      store = dbAt(path);
+      issue.status = { id: 2, name: 'Открыта', is_closed: false };
+      await sync();
+      close('Второй итог');
+      await sync();
+      assert.deepEqual(results().map(r => r.closing_note.text), ['Первый итог', 'Второй итог']);
+      assert.equal(results()[1].issue, receipt.key);
+      const run = (user) => workspaceOperation(store, user, 'page_read', { key: page.key, local: true }, s.env, remote.send);
+      const visible = await run(owner);
+      assert.equal(visible.version, 2);
+      assert.match(visible.text, /Второй итог/);
+      await assert.rejects(run(peer), /Страница недоступна/);
+    } finally {
+      accounts.db.close();
+    }
+  } finally {
+    store.close();
+  }
+});
+
+test('an already closed direct task receives a baseline page on first startup', async () => {
+  const path = join(await mkdtemp(join(tmpdir(), 'redmine-history-')), 'workspace.sqlite');
+  let store = dbAt(path);
+  const remote = siteMock(),
+    s = scenario(store, remote);
+  try {
+    await s.connect('redmine');
+    await s.confirm(await s.draft('draft', { title: 'Старая задача', description: 'Сохранённый текст' }));
+    store.db.exec('DROP TABLE IF EXISTS redmine_watches');
+    store.close();
+    store = dbAt(path);
+    remote.issues[0].status = { id: 6, name: 'Выполнена', is_closed: true };
+    const accounts = openAccounts(':memory:');
+    initContacts(accounts.db);
+    accounts.publicUser = () => owner;
+    try {
+      await syncWatches(store, accounts, s.env, remote.send);
+      assert.equal(store.db.prepare('SELECT count(*) AS n FROM demo_pages').get().n, 1);
+      assert.equal(store.db.prepare("SELECT count(*) AS n FROM deliveries WHERE json_extract(body,'$.issueUrl') IS NOT NULL").get().n, 0);
+    } finally {
+      accounts.db.close();
+    }
   } finally {
     store.close();
   }

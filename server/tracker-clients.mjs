@@ -79,24 +79,50 @@ export function withAiNotice(description = '') {
     ? description
     : [description, aiNotice].filter(Boolean).join('\n\n');
 }
-export function redmine(target, token, send) {
+const generatedFlagName = 'сгенерирована ии-помощником';
+const generatedFlagError = 'Включите в проекте Redmine поле-флаг «сгенерирована ИИ-помощником» для задач.';
+export function redmine(target, token, send, { requireGeneratedFlag = false } = {}) {
   const call = client(send, 'Redmine', target.url, { 'X-Redmine-API-Key': token });
   const projectPath = '/projects/' + encodeURIComponent(target.scope);
   async function project() {
-    return (await call(projectPath + '.json?include=trackers')).project;
+    return (await call(projectPath + '.json?include=trackers,issue_custom_fields')).project;
   }
-  function item(i) {
+  function generatedFlag(p) {
+    return p.issue_custom_fields?.find(f => f.name.toLowerCase() === generatedFlagName);
+  }
+  function originFields(p, generated, required) {
+    const flag = generatedFlag(p);
+    if (required && !flag) throw Error(generatedFlagError);
+    if (generated && !target.originFieldId && !flag)
+      throw Error('Для задачи ИИ настройте фильтруемое поле происхождения в Redmine');
+    const fields = [];
+    if (generated && target.originFieldId) fields.push({ id: Number(target.originFieldId), value: aiOrigin });
+    if (flag && Number(flag.id) === Number(target.originFieldId) && required)
+      throw Error('Укажите отдельное поле для метки ai-generated и флага ИИ.');
+    if (flag && Number(flag.id) !== Number(target.originFieldId)) fields.push({ id: flag.id, value: '1' });
+    return fields;
+  }
+  function item(i, flag) {
     const field = i.custom_fields?.find(f => String(f.id) === target.originFieldId);
+    const flagged = !!flag && !!i.custom_fields?.some(f => String(f.id) === String(flag.id) && ['1', 'true'].includes(String(f.value)));
+    const transition = (i.journals || []).findLast(j => (j.details || []).some(d =>
+      d.name === 'status_id' && String(d.new_value) === String(i.status?.id)));
+    const note = transition && !transition.private_notes && (transition.notes || '')
+      .split(/\r?\n/).filter(line => !/^pm-[\w-]+$/.test(line)).join('\n').trim();
     return {
       key: String(i.id),
       url: target.url + '/issues/' + numeric(i.id),
       title: i.subject,
       description: i.description || '',
-      origin: field?.value === aiOrigin ? aiOrigin : null,
+      origin: (target.originFieldId ? field?.value === aiOrigin : flagged) ? aiOrigin : null,
+      generatedFlag: flagged,
       status: i.status?.name || '',
       priority: i.priority?.name || '',
       assignee: i.assigned_to?.name || '',
       statusId: String(i.status?.id || ''),
+      closed: typeof i.status?.is_closed === 'boolean' ? i.status.is_closed : null,
+      closedOn: i.closed_on || transition?.created_on || null,
+      closingNote: note ? { text: note, author: transition.user?.name || '', at: transition.created_on || null } : null,
       priorityId: String(i.priority?.id || ''),
       assigneeId: String(i.assigned_to?.id || ''),
       comments: (i.journals || [])
@@ -108,17 +134,14 @@ export function redmine(target, token, send) {
   async function read(key) {
     const p = await project();
     const { issue } = await call(
-      '/issues/' + numeric(String(key).trim().replace(/^#/, '')) + '.json?include=journals,allowed_statuses',
+      '/issues/' + numeric(String(key).trim().replace(/^(?:Redmine\s*)?[#№]\s*/i, '')) + '.json?include=journals,allowed_statuses',
     );
     if (String(issue.project.id) !== String(p.id)) throw Error('Задача другого проекта');
-    return item(issue);
-  }
-  function originField() {
-    if (!target.originFieldId) throw Error('Укажите ID фильтруемого поля происхождения задачи в настройках Redmine');
-    return Number(numeric(target.originFieldId));
+    return item(issue, generatedFlag(p));
   }
   async function search(query, all = false, origin) {
     const p = await project();
+    const flag = generatedFlag(p);
     const params = new URLSearchParams({
       project_id: String(p.id),
       subproject_id: '!*',
@@ -128,7 +151,8 @@ export function redmine(target, token, send) {
     });
     const number = query.trim().match(/^#?([1-9]\d*)$/);
     if (origin === aiOrigin) {
-      params.set('cf_' + originField(), aiOrigin);
+      if (!target.originFieldId && !flag) throw Error('Укажите ID фильтруемого поля происхождения задачи в настройках Redmine');
+      params.set('cf_' + (target.originFieldId || flag.id), target.originFieldId ? aiOrigin : '1');
       params.set('status_id', '*');
     }
     if (number) {
@@ -146,7 +170,7 @@ export function redmine(target, token, send) {
     }
     const matches = (await call('/issues.json?' + params)).issues
       .filter((i) => String(i.project.id) === String(p.id))
-      .map(item);
+      .map(issue => item(issue, flag));
     if (origin && matches.some(issue => issue.origin !== origin))
       throw Error('Redmine вернул задачи без выбранной метки. Включите использование поля происхождения как фильтра.');
     return matches;
@@ -159,6 +183,17 @@ export function redmine(target, token, send) {
     },
     read,
     search,
+    async checkOriginConfiguration(origin) {
+      if (requireGeneratedFlag || (origin === aiOrigin && !target.originFieldId))
+        originFields(await project(), origin === aiOrigin, requireGeneratedFlag);
+    },
+    async isClosed(issue) {
+      if (typeof issue.closed === 'boolean') return issue.closed;
+      const { issue_statuses } = await call('/issue_statuses.json');
+      const status = issue_statuses?.find(s => String(s.id) === issue.statusId);
+      if (typeof status?.is_closed !== 'boolean') throw Error('Redmine не подтвердил тип статуса задачи');
+      return status.is_closed;
+    },
     async options() {
       const p = await project(),
         priorities = await call('/enumerations/issue_priorities.json');
@@ -197,9 +232,11 @@ export function redmine(target, token, send) {
         await call('/issues/' + numeric(key) + '.json', 'PUT', { issue: fields });
         return { key: String(key), url: target.url + '/issues/' + numeric(key) };
       }
-      fields.project_id = (await project()).id;
-      if (changes.origin === aiOrigin) {
-        fields.custom_fields = [{id: originField(), value: aiOrigin}];
+      const p = await project();
+      const customFields = originFields(p, changes.origin === aiOrigin, requireGeneratedFlag);
+      fields.project_id = p.id;
+      if (customFields.length) {
+        fields.custom_fields = customFields;
         fields.description = withAiNotice(fields.description);
       }
       fields.description = [fields.description, marker]
@@ -209,9 +246,10 @@ export function redmine(target, token, send) {
       const { issue } = await call('/issues.json', 'POST', { issue: fields });
       return { key: numeric(issue.id), url: target.url + '/issues/' + numeric(issue.id) };
     },
-    async repairOrigin(issue) {
+    async repairOrigin(issue, { generated = true, required = false } = {}) {
       const changes = {};
-      if (issue.origin !== aiOrigin) changes.custom_fields = [{id: originField(), value: aiOrigin}];
+      if ((generated && issue.origin !== aiOrigin) || (required && !issue.generatedFlag))
+        changes.custom_fields = originFields(await project(), generated, required);
       const description = withAiNotice(issue.description);
       if (description !== issue.description) changes.description = description;
       if (Object.keys(changes).length) await call('/issues/' + numeric(issue.key) + '.json', 'PUT', {issue: changes});

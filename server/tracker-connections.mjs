@@ -12,13 +12,16 @@ function siteId(target) {
   const { originFieldId, ...site } = target;
   return createHash('sha256').update(JSON.stringify(site)).digest('hex');
 }
-export function targetFor(db, user, service) {
+export function targetFor(db, user, service, env = process.env) {
   if (!services.includes(service)) throw Error('Неизвестный сервис');
   const cfg =
     user.role !== 'judge' && db.prepare('SELECT config FROM integration_sites WHERE service=?').get(service);
-  return cfg ? JSON.parse(cfg.config) : { service, local: true };
+  if (cfg) return JSON.parse(cfg.config);
+  if (service === 'redmine' && user.role !== 'judge' && env.SIGNAL_BRIDGE_URL)
+    return { service, bridge: true, url: env.SIGNAL_BRIDGE_URL.replace(/\/+$/, ''), scope: 'Signal Bridge' };
+  return { service, local: true };
 }
-export function configure(db, user, b) {
+export function configure(db, user, b, env = process.env) {
   if (user.role !== 'admin') throw Error('Требуются права администратора');
   if (!services.includes(b.service)) throw Error('Неизвестный сервис');
   if (typeof b.url !== 'string') throw Error('Укажите адрес сервиса');
@@ -27,7 +30,10 @@ export function configure(db, user, b) {
     return;
   }
   const url = new URL(b.url);
-  if (url.protocol !== 'https:' || url.username || url.password || url.hash || url.search)
+  const loopbackDemo = b.service === 'redmine' && env.REDMINE_REQUIRE_AI_FLAG === 'true' &&
+    url.protocol === 'http:' && ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname) &&
+    url.href.replace(/\/+$/, '') === env.REDMINE_DEMO_URL && b.scope === 'signal-demo';
+  if ((!loopbackDemo && url.protocol !== 'https:') || url.username || url.password || url.hash || url.search)
     throw Error('Укажите HTTPS-адрес сервиса без параметров');
   const scope = String(b.scope || '').trim();
   if (!/^[\p{L}\d_.~-]{1,128}$/u.test(scope))
@@ -68,22 +74,24 @@ function remember(db, user, target, env, credential) {
     seal(env, user.id + site, credential),
   );
 }
-function adapter(target, credential, send) {
+function adapter(target, credential, send, env) {
   return target.service === 'redmine'
-    ? redmine(target, credential.token, send)
+    ? redmine(target, credential.token, send, { requireGeneratedFlag: env.REDMINE_REQUIRE_AI_FLAG === 'true' })
     : confluence(target, credential, send);
 }
-export function connectionInfo(db, user) {
+export function connectionInfo(db, user, env = process.env) {
   return Object.fromEntries(
     services.map((service) => {
-      const t = targetFor(db, user, service);
+      const t = targetFor(db, user, service, env);
       return [
         service,
         {
           ...t,
+          ...(!t.local && service === 'redmine' && env.SIGNAL_BRIDGE_URL && !env.SOURCE_ARCHIVE_SHA256
+            ? { canAttachReport: true } : {}),
           connected:
-            !t.local &&
-            !!db.prepare('SELECT 1 FROM integration_tokens WHERE user=? AND site=?').get(user.id, siteId(t)),
+            !!t.bridge || (!t.local &&
+            !!db.prepare('SELECT 1 FROM integration_tokens WHERE user=? AND site=?').get(user.id, siteId(t))),
         },
       ];
     }),
@@ -108,7 +116,7 @@ async function oauthToken(env, send, data) {
 const refreshing = new WeakMap();
 export async function remoteClient(db, user, target, env, send) {
   send = integrationTransport(env, send);
-  if (target.local || siteId(targetFor(db, user, target.service)) !== siteId(target))
+  if (target.local || target.bridge || siteId(targetFor(db, user, target.service, env)) !== siteId(target))
     throw Error('Назначение изменилось. Создайте новый черновик');
   const site = siteId(target),
     ctx = user.id + site;
@@ -142,12 +150,12 @@ export async function remoteClient(db, user, target, env, send) {
       );
     cred = await pending.get(ctx);
   }
-  return adapter(target, cred, send);
+  return adapter(target, cred, send, env);
 }
 export async function personalConnection(db, user, b, env, send) {
   send = integrationTransport(env, send);
-  const target = targetFor(db, user, b.service);
-  if (target.local) throw Error('Сначала настройте адрес сервиса для команды');
+  const target = targetFor(db, user, b.service, env);
+  if (target.local || target.bridge) throw Error('Сначала настройте адрес сервиса для команды');
   const site = siteId(target);
   if (b.action === 'disconnect') {
     db.prepare('DELETE FROM integration_tokens WHERE user=? AND site=?').run(user.id, site);
@@ -187,14 +195,14 @@ export async function personalConnection(db, user, b, env, send) {
     if (typeof b.token !== 'string' || !b.token.trim() || b.token.length > 16000)
       throw Error('Введите персональный токен');
     const credential = { token: b.token.trim() };
-    await adapter(target, credential, send).check();
+    await adapter(target, credential, send, env).check();
     remember(db, user, target, env, credential);
   } else throw Error('Неизвестное действие подключения');
-  return connectionInfo(db, user);
+  return connectionInfo(db, user, env);
 }
 export async function finishOAuth(db, user, params, env, send) {
   send = integrationTransport(env, send);
-  const target = targetFor(db, user, 'confluence'),
+  const target = targetFor(db, user, 'confluence', env),
     site = siteId(target);
   const taken = db
     .prepare('DELETE FROM integration_oauth WHERE state=? AND user=? AND site=? AND expires>?')
@@ -222,6 +230,6 @@ export async function finishOAuth(db, user, params, env, send) {
     refresh: r.refresh_token,
     expires: Date.now() + r.expires_in * 1000,
   };
-  await adapter(target, cred, send).check();
+  await adapter(target, cred, send, env).check();
   remember(db, user, target, env, cred);
 }

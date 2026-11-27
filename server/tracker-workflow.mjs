@@ -4,26 +4,43 @@ import { targetFor, remoteClient, initConnections, connectionInfo } from './trac
 import { aiOrigin, aiNotice, withAiNotice, escapeXml, plain, decodeText, storageOffset } from './tracker-clients.mjs';
 import { demoClient, initTrackerDemo, localHref } from './tracker-demo.mjs';
 import { requireActionableRun, visibleRun } from './case-investigations.mjs';
+import { initRedmine, bridgeTracker, draftReport } from './redmine-bridge.mjs';
+import { initWatches, watchIssue } from './redmine-watch.mjs';
 
-export function initTracking(db) {
+export function initTracking(db, env = process.env) {
   initConnections(db);
   initTrackerDemo(db);
+  initRedmine(db);
   for (const row of db
-    .prepare("SELECT id,body,external,state FROM draft_actions WHERE json_extract(body,'$.target') IS NULL")
+    .prepare("SELECT id,case_id,body,external,state FROM draft_actions WHERE json_extract(body,'$.target') IS NULL")
     .all()) {
     const b = JSON.parse(row.body);
-    b.target = { service: 'redmine', local: true };
+    const tracked = db.prepare('SELECT reference,report FROM redmine_drafts WHERE draft=?').get(row.id);
+    b.target = tracked
+      ? { service: 'redmine', bridge: true, url: env.SIGNAL_BRIDGE_URL?.replace(/\/+$/, ''), scope: 'Signal Bridge' }
+      : { service: 'redmine', local: true };
+    if (tracked) b.report = { id: tracked.report };
     b.kind = 'issue';
-    if (row.state === 'done' && row.external)
-      b.receipt = { key: row.external, url: localHref('redmine', row.external) };
+    if (row.state === 'done' && row.external) {
+      const result = tracked && db.prepare(`SELECT json_extract(body,'$.url') AS url FROM redmine_results
+        WHERE json_extract(body,'$.reference')=? LIMIT 1`).get(tracked.reference);
+      b.receipt = { key: row.external, url: tracked ? result?.url || '#case/' + row.case_id : localHref('redmine', row.external) };
+    }
     b.diff = b.key
       ? [{ field: 'Приоритет', before: '', after: b.priority }]
       : [{ field: 'Описание', before: '', after: b.description }];
     b.changes = b.key ? { priorityId: b.priority } : { title: b.title, description: b.description };
     db.prepare('UPDATE draft_actions SET body=? WHERE id=?').run(JSON.stringify(b), row.id);
   }
+  initWatches(db);
 }
 export function trackerClient(store, user, target, env, send, caseId, sharedOnly = false) {
+  if (target.bridge) {
+    const current = targetFor(store.db, user, 'redmine', env);
+    if (sharedOnly || !current.bridge || (target.url && current.url !== target.url))
+      throw Error('Назначение Signal Bridge изменилось или недоступно');
+    return bridgeTracker(store.db, user, env, send);
+  }
   if (!target.local) return remoteClient(store.db, user, target, env, send);
   const api = demoClient(store.db, user, target.service, caseId, sharedOnly);
   return {
@@ -44,6 +61,7 @@ export function trackerClient(store, user, target, env, send, caseId, sharedOnly
   };
 }
 function locationName(t) {
+  if (t.bridge) return 'Redmine · Signal Bridge';
   return t.local
     ? 'Локальное демо · ' + (t.service === 'redmine' ? 'задачи' : 'страницы')
     : t.url + ' · ' + t.scope;
@@ -85,8 +103,6 @@ const fields = {
 async function issueDraft(client, input, target, assistantAuthored) {
   const current = input.key ? await client.read(input.key) : {};
   const generated = !input.key && assistantAuthored;
-  if (generated && !target.local && !target.originFieldId)
-    throw Error('Для задачи ИИ настройте фильтруемое поле происхождения в Redmine');
   if (generated || (current.origin === aiOrigin && input.description !== undefined))
     input = {...input, description: withAiNotice(input.description)};
   const changes = {};
@@ -213,14 +229,16 @@ function pageDraft(input, current, target, issue, marker) {
     revision: randomUUID(),
   };
 }
-function sameTarget(db, user, target) {
-  return JSON.stringify(targetFor(db, user, target.service)) === JSON.stringify(target);
+function sameTarget(db, user, target, env) {
+  const current = targetFor(db, user, target.service, env);
+  if (target.bridge && current.bridge && !target.url) return true;
+  return JSON.stringify(current) === JSON.stringify(target);
 }
 
-function requireDraftVersion(db, user, caseId, draft) {
+function requireDraftVersion(db, user, caseId, draft, env) {
   if (draft.investigationId) {
     requireActionableRun(db, user, caseId, draft.investigationId);
-    if (!sameTarget(db, user, draft.target))
+    if (!sameTarget(db, user, draft.target, env))
       throw Error('Назначение изменилось. Подготовьте новый черновик.');
   }
   if (draft.signalRevision !== undefined) {
@@ -253,7 +271,8 @@ export async function prepareTracker(store, user, kind, input, env, send, reques
   const select = db.prepare('SELECT * FROM draft_actions WHERE id=? AND user=?');
   const existing = select.get(id, user.id);
   if (existing && !binding?.selection && !(binding && existing.state === 'obsolete')) return preview(existing);
-  const target = binding?.target || targetFor(db, user, kind === 'page' ? 'confluence' : 'redmine');
+  const service = kind === 'page' ? 'confluence' : 'redmine';
+  const target = binding?.target || (input.local ? { service, local: true } : targetFor(db, user, service, env));
   const client = await trackerClient(store, user, target, env, send, input.caseId, sharedOnly);
   let body;
   if (kind === 'issue') {
@@ -264,6 +283,17 @@ export async function prepareTracker(store, user, kind, input, env, send, reques
         throw Error('Выберите доступную задачу из результатов поиска.');
     }
     body = await issueDraft(client, input, target, assistantAuthored);
+    if (!body.key && !target.local && !target.bridge) {
+      await client.checkOriginConfiguration(body.changes.origin);
+      if (env.REDMINE_REQUIRE_AI_FLAG === 'true') body.requireGeneratedFlag = true;
+    }
+    if (input.includeReport && !env.SOURCE_ARCHIVE_SHA256 && !body.key && !target.local && env.SIGNAL_BRIDGE_URL) {
+      if (!input.description?.trim()) throw Error('Укажите описание проверки для задачи с отчётом Метрики');
+      const report = body.report = await draftReport(env, send);
+      const source = [report.start + ' — ' + report.end, report.status, report.web].join('\n');
+      body.diff.push({ field: 'Снимок Метрики', before: '', after: source });
+      if (!target.bridge) body.changes.description = [body.description, 'Снимок Метрики', source].join('\n');
+    }
     if (selection) {
       if (body.key !== selection.key) throw Error('Выберите доступную задачу из результатов поиска.');
       body.sourceUrl = selection.url;
@@ -271,7 +301,7 @@ export async function prepareTracker(store, user, kind, input, env, send, reques
   } else {
     let issue;
     if (input.issueKey) {
-      const t = targetFor(db, user, 'redmine');
+      const t = targetFor(db, user, 'redmine', env);
       if (!!t.local !== !!target.local)
         throw Error('Для взаимных ссылок настройте обе системы в одном режиме');
       const i = await (
@@ -288,7 +318,7 @@ export async function prepareTracker(store, user, kind, input, env, send, reques
     if (binding) {
       body.investigationId = binding.runId;
       body.signalRevision = binding.signalRevision;
-      requireDraftVersion(db, user, input.caseId, body);
+      requireDraftVersion(db, user, input.caseId, body, env);
     }
     const serialized = JSON.stringify(body);
     if (binding && existing) {
@@ -332,20 +362,26 @@ export async function confirmTracker(store, user, row, revision, env, send) {
   function checkVersion() {
     if (!versionBound) return;
     try {
-      requireDraftVersion(db, user, row.case_id, b);
+      requireDraftVersion(db, user, row.case_id, b, env);
     } catch (e) {
       obsolete = true;
       throw e;
     }
   }
-  function beforeWrite() {
+  function beforeWrite(addMapping) {
     checkVersion();
+    const checkpoint = () => {
+      b.inFlight = b.receipt ? 'backlink' : 'main';
+      persist('sending');
+      addMapping?.();
+    };
+    if (addMapping) store.tx(checkpoint);
+    else checkpoint();
     attempted = true;
-    b.inFlight = b.receipt ? 'backlink' : 'main';
-    persist('sending');
   }
   const getClient = (t) => trackerClient(store, user, t, env, send, row.case_id);
-  const verifyOrigin = b.kind === 'issue' && !b.key && b.changes?.origin === aiOrigin;
+  const verifyOrigin = b.kind === 'issue' && !b.key && !b.target.bridge &&
+    (b.changes?.origin === aiOrigin || b.requireGeneratedFlag);
   const hasReceipt = !!b.receipt;
   async function refreshPage(client) {
     const current = await client.read(b.key);
@@ -406,28 +442,29 @@ export async function confirmTracker(store, user, row, revision, env, send) {
       attempted = false;
       uncertain = false;
       b.uncertain = false;
-      if (b.issue || verifyOrigin) persist('sending');
+      if (b.issue || b.kind === 'issue') persist('sending');
     }
     if (verifyOrigin) {
       // A field mapping may be corrected between confirmations. Keep the issue on its original site/project.
       const target = hasReceipt && !b.target.local
-        ? { ...b.target, originFieldId: targetFor(db, user, 'redmine').originFieldId }
+        ? { ...b.target, originFieldId: targetFor(db, user, 'redmine', env).originFieldId }
         : b.target;
       const api = await getClient(target);
       let issue = await api.read(b.receipt.key);
-      const verified = issue => issue.key === b.receipt.key && issue.origin === aiOrigin && issue.description.split(/\r?\n/).includes(aiNotice);
+      const verified = issue => (b.changes?.origin !== aiOrigin || issue.origin === aiOrigin) && issue.description.split(/\r?\n/).includes(aiNotice) &&
+        (!b.requireGeneratedFlag || issue.generatedFlag);
       if (issue.key !== b.receipt.key) throw Error('Redmine не подтвердил номер сохранённой задачи.');
       if (!verified(issue) && hasReceipt) {
         const checkRepair = () => {
           if (!versionBound) return;
-          requireDraftVersion(db, user, row.case_id, {...b, target});
-          if (!b.investigationId && !sameTarget(db, user, target))
+          requireDraftVersion(db, user, row.case_id, {...b, target}, env);
+          if (!b.investigationId && !sameTarget(db, user, target, env))
             throw Error('Назначение изменилось. Проверьте настройки Redmine.');
         };
         if (target.local) await api.repairOrigin(issue, checkRepair);
         else {
           checkRepair();
-          await api.repairOrigin(issue);
+          await api.repairOrigin(issue, { generated: b.changes?.origin === aiOrigin, required: b.requireGeneratedFlag });
         }
         issue = await api.read(b.receipt.key);
       }
@@ -449,7 +486,10 @@ export async function confirmTracker(store, user, row, revision, env, send) {
     delete b.inFlight;
     b.reason = '';
     b.uncertain = false;
-    persist('done');
+    store.tx(() => {
+      watchIssue(db, row, b);
+      persist('done');
+    });
     return { ...b.receipt, state: 'done', local: !!b.target.local };
   } catch (e) {
     const ambiguous = attempted && !(versionBound && b.target.local) && (!e.status || e.status >= 500 || e.status === 408);
@@ -502,14 +542,14 @@ export async function caseLinks(store, user, caseId, env, send, sharedOnly) {
     if (b.receipt) candidates.set(b.receipt.url, { ...b.receipt, target: b.target, investigationId: b.investigationId });
     if (b.issue) candidates.set(b.issue.url, b.issue);
   }
-  const settings = connectionInfo(store.db, user),
+  const settings = connectionInfo(store.db, user, env),
     items = [];
   for (const { target, key, investigationId } of candidates.values()) {
     if (
       !target.local &&
       (sharedOnly ||
         !settings[target.service].connected ||
-        !sameTarget(db, user, target))
+        !sameTarget(db, user, target, env))
     )
       continue;
     try {

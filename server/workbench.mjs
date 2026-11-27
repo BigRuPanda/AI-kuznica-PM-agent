@@ -63,7 +63,7 @@ function migrateChatItems(db) {
   }
 }
 
-export function initWorkbench(db) {
+export function initWorkbench(db, env = process.env) {
   db.exec(
     'CREATE TABLE IF NOT EXISTS conversations(id TEXT PRIMARY KEY,owner TEXT,scope TEXT,title TEXT);' +
       'CREATE TABLE IF NOT EXISTS chat_items' + chatItemColumns +
@@ -79,7 +79,7 @@ export function initWorkbench(db) {
       'CREATE TABLE IF NOT EXISTS web_requests(id INTEGER PRIMARY KEY,job TEXT,created INTEGER);' +
       'CREATE TABLE IF NOT EXISTS known_updates(id INTEGER PRIMARY KEY);',
   );
-  initTracking(db);
+  initTracking(db, env);
   migrateChatItems(db);
   initRanges(db);
   initMaterials(db);

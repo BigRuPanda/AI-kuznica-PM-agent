@@ -42,6 +42,8 @@ import { configureSignalAudience } from './signal-history.mjs';
 import { initMetrikaSync, metrikaStatus, syncMetrika } from './metrika-sync.mjs';
 import { preview, revisePage } from './tracker-workflow.mjs';
 import { configure, connectionInfo, personalConnection, finishOAuth } from './tracker-connections.mjs';
+import { collectClosures } from './redmine-bridge.mjs';
+import { syncWatches } from './redmine-watch.mjs';
 import { remoteMcp } from './team-mcp.mjs';
 import { retainMaterial, readMaterial, attachedMaterials, materialRef, materialPreview } from './materials.mjs';
 import { access } from './chart-ranges.mjs';
@@ -69,10 +71,12 @@ export function createTeamApp({
     legacy = new Map(),
     busy = new Set(),
     investigationSubscriptions = [],
+    tracking = new Set(),
     reconciledAt = new Map(),
     authAttempts = new Map();
   initContacts(accounts.db);
   let nextTelegram = 0;
+  let nextClosures = 0;
   const urlBase = new URL(env.APP_BASE_URL || 'http://127.0.0.1:8090'),
     secure = urlBase.protocol === 'https:';
   const investigations = createInvestigationScheduler({spaces,env,send,options:investigationOptions,
@@ -82,7 +86,7 @@ export function createTeamApp({
       const s = openStore(workspacePath(base, id),{seedDemo:!env.SOURCE_ARCHIVE_SHA256});
       initEvidence(s.db);
       if (id === 'team') configureSignalAudience(s.db, () => notificationAudience(env, accounts.db));
-      initWorkbench(s.db);
+      initWorkbench(s.db, env);
       initSourcePolicy(s.db);
       initMetrikaSync(s.db);
       reconciledAt.set(id, Date.now());
@@ -184,6 +188,18 @@ export function createTeamApp({
         } catch {
           console.error('Не удалось сверить активные исследования');
         }
+      }
+      if (id === 'team' && !tracking.has(id)) {
+        tracking.add(id);
+        const operations = [syncWatches(s, accounts, env, send)];
+        if (env.SIGNAL_BRIDGE_URL && Date.now() >= nextClosures) {
+          nextClosures = Date.now() + 60_000;
+          operations.push(collectClosures(s, accounts.db, env, send).then(
+            () => setSetting(s.db, 'redmine_sync', { ok: true, at: Date.now() }),
+            () => setSetting(s.db, 'redmine_sync', { ok: false, at: Date.now() }),
+          ));
+        }
+        void Promise.allSettled(operations).finally(() => tracking.delete(id));
       }
       if (busy.has(id)) continue;
       busy.add(id);
@@ -355,8 +371,8 @@ export function createTeamApp({
           );
         }
         if (op === 'integration-config') {
-          configure(db, user, b);
-          return reply(200, connectionInfo(db, user));
+          configure(db, user, b, env);
+          return reply(200, connectionInfo(db, user, env));
         }
         if (op === 'integration-access') return reply(200, await personalConnection(db, user, b, env, send));
         if (op === 'overview')
@@ -367,7 +383,8 @@ export function createTeamApp({
             metrikaSync: user.space === 'team' ? metrikaStatus(db, env) : { reports: [] },
             notificationsEnabled: user.space === 'team' && env.NOTIFICATIONS_ENABLED === 'true',
             notificationChannels: user.space === 'team' ? notificationChannels(env) : [],
-            integrations: connectionInfo(db, user),
+            integrations: connectionInfo(db, user, env),
+            bridgeEnabled: user.role !== 'judge' && !!env.SIGNAL_BRIDGE_URL && !env.SOURCE_ARCHIVE_SHA256,
           });
         if (op === 'invite') {
           admin(user);
@@ -547,7 +564,9 @@ export function createTeamApp({
             webSearch: !!(env.YANDEX_SEARCH_FOLDER_ID && env.YANDEX_SEARCH_API_KEY),
             metrika: !!env.METRIKA_TOKEN,
             metrikaSync: metrikaStatus(db, env),
-            integrations: connectionInfo(db,user),
+            integrations: connectionInfo(db, user, env),
+            redmineSync: setting(db, 'redmine_sync', null),
+            redmineWatchErrors: db.prepare('SELECT count(*) AS n FROM redmine_watches WHERE error IS NOT NULL').get().n,
             telegram: !!env.TELEGRAM_BOT_TOKEN,
             smtp: !!env.SMTP_HOST,
             llm: env.LLM_MODEL || '',
@@ -596,7 +615,7 @@ export function createTeamApp({
     if (server.listening) await new Promise((r) => server.close(r));
     investigationSubscriptions.forEach(unsubscribe => unsubscribe());
     await investigations.close();
-    while (busy.size) await new Promise((r) => setTimeout(r, 50));
+    while (busy.size || tracking.size) await new Promise((r) => setTimeout(r, 50));
     for (const s of spaces.values()) s.close();
     accounts.db.close();
   }

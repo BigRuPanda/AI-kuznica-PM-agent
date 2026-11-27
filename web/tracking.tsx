@@ -23,6 +23,8 @@ type Page = Hit & { version: number; text: string; links: { url: string; title: 
 export type Integration = {
   service: string;
   local?: boolean;
+  bridge?: boolean;
+  canAttachReport?: boolean;
   url?: string;
   scope?: string;
   originFieldId?: string;
@@ -328,12 +330,14 @@ function Search({
 function IssueForm({
   caseId,
   product,
+  canAttachReport,
   action,
   reload,
   onIssue,
 }: {
   caseId: string;
   product: string;
+  canAttachReport?: boolean;
   action: Action;
   reload: () => Promise<void>;
   onIssue: (i: Hit) => void;
@@ -382,13 +386,15 @@ function IssueForm({
           onSubmit={(e) => {
             e.preventDefault();
             const fields = Object.fromEntries(new FormData(e.currentTarget));
+            const includeReport = fields.includeReport === 'on';
+            delete fields.includeReport;
             const changed = Object.fromEntries(
               Object.entries(fields).filter(([k, v]) =>
                 task ? (v || k === 'description' || k === 'assigneeId') && v !== task[k as keyof Task] : v,
               ),
             );
             action(async () => {
-              await post('draft', { caseId, key: task?.key, ...changed });
+              await post('draft', { caseId, key: task?.key, ...changed, includeReport });
               await reload();
             });
           }}
@@ -406,6 +412,9 @@ function IssueForm({
             Описание
             <textarea name="description" defaultValue={task?.description} maxLength={4000} />
           </label>
+          {!task && canAttachReport && (
+            <label><input type="checkbox" name="includeReport" /> Приложить снимок Метрики</label>
+          )}
           {!task && <SelectField name="trackerId" label="Тип задачи" values={options.trackers} />}
           <SelectField
             name="priorityId"
@@ -576,6 +585,7 @@ export function Tracking({
         <IssueForm
           caseId={caseId}
           product={product}
+          canAttachReport={site.canAttachReport}
           action={action}
           reload={reload}
           onIssue={(i) => pick(i.key)}
@@ -672,11 +682,11 @@ export function Connections({
                 >
                   <label>
                     Адрес сервиса
-                    <input type="url" name="url" defaultValue={site.url} placeholder="https://" />
+                    <input type="url" name="url" defaultValue={site.bridge ? '' : site.url} placeholder="https://" />
                   </label>
                   <label>
                     {service === 'redmine' ? 'Идентификатор проекта' : 'Ключ пространства'}
-                    <input name="scope" defaultValue={site.scope} />
+                    <input name="scope" defaultValue={site.bridge ? '' : site.scope} />
                   </label>
                   {service === 'redmine' && (
                     <label>
@@ -701,11 +711,12 @@ export function Connections({
             <p>
               {site.local
                 ? 'Локальное демо'
-                : scope === 'team'
+                : site.bridge ? 'Командное подключение через Signal Bridge'
+                  : scope === 'team'
                   ? [site.url, site.scope].join(' · ')
                   : site.scope + ' · ' + (site.connected ? 'Личный доступ подключён' : 'Требуется личный доступ')}
             </p>
-            {scope === 'personal' && !site.local && (
+            {scope === 'personal' && !site.local && !site.bridge && (
               <>
                 <form
                   onSubmit={(e) => {

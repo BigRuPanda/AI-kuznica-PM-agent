@@ -93,6 +93,7 @@ const createInput = {
 };
 const issueInput = {
   caseId: id,
+  includeReport: z.boolean().optional(),
   title: z.string().max(240).optional(),
   description: z.string().max(4000).optional(),
   key: optional,
@@ -726,10 +727,10 @@ export function workspaceOperation(
     ].includes(op)
   ) {
     const service = op.startsWith('page_') ? 'confluence' : 'redmine';
-    const target = b.local ? { service, local: true } : targetFor(db, user, service);
+    const target = b.local ? { service, local: true } : targetFor(db, user, service, env);
     if (
       sharedOnly &&
-      (!target.local || (op === 'page_draft' && b.issueKey && !targetFor(db, user, 'redmine').local))
+      (!target.local || (op === 'page_draft' && b.issueKey && !targetFor(db, user, 'redmine', env).local))
     )
       throw Error('Откройте личный чат для работы с задачами и страницами');
     if (op === 'draft' || op === 'page_draft') {

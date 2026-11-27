@@ -1,3 +1,6 @@
+import { digest } from './evidence.mjs';
+import { escapeXml } from './tracker-clients.mjs';
+
 export function excelSources(db) {
   return db
     .prepare(
@@ -85,4 +88,83 @@ export function sourceValues(db,{product,metric,date,segment,sourceId,definition
        && (!sourceId || d.source_id===sourceId) && (!definitionId || d.definition_id===definitionId) && (!stepDays || d.step_days===stepDays))
     .map(({version,file,loc,data:d})=>({version,file,loc,product,date,metric,segment:d.segment,value:weekly?d.orders_index:d.value,
       unit:weekly?'индекс':d.unit,comment:d.comment,sourceId:d.source_id,definitionId:d.definition_id,stepDays:d.step_days}));
+}
+
+export function recordResultPage(db, id, caseId, row) {
+  if (db.prepare('SELECT 1 FROM redmine_result_pages WHERE result=?').get(id)) return;
+  const previous = db
+    .prepare(
+      `SELECT p.key FROM redmine_result_pages rp JOIN demo_pages p ON p.key=rp.page
+    JOIN redmine_results r ON r.id=rp.result WHERE r.case_id=? AND json_extract(r.body,'$.reference')=?
+    ORDER BY r.created DESC LIMIT 1`,
+    )
+    .get(caseId, row.reference);
+  const authored =
+    previous ||
+    (!row.personalOwner &&
+      db
+        .prepare(
+          `SELECT p.key FROM draft_actions d JOIN demo_pages p ON p.key=d.external
+    WHERE p.case_id=? AND d.case_id=? AND d.state IN ('done','partial','uncertain') AND json_extract(d.body,'$.kind')='page'
+    AND json_extract(d.body,'$.target.local')=1 AND json_extract(d.body,'$.issue.url')=?
+    AND NOT EXISTS(SELECT 1 FROM private_wiki_pages acl WHERE acl.page=p.key)
+    ORDER BY d.rowid DESC LIMIT 1`,
+        )
+        .get(caseId, caseId, row.url));
+  const key = authored?.key || 'PAGE-' + digest(caseId + '/' + row.reference);
+  const issue = '<a href="' + escapeXml(row.url) + '">Redmine #' + escapeXml(row.issue) + '</a>';
+  const content = [
+    '<h2>Закрытие №' + escapeXml(row.episode) + '</h2>',
+    '<p>' + issue + ' · ' + escapeXml(row.status) + ' · ' + escapeXml(row.closed_on || row.observed) + '</p>',
+    '<p>Постановка: ' + escapeXml(row.description || row.title) + '</p>',
+  ];
+  if (row.closing_note) {
+    const note = row.closing_note;
+    content.push(
+      '<p>Комментарий при закрытии' + (note.author ? ' · ' + escapeXml(note.author) : '') + '</p>',
+      ...note.text.split(/\r?\n/).map((line) => '<p>' + escapeXml(line) + '</p>'),
+    );
+  }
+  if (row.report) {
+    const r = row.report;
+    content.push(
+      '<p>Исходный отчёт Метрики: ' +
+        escapeXml(r.start) +
+        ' — ' +
+        escapeXml(r.end) +
+        '. ' +
+        escapeXml(r.status) +
+        '</p>',
+      '<p>Визиты с корзиной / все визиты по неделям: ' +
+        escapeXml((r.periods || []).map((p) => p.at(-1) + '/' + p[0]).join(' → ')) +
+        '</p>',
+      '<p><a href="' + escapeXml(r.web) + '">Отчёт Метрики</a></p>',
+    );
+  }
+  db.prepare(
+    `INSERT INTO demo_pages(key,case_id,title,storage,version) VALUES(?,?,?,?,1)
+    ON CONFLICT(key) DO UPDATE SET storage=demo_pages.storage||excluded.storage,version=demo_pages.version+1`,
+  ).run(key, caseId, 'Redmine #' + row.issue + ' · ' + row.title, content.join(''));
+  db.prepare('INSERT INTO redmine_result_pages VALUES(?,?)').run(id, key);
+  if (row.personalOwner)
+    db.prepare('INSERT OR IGNORE INTO private_wiki_pages VALUES(?,?)').run(key, row.personalOwner);
+}
+
+export function initResultPages(db) {
+  db.exec('CREATE TABLE IF NOT EXISTS redmine_result_pages(result TEXT PRIMARY KEY,page TEXT NOT NULL)');
+  const missing = db
+    .prepare(
+      `SELECT id,case_id,body FROM redmine_results r WHERE NOT EXISTS(
+    SELECT 1 FROM redmine_result_pages rp WHERE rp.result=r.id) ORDER BY created,id`,
+    )
+    .all();
+  if (!missing.length) return;
+  db.exec('BEGIN IMMEDIATE');
+  try {
+    for (const r of missing) recordResultPage(db, r.id, r.case_id, JSON.parse(r.body));
+    db.exec('COMMIT');
+  } catch (e) {
+    db.exec('ROLLBACK');
+    throw e;
+  }
 }
