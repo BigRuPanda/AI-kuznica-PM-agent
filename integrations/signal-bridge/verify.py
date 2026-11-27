@@ -359,6 +359,33 @@ with patch.object(providers, 'send_message', side_effect=AssertionError('Unexpec
             dict(self.issue['journals'][0],private_notes=True)])))
         self.assertEqual(second['episode'],2)
 
+    def test_existing_web_closures_remain_available_without_shared_telegram_delivery(self):
+        reference = 'web-draft-fixture'
+        bridge.create_task(dict(self.p, reference=reference))
+        self.issue['status']['id'] = 4
+        bridge.sync_tasks()
+        bridge.sync_tasks()
+        self.assertEqual(bridge.events(), [])
+        closure, = bridge.closures(0)
+        self.assertEqual((closure['reference'], closure['episode']), (reference, 1))
+
+        # Before the web notifier was used, these were ordinary shared Telegram queue rows.
+        with bridge.db() as c:
+            marker, = c.execute('SELECT marker FROM tasks WHERE ref=?', (reference,)).fetchone()
+            for episode, state, receipt in [(1, 'pending', None), (2, 'uncertain', None), (3, 'sent', 42)]:
+                key = f'closed:{marker}:{episode}'
+                bridge.event(c, key, 'issue_closed', 'Личная задача https://tracker.example/issues/11')
+                c.execute('UPDATE events SET state=?,message_id=? WHERE id=?', (state, receipt, key))
+        bridge.init()
+        with patch.object(svc, 'request_json', return_value={'ok':True,'result':{'chat':{'id':44},'message_id':12}}) as remote:
+            self.assertEqual(bridge.deliver()['sent'], 0)
+            remote.assert_not_called()
+        rows = {int(event['id'].rsplit(':', 1)[-1]): event for event in bridge.events()}
+        self.assertEqual([rows[n]['state'] for n in (1, 2, 3)], ['suppressed', 'suppressed', 'sent'])
+        self.assertEqual(rows[3]['message_id'], 42)
+        self.assertTrue(all('https://tracker.example/' not in row['text'] for row in rows.values()))
+        self.assertEqual(bridge.closures(0), [closure])
+
     def test_unsent_and_ambiguous_delivery(self):
         with bridge.db() as c: bridge.event(c,'one','test','test')
         del self.config['TELEGRAM_CHAT_ID']

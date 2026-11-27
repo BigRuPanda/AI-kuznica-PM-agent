@@ -64,6 +64,14 @@ def init():
             # An attempted legacy delivery has no trustworthy destination.
             c.execute("""UPDATE events SET state='uncertain' WHERE
                 state='sending' OR (state='pending' AND (ready>0 OR error IS NOT NULL))""")
+        # The app delivers web task closures to their owners. Older bridges queued the same
+        # closures for the shared chat; keep any receipt and remove the private message text.
+        c.execute("""UPDATE events SET text='Закрытие отслеживает приложение.',
+            error=CASE WHEN state IN ('pending','sending','uncertain') THEN NULL ELSE error END,
+            state=CASE WHEN state IN ('pending','sending','uncertain') THEN 'suppressed' ELSE state END
+            WHERE kind='issue_closed' AND EXISTS(SELECT 1 FROM tasks
+                WHERE ref GLOB 'web-draft-*'
+                AND substr(events.id,1,length(marker)+8)='closed:'||marker||':')""")
 
 
 def event(c, key, kind, text):
