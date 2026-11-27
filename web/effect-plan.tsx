@@ -134,8 +134,10 @@ export function EffectPlan({caseId, saved, reload, archiveOnly, readOnly}:{
   return <>
     {saved && <ObservationResult value={saved}/>}
     {error && <p className="error" role="alert">{error}</p>}
-    {cart && <button type="button" disabled={busy} onClick={()=>applyExample(cart,true)}>Подготовить наблюдение по T-08</button>}
-    {retro && <button type="button" disabled={busy} onClick={()=>applyExample(retro,true)}>Рассчитать пример Astra · R-02</button>}
+    {(cart || retro) && <div className="actions effect-examples">
+      {cart && <button type="button" disabled={busy} onClick={()=>applyExample(cart,true)}>Подготовить наблюдение по T-08</button>}
+      {retro && <button type="button" disabled={busy} onClick={()=>applyExample(retro,true)}>Рассчитать пример Astra · R-02</button>}
+    </div>}
     {result && <><h4>{result.plan?.deployed || result.rollout ? 'Расчёт на ' + result.asOf : 'План проверки'}</h4><ObservationResult value={result}/></>}
     {!readOnly && choices && <form onSubmit={submit} onChange={()=>preview(null)}>
       <label>Задача из исходного бэклога<select value={taskId} onChange={e=>chooseTask(e.target.value)}>
@@ -160,9 +162,13 @@ export function EffectPlan({caseId, saved, reload, archiveOnly, readOnly}:{
       <label>Критерий цели<select value={direction} onChange={e=>setDirection(e.target.value)}><option value="at-least">Не ниже</option><option value="at-most">Не выше</option></select></label>
       <label>Значение цели, если согласовано<input type="number" step="any" value={target} onChange={e=>setTarget(e.target.value)}/></label>
       <label>Условие повторной проверки<input maxLength={400} value={condition} onChange={e=>setCondition(e.target.value)} placeholder="Например, после проверки регистрации события"/></label>
-      <button disabled={busy} value="save">Сохранить наблюдение</button>
-      <label>Оценить по данным на дату<input type="date" value={asOf} onChange={e=>setAsOf(e.target.value)}/></label>
-      <button disabled={busy} value="preview">Рассчитать без сохранения</button>
+      <div className="actions effect-save">
+        <button disabled={busy} value="save">Сохранить наблюдение</button>
+      </div>
+      <div className="actions effect-preview">
+        <label>Оценить по данным на дату<input type="date" value={asOf} onChange={e=>setAsOf(e.target.value)}/></label>
+        <button disabled={busy} value="preview">Рассчитать без сохранения</button>
+      </div>
     </form>}
   </>;
 }

@@ -1,0 +1,71 @@
+.notification-settings { margin-block-end: 14px; }
+
+.notification-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 275px), 1fr));
+  gap: var(--gap);
+}
+
+.notification-card.paper {
+  min-inline-size: 0;
+  margin: 0;
+  padding: clamp(14px, 3vw, 20px);
+}
+
+.notification-card-content {
+  display: grid;
+  justify-items: start;
+  gap: 10px;
+  min-inline-size: 0;
+}
+
+.notification-card-content header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 10px;
+  inline-size: 100%;
+}
+
+.notification-card-content h4 { margin: 0; font-size: 1rem; }
+
+.notification-status {
+  padding: 2px 8px;
+  border-radius: var(--pill);
+  background: var(--surface-subtle);
+  color: var(--fg-muted);
+  font-size: 0.78rem;
+  font-weight: 650;
+}
+
+.notification-status[data-connected='true'] {
+  background: var(--positive-bg);
+  color: var(--positive);
+}
+
+.notification-card-content :is(p, label) {
+  min-inline-size: 0;
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.notification-card-content .notification-address {
+  font-size: 1.04rem;
+}
+.notification-address small { display: block; }
+
+.notification-form {
+  inline-size: min(100%, 330px);
+  gap: 8px;
+}
+
+.notification-form input { inline-size: 100%; }
+
+.notification-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.notification-card-content .text-action { margin-inline-start: -8px; }

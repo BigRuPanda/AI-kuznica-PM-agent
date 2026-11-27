@@ -2,6 +2,7 @@ import { SourceExtract } from './knowledge-source';
 import { Knowledge } from './knowledge';
 import { ReleaseDecision } from './release-decision';
 import { ReleaseAnalytics } from './app';
+import { CalendarRelease, ReleaseJournal } from './release-journal';
 import { MetrikaJournal } from './metrika-status';
 import { ChatTrackerPreview, Connections, DemoObject, Tracking } from './tracking';
 import type { TrackerPreview } from './tracking';
@@ -64,7 +65,6 @@ import './chat.css';
 
 type Action = (fn: () => Promise<void>) => void;
 type ThreadTitle = Pick<Thread, 'id' | 'title'>;
-const releaseAssessmentHref = (releaseId: string) => '#release-decision/' + encodeURIComponent(releaseId);
 
 function currentRoute() {
   if (location.hash.length > 1) return location.hash.slice(1);
@@ -1685,12 +1685,11 @@ function Investigation({
                 <a href={'#snapshot/' + item.calc + '/watch'}>Версия {item.revision}{item.deployed && ' · ' + item.deployed}</a>
               </li>)}</ul>
             </details>}
-            <button
-              onClick={() => confirm('finish')}
-              disabled={completed}
-            >
-              Завершить разбор
-            </button>
+            <footer className="effect-finish">
+              <button type="button" onClick={() => confirm('finish')} disabled={completed}>
+                Завершить разбор
+              </button>
+            </footer>
           </details>
           <details className="paper">
             <summary>Поправка к источнику</summary>
@@ -2269,12 +2268,11 @@ function Workspace({ user, onLogout, onUpdate }: { user: User; onLogout: () => v
   const settings = route === 'settings' || (route === 'cases' && id === 'settings');
   const settingsScope = route === 'settings' && id === 'personal' ? 'personal' : 'team';
   const homeVersion = useRef(0);
-  const refresh = useCallback(async (onLoad?: (data: Home) => void) => {
+  const refresh = useCallback(async () => {
     const version = ++homeVersion.current;
     const next = await post<Home>('overview');
     if (homeVersion.current !== version) return;
     setHome(next);
-    onLoad?.(next);
   }, []);
   function updateThreads(update: (threads: Thread[]) => Thread[]) {
     homeVersion.current++;
@@ -2285,11 +2283,7 @@ function Workspace({ user, onLogout, onUpdate }: { user: User; onLogout: () => v
   }
   useEffect(() => {
     let active = true;
-    refresh((next) => {
-      if (!active || route !== 'release-detail') return;
-      const release = next.releases.find((entry) => entry.release_id === id);
-      location.replace(release?.decisionAvailable ? releaseAssessmentHref(id) : '#releases-list');
-    }).catch((e) => {
+    refresh().catch((e) => {
       if (active) fail(e.message);
     });
     return () => { active = false; };
@@ -2368,7 +2362,7 @@ function Workspace({ user, onLogout, onUpdate }: { user: User; onLogout: () => v
             await post('logout');
             onLogout();
           })} />
-        ) : !home || route === 'release-detail' ? (
+        ) : !home ? (
           <p className="empty" role="status">Загрузка…</p>
         ) : route === 'demo-page' || route === 'demo-issue' ? (
           <DemoObject key={route+id} service={route} id={id}/>
@@ -2376,7 +2370,7 @@ function Workspace({ user, onLogout, onUpdate }: { user: User; onLogout: () => v
           <section className="paper">
             <MaterialDetail id={id} />
           </section>
-        ) : ['releases', 'release', 'calc'].includes(route) ? (
+        ) : ['release', 'calc'].includes(route) ? (
           <ReleaseAnalytics route={route} requestedId={id} user={user} />
         ) : route === 'release-decision' ? (
           <ReleaseDecision key={id} action={action} initialRelease={id || undefined} renderChat={(thread, caseId, releaseId, product, decisionContext) => (
@@ -2411,42 +2405,19 @@ function Workspace({ user, onLogout, onUpdate }: { user: User; onLogout: () => v
             ))}
             onDelete={(deleted) => updateThreads((threads) => threads.filter((thread) => thread.id !== deleted))}
           />
-        ) : route === 'releases-list' ? (
-          <>
-            <div className="page-head releases-head">
-              <h1>Журнал релизов</h1>
-              <a className="primary" href="#releases">Аналитика по событиям CSV</a>
-            </div>
-            <section className="paper release-calendar">
-              <h2>Календарь из источников</h2>
-              {!home.releases.length && <p>В загруженных источниках пока нет релизов.</p>}
-              {home.releases.map((release) => {
-                const summary = <>
-                  <small>{release.release_id} · {release.release_date}</small>
-                  <span>{release.description}</span>
-                </>;
-                return (
-                  <div className="release-row" key={release.release_id}>
-                    {release.decisionAvailable ? (
-                      <a className="release-summary" href={releaseAssessmentHref(release.release_id)}>{summary}</a>
-                    ) : (
-                      <div className="release-summary">{summary}</div>
-                    )}
-                    <button
-                      type="button"
-                      aria-label={'Запланировать разбор ' + release.release_id}
-                      onClick={() => {
-                        showCaseForm(release.release_id);
-                        jump('cases');
-                      }}
-                    >
-                      Запланировать разбор
-                    </button>
-                  </div>
-                );
-              })}
-            </section>
-          </>
+        ) : route === 'releases-list' || route === 'releases' ? (
+          <ReleaseJournal calendar={home.releases} initialFilter={route === 'releases' ? 'metrics' : 'all'}
+            admin={user.role === 'admin'} archiveOnly={Boolean(home.archiveOnly)} />
+        ) : route === 'release-detail' ? (
+          <CalendarRelease release={home.releases.find(release => release.release_id === id)}
+            onPlan={() => {
+              showCaseForm(id);
+              jump('cases');
+            }}
+            renderCases={() => {
+              const linked = home.cases.filter(item => caseReleaseId(item) === id);
+              return linked.length ? <CaseList items={linked} /> : <p className="muted">Связанных разборов пока нет.</p>;
+            }} />
         ) : route === 'cases' ? (
           <>
             <div className="page-head">

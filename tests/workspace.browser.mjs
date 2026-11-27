@@ -381,9 +381,11 @@ test('release decisions preserve the historical cutoff, cited cells and manual i
     .getByRole('link', { name: 'Релизы', exact: true });
   const journalHeading = page.getByRole('heading', { name: 'Журнал релизов', exact: true });
   const releaseHeading = page.getByRole('heading', { name: 'Разбор релиза', exact: true });
-  const releaseLink = page.getByRole('link', { name: /DEC-2 · .*Поздний релиз Kaspersky/ });
+  const releaseLink = page.getByRole('link', { name: 'Поздний релиз Kaspersky', exact: true });
+  const openAssessment = () => page.getByRole('link', { name: 'Разбор релиза', exact: true }).click();
   await journalLink.click();
   await releaseLink.click();
+  await openAssessment();
   await page.waitForURL('**/#release-decision/DEC-2');
   const releaseSelect = field(page.locator('.decision-filters'), 'Релиз');
   assert.equal(await releaseSelect.inputValue(), 'DEC-2');
@@ -397,32 +399,32 @@ test('release decisions preserve the historical cutoff, cited cells and manual i
   }
   await page.setViewportSize({ width: 1440, height: 900 });
   await visible(releaseHeading);
-  await page.getByRole('link', { name: '← Журнал релизов', exact: true }).click();
+  await page.getByRole('link', { name: /К релизам/ }).click();
   await visible(journalHeading);
 
   const compoundId = page.locator('.decision-hero').getByText('DEC K/1 · 01.10.2026', { exact: true });
-  await page.getByRole('link', { name: /^DEC K\/1 ·/ }).click();
+  await page.locator('a[href="#release-detail/DEC%20K%2F1"]').click();
+  await openAssessment();
   await compoundId.waitFor({ state: 'visible', timeout: 5000 });
   assert.equal(await releaseSelect.inputValue(), 'DEC K/1');
   await page.goto(base + '/#release-detail/DEC%20K/1');
+  await openAssessment();
   await page.waitForURL('**/#release-decision/DEC%20K%2F1', { timeout: 5000 });
   await visible(compoundId);
 
   imported[0].facts.push(release('DEC-LATE', '2026-10-01', 'Дополнение к выпуску Astra', 10));
   importDocs(store, imported, { notify: false });
   await page.goto(base + '/#release-detail/DEC-LATE');
+  await openAssessment();
   await page.waitForURL('**/#release-decision/DEC-LATE', { timeout: 5000 });
   await visible(page.locator('.decision-hero').getByText('DEC-LATE · 01.10.2026', { exact: true }));
 
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto(base + '/#release-detail/DEC-TECH');
-  await page.waitForURL('**/#releases-list');
-  await visible(journalHeading);
-  const technicalRow = page.locator('.release-row').filter({ hasText: 'DEC-TECH ·' });
-  assert.equal(await technicalRow.getByRole('link').count(), 0);
+  const scheduleButton = role(page, 'Запланировать разбор DEC-TECH');
+  await visible(scheduleButton);
+  assert.equal(await page.getByRole('link', { name: 'Разбор релиза', exact: true }).count(), 0);
   assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
-  const scheduleButton = technicalRow.getByRole('button', { name: 'Запланировать разбор DEC-TECH', exact: true });
-  assert.equal(await scheduleButton.count(), 1);
   assert.equal(await scheduleButton.innerText(), 'Запланировать разбор');
   await scheduleButton.click();
   assert.equal(await field(page, 'Связанный релиз').inputValue(), 'DEC-TECH');
@@ -430,8 +432,10 @@ test('release decisions preserve the historical cutoff, cited cells and manual i
   await page.setViewportSize({ width: 1440, height: 900 });
   await journalLink.click();
   await releaseLink.click();
+  await openAssessment();
 
   await field(page, 'Семейство или раздел').selectOption('Kaspersky');
+  await page.getByText('Интервью покупателей', { exact: true }).click();
   await visible(page.getByText('«Неясно, какую лицензию выбрать»'));
   await page.getByRole('link', { name: /Интервью!L9/ }).click();
   await visible(page.getByText('Интервью!L9', { exact: true }));
@@ -466,6 +470,7 @@ test('release decisions preserve the historical cutoff, cited cells and manual i
   assert.equal(await page.getByText('Частные выводы Astra', { exact: true }).count(), 0);
 
   await page.goto(base + '/#release-detail/DEC-2');
+  await openAssessment();
   await page.waitForURL('**/#release-decision/DEC-2');
   await visible(releaseHeading);
   await role(page, 'Открыть чат разбора').click();
@@ -906,8 +911,8 @@ test('Softline workspace, upgrade and browser journeys', async t => {
   await journey('a new case started from the case list does not inherit a previous release', async () => {
     try {
       await admin.getByRole('navigation',{name:'Основные разделы'}).getByRole('link',{name:'Релизы',exact:true}).click();
-      const releaseRow = admin.locator('.release-row').filter({ hasText: 'DEMO-R ·' });
-      await releaseRow.getByRole('button', { name: 'Запланировать разбор DEMO-R', exact: true }).click();
+      await admin.getByRole('link', { name: 'Тестовый конфигуратор Kaspersky', exact: true }).click();
+      await role(admin, 'Запланировать разбор DEMO-R').click();
       const releaseSelect = field(admin,'Связанный релиз');
       assert.equal(await releaseSelect.inputValue(), 'DEMO-R');
       await field(admin,'Вопрос или гипотеза').fill('Оценить новый релиз');
@@ -2056,6 +2061,7 @@ test('Softline workspace, upgrade and browser journeys', async t => {
   await journey('CSV import, release, saved calculation and dashboard in the same shell', async () => {
     await admin.goto(base+'/?legacy=1#releases');
     await visible(admin.locator('#workspace-sidebar'));
+    await admin.getByText('Управление', { exact: true }).click();
     await role(admin,'Импорт CSV').click();
     let dlg=admin.getByRole('dialog');
     await field(dlg,'Название набора').fill('События для приёмки');
@@ -2065,6 +2071,7 @@ test('Softline workspace, upgrade and browser journeys', async t => {
     await field(dlg,'Данные полны по дату и время, МСК').fill('2026-11-23T10:00');
     await role(dlg,'Импортировать').click();
     await dlg.waitFor({state:'hidden'});
+    await admin.getByText('Управление', { exact: true }).click();
     await role(admin,'Добавить релиз').click();
     dlg=admin.getByRole('dialog');
     await field(dlg,'Набор данных').selectOption({label:'События для приёмки'});
@@ -2076,6 +2083,7 @@ test('Softline workspace, upgrade and browser journeys', async t => {
     await role(dlg,'Создать релиз').click();
     await visible(admin.getByRole('heading',{name:'Релиз приёмки',exact:true}));
     await admin.locator('summary').filter({hasText:/^Первый разбор · /}).waitFor({state:'attached'});
+    await admin.getByRole('tab', { name: 'Обсуждение' }).click();
     await field(admin,'Спросить агента').fill('Сколько дней до оплаты? Построй график.');
     const [reply] = await Promise.all([
       admin.waitForResponse(r => r.url().endsWith('/api/chat')),
@@ -2091,13 +2099,17 @@ test('Softline workspace, upgrade and browser journeys', async t => {
     const calc=await dlg.getByRole('link',{name:/Источник расчёта/}).getAttribute('href');
     await admin.keyboard.press('Escape');
     await dlg.waitFor({state:'hidden'});
+    await admin.getByRole('tab', { name: 'Сохранённые графики' }).click();
     await field(admin,'Дашборд').selectOption('Проверенные расчёты');
     await visible(admin.getByRole('heading',{name:'Проверенные расчёты'}));
     await go(admin,calc.slice(1));
-    await visible(admin.getByRole('heading',{name:'Сохранённый расчёт'}));
+    await visible(admin.locator('.proof-page h1'));
     await visible(admin.locator('#workspace-sidebar'));
     await member.goto(base+'/?legacy=1#release/R-001');
     await visible(member.locator('.report-head h1'));
+    await member.goto(base+'/#releases-list');
+    await member.getByRole('table', { name: 'Журнал релизов' }).waitFor();
+    assert.equal(await member.getByText('Управление', { exact: true }).count(),0);
     assert.equal(await role(member,'Импорт CSV').count(),0);
   });
   await journey('CSV release discussion shows the profile photo on confirmed own messages', async () => {
@@ -2112,7 +2124,7 @@ test('Softline workspace, upgrade and browser journeys', async t => {
     });
     const openDiscussion = async page => {
       await go(page, route);
-      await role(page,'Обсуждение ›').click();
+      await page.getByRole('tab', { name: 'Обсуждение' }).click();
       return page.getByRole('complementary',{name:'Обсуждение релиза'});
     };
     const sidebarPhoto = page => page.getByRole('link',{name:'Профиль',exact:true}).locator('img');
@@ -2190,7 +2202,7 @@ test('Softline workspace, upgrade and browser journeys', async t => {
     for (const width of [1440, 390]) {
       const page = await login('member','#release/'+releaseId,{viewport:{width,height:900}});
       try {
-        if (width === 390) await role(page,'Обсуждение ›').click();
+        await page.getByRole('tab', { name: 'Обсуждение' }).click();
         const discussion = page.getByRole('complementary',{name:'Обсуждение релиза'});
         await discussion.getByRole('button',{name:/Предыдущие сообщения/}).click();
         const history = discussion.locator('.chat-history');

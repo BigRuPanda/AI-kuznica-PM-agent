@@ -139,6 +139,8 @@ export function dashboard(db, user) {
   const releases = new Map(db.prepare(`SELECT r.* FROM release_threads r JOIN conversations c ON c.id=r.thread
     WHERE c.owner=? AND c.scope='private'`).all(user.id).map(row=>[row.thread,row]));
   const products = [...new Set(listSales(db).map((r) => r.product))];
+  const backlog = facts(db, 'backlog').map(fact => fact.data);
+  const splitIds = value => String(value ?? '').split(/[,;]/u).map(id => id.trim()).filter(Boolean);
   return {
     user,
     cases: visibleCases.map(c => ({ ...c, effect: effect(db, c) })),
@@ -157,7 +159,17 @@ export function dashboard(db, user) {
     products,
     rules: setting(db, 'rules', defaultRules),
     alerts: db.prepare('SELECT id,week,case_id FROM alerts ORDER BY week DESC').all(),
-    releases: facts(db, 'releases').map((f) => ({ ...f.data, decisionAvailable: canDecideRelease(f, products) })),
+    releases: facts(db, 'releases').map(fact => {
+      const release = fact.data;
+      const linkedIds = new Set(splitIds(release.related_task_ids));
+      const relatedTasks = backlog
+        .filter(task => linkedIds.has(String(task.task_id)) ||
+          splitIds(task.release_id).includes(String(release.release_id)))
+        .map(task => ({
+          id: String(task.task_id), title: String(task.title ?? '').trim(), status: String(task.status ?? '').trim(),
+        }));
+      return { ...release, relatedTasks, decisionAvailable: canDecideRelease(fact, products) };
+    }),
     deliveries: db.prepare('SELECT channel,state,count(*) n FROM deliveries GROUP BY channel,state').all(),
   };
 }

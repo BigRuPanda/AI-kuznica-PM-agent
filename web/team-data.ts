@@ -87,9 +87,10 @@ export type Thread = { id: string; title: string; scope: string; caseId: string 
 export type Source = { file: string; version:string; versions: number; updated: number; total?: number; role?: string | null };
 export type Release = {
   release_id: string;
-  release_date: string;
+  release_date: string | null;
   description: string;
   related_task_ids: string;
+  relatedTasks?: { id: string; title: string; status: string }[];
   decisionAvailable?: boolean;
 };
 export type Home = {

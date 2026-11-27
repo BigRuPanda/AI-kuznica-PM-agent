@@ -1,0 +1,139 @@
+.release-journal, .calendar-release, .release-workspace {
+  min-width: 0;
+}
+
+.release-page-head {
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-block: 0 20px;
+}
+
+.release-management { position: relative; }
+.release-management summary, .release-filters button {
+  padding: 8px 12px;
+  border: 1px solid var(--control-border);
+  border-radius: var(--button-radius);
+  background: var(--surface);
+  color: var(--fg);
+  cursor: pointer;
+}
+.release-management summary { padding-inline-start: 28px; }
+.release-management summary::before { inset-inline-start: 12px; }
+.release-management-actions {
+  position: absolute;
+  z-index: 2;
+  inset-block-start: calc(100% + 8px);
+  inset-inline-end: 0;
+  display: grid;
+  gap: 8px;
+  min-width: max-content;
+  padding: 8px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--button-radius);
+  box-shadow: var(--elevation);
+}
+.release-management-actions button { text-align: start; }
+
+.release-filters, .release-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-block: 0 16px;
+}
+.release-filters button[aria-pressed='true'], .release-tabs button[aria-selected='true'] {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent-text);
+  font-weight: 650;
+}
+.release-tabs {
+  margin-block-start: 16px;
+  padding-block-end: 12px;
+  border-block-end: 1px solid var(--border);
+}
+.release-workspace [role='tabpanel'][hidden] { display: none; }
+.release-workspace [role='tabpanel'] { min-width: 0; }
+.release-table-card {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+.release-table {
+  width: 100%;
+  border-collapse: collapse;
+  table-layout: fixed;
+  text-align: start;
+  font-variant-numeric: tabular-nums;
+}
+.release-table :is(th, td) {
+  padding: 10px 12px;
+  text-align: start;
+  vertical-align: top;
+  overflow-wrap: anywhere;
+}
+.release-table thead th {
+  border-block-end: 1px solid var(--border);
+  color: var(--fg-muted);
+  font-size: .84rem;
+  font-weight: 640;
+}
+.release-table tbody tr + tr > * { border-block-start: 1px solid var(--border); }
+.release-table small { display: block; }
+.release-journal-table thead th:first-child { width: 64%; }
+.release-journal-table tbody th a { font-weight: 650; }
+.release-journal-table tbody th small { margin-block-start: 3px; color: var(--fg-muted); font-weight: 400; }
+.release-journal-table time { white-space: nowrap; }
+.release-list-status { margin-block-end: 12px; }
+.release-list-status p { margin: 0; }
+
+.calendar-release .page-head { display: grid; align-items: start; gap: 8px; }
+.calendar-release .page-head :is(h1, small) { margin: 0; }
+.calendar-release .page-head small { color: var(--fg-muted); }
+.calendar-release .page-head .actions { margin-block-start: 5px; }
+.calendar-release .paper h2 { margin-block-start: 0; }
+.release-task-ids { display: flex; flex-wrap: wrap; gap: 8px 24px; padding-inline-start: 1.1rem; }
+
+.release-workspace > .report-head { margin-block-start: 12px; }
+.release-report-filters { margin-block-end: 12px; }
+.release-workspace .release-metrics > .card {
+  margin: 0 0 14px;
+  padding: clamp(12px, 2vw, 22px);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+.release-workspace .metric-period-table { margin-block: 4px 14px; }
+.release-workspace .metric-period-table thead th { color: var(--fg-muted); }
+.release-workspace .metric-period-table td { font-size: .9rem; }
+.release-workspace .metric-period-table .period-value { font-size: clamp(1.15rem, 2.8vw, 1.9rem); }
+.release-workspace .metric-period-table .period-cell { width: 100%; }
+.release-workspace .metric-period-table small { font-size: .75rem; }
+.release-other, .release-about { margin: 0 0 12px; }
+.release-other > table { margin-block-start: 10px; }
+.release-other > table thead th:first-child { width: 46%; }
+.release-other-graph { scroll-margin-block-start: 16px; }
+.metric-row-actions { margin-block-start: 6px; }
+.release-workspace .metric-row-actions button { padding: 3px 7px; font-size: .78rem; }
+.release-saved label { margin-block-end: 14px; }
+.release-saved h2 { margin-block-end: 8px; }
+.release-workspace .release-discussion {
+  height: clamp(480px, 69dvh, 710px);
+  max-width: 880px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+.release-discussion .conversation-body { flex: 1; min-height: 0; }
+
+@media (max-width: 560px) {
+  .release-page-head { margin-block-end: 12px; }
+  .release-management-actions { inset-inline: 0 auto; }
+  .release-table :is(th, td) { padding: 9px 7px; font-size: .8rem; }
+  .release-table thead th { font-size: .76rem; }
+  .release-journal-table thead th:first-child { width: 49%; }
+  .release-journal-table thead th:nth-child(2) { width: 27%; }
+  .release-workspace .release-discussion { height: min(610px, max(440px, 63dvh)); }
+}
