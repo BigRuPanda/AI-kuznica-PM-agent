@@ -198,6 +198,16 @@ test('carousel chat links the release, its task and actual clicks from the impor
   assert.equal(historical.decisionThrough,through);
   assert.match(historical.text,/12\/14/u);
   assert.doesNotMatch(historical.text,/14 → 28|R-65/u);
+  const prompts=[];
+  await answer(store,user,{thread,question:'Как сформулировать ограничение этого вывода?',decisionReleaseId:'R-50',
+    decisionThrough:through,releaseDecisionSnapshot:{releaseId:'R-50',product:'ЛК',through,
+      releaseVersions:[version],metricVersions:[version]}},
+    {LLM_DATA_MODE:'analysis',LLM_BASE_URL:'http://localhost',LLM_MODEL:'fixture'},async(_url,options)=>{
+      prompts.push(JSON.parse(options.body).messages);
+      return Response.json({choices:[{message:{content:'Ограничение следует привязать к выбранной дате.'}}]});
+    });
+  assert.equal(prompts.length,1);
+  assert.doesNotMatch(JSON.stringify(prompts[0]),/14 → 28|Просмотры блока начали измерять 2026-10-21/u);
 });
 
 test('carousel chat on a saved screen admits only the selected metric versions and calendar window', async t => {

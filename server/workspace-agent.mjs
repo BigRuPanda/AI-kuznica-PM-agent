@@ -304,7 +304,7 @@ export async function runAssistant(
         };
       }),
       investigation:
-        c && !smallTalk
+        c && !smallTalk && !b.decisionThrough
           ? {
               title: c.title,
               state: b.screen?.requested?.through ? undefined : c.state,

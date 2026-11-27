@@ -653,9 +653,11 @@ export async function answer(store, user, b, env = process.env, send = fetch, jo
         'Какой график вы имеете в виду?\n' + focus.choices.map((c, i) => i + 1 + '. ' + c.label).join('\n'),
     };
   if (focus?.id) b = { ...b, materialIds: [focus.id], screen: undefined };
-  const history = recentDialogue(db, b.thread, b.questionSeq);
-  const last = history.at(-1)?.body;
   const decisionContext = {decisionReleaseId:b.decisionReleaseId,decisionThrough:b.decisionThrough};
+  const dialogue = recentDialogue(db, b.thread, b.questionSeq);
+  const history = b.decisionThrough ? dialogue.filter(({body})=>
+    body.decisionReleaseId===decisionContext.decisionReleaseId && body.decisionThrough===decisionContext.decisionThrough) : dialogue;
+  const last = history.at(-1)?.body;
   const previous = last && (!b.caseId || last.caseId === b.caseId) &&
     (!b.decisionReleaseId || last.decisionReleaseId === b.decisionReleaseId && last.decisionThrough === b.decisionThrough)
     ? last : undefined;
@@ -746,7 +748,8 @@ export async function answer(store, user, b, env = process.env, send = fetch, jo
     if (!/проверь.*воронк|разбери.*воронк/i.test(b.question)) intent.funnel = false;
     intent.analytical = true;
   }
-  const result = await answerTurn(store, user, b, env, send, job, history, intent);
+  const reply = await answerTurn(store, user, b, env, send, job, history, intent);
+  const result = b.decisionReleaseId ? {...reply,...decisionContext} : reply;
   return focus?.id ? { ...result, focusMaterialId: focus.id } : result;
 }
 
@@ -754,8 +757,9 @@ async function answerTurn(store, user, b, env, send, job, history, intent) {
   const db = store.db,
     c = b.caseId ? visibleCase(db, user, b.caseId) : null;
   const analyticalModel = env.LLM_DATA_MODE === 'analysis' && apiConfigured(env);
+  const fixedRelease = b.decisionThrough && b.releaseDecisionSnapshot;
   const research =
-    analyticalModel || intent.chart || intent.report || intent.funnel
+    (analyticalModel && !fixedRelease) || intent.chart || intent.report || intent.funnel
       ? store.tx(() => prepareResearch(store, user, b, history, job, intent))
       : null;
   if (
