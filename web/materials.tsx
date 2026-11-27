@@ -10,7 +10,7 @@ import {
   type WindowRange,
 } from './range-chart';
 import { seriesPath } from './trend';
-import { jump, num, post, type Home } from './team-data';
+import { jump, num, post } from './team-data';
 import './materials.css';
 
 export type MaterialRef = { id: string; kind: 'chart' | 'report'; title: string; shared?: boolean };
@@ -23,7 +23,6 @@ type Plot = {
 };
 type Section = { title: string; text?: string; columns?: string[]; rows?: string[][]; sources?: string[] };
 type Material = MaterialRef & {
-  product?: string;
   summary?: string;
   analysis?: string;
   ranges?: WindowRange[];
@@ -75,20 +74,13 @@ export function useMaterials() {
   return c;
 }
 export function MaterialsProvider({
-  home,
   caseId,
-  refresh,
   children,
 }: {
-  home: Home | null;
   caseId?: string;
-  refresh: () => Promise<void>;
   children: ReactNode;
 }) {
   const [stack, setStack] = useState<string[]>([]),
-    [picker, setPicker] = useState<Material | null>(null),
-    [target, setTarget] = useState(''),
-    [product, setProduct] = useState(''),
     [revision, bump] = useState(0),
     [error, fail] = useState(''),
     [busy, setBusy] = useState(false);
@@ -97,13 +89,11 @@ export function MaterialsProvider({
   useEffect(() => {
     const closeDialogs = () => {
       setStack([]);
-      setPicker(null);
       fail('');
     };
     window.addEventListener('hashchange', closeDialogs);
     return () => window.removeEventListener('hashchange', closeDialogs);
   }, []);
-  const createRequest = useRef('');
   const load = useCallback((id: string, preview = false) => {
     const key = preview ? 'preview/' + id : id;
     let pending = cache.current.get(id) || cache.current.get(key);
@@ -135,22 +125,15 @@ export function MaterialsProvider({
       jump('chats/' + id);
     }
   }
-  async function changePin(m: Material, destination: string) {
-    if (busy) return;
+  async function changePin(m: Material) {
+    if (!caseId || busy) return;
     setBusy(true);
     fail('');
     try {
-      await post(
-        'pin-material',
-        destination === 'new'
-          ? { id: m.id, createRequest: createRequest.current, product }
-          : { id: m.id, caseId: destination, remove: m.pins.includes(destination) },
-      );
+      await post('pin-material', { id: m.id, caseId, remove: m.pins.includes(caseId) });
       cache.current.delete(m.id);
       cache.current.delete('preview/' + m.id);
       bump((v) => v + 1);
-      setPicker(null);
-      if (destination === 'new') await refresh();
     } catch (e) {
       fail((e as Error).message);
     } finally {
@@ -166,15 +149,7 @@ export function MaterialsProvider({
     attach: (m, r) => {
       void attach(m, r).catch((e) => fail(e.message));
     },
-    pin: (m) => {
-      if (caseId) void changePin(m, caseId);
-      else {
-        setPicker(m);
-        setProduct(m.product || home?.products[0] || '');
-        createRequest.current = crypto.randomUUID();
-        setTarget(m.pins[0] || home?.cases[0]?.id || 'new');
-      }
-    },
+    pin: changePin,
   };
   return (
     <Context.Provider value={value}>
@@ -190,34 +165,6 @@ export function MaterialsProvider({
             <button onClick={() => setStack((s) => s.slice(0, -1))}>← К предыдущему материалу</button>
           )}
           <MaterialDetail key={stack.at(-1)} id={stack.at(-1)!} />
-        </Dialog>
-      )}
-      {picker && (
-        <Dialog title="Выберите разбор" close={() => setPicker(null)}>
-          <label className="material-picker">
-            Разбор
-            <select value={target} onChange={(e) => setTarget(e.target.value)}>
-              {home?.cases.map((c) => (
-                <option key={c.id} value={c.id}>
-                  {c.title}
-                  {picker.pins.includes(c.id) ? ' · добавлено' : ''}
-                </option>
-              ))}
-              <option value="new">Создать новый разбор</option>
-            </select>
-          </label>
-          {target === 'new' && !picker.product && (
-            <label className="material-picker">
-              Продукт нового разбора
-              <input value={product} onChange={(e) => setProduct(e.target.value)} required />
-            </label>
-          )}
-          <button
-            disabled={busy || (target === 'new' && !product.trim())}
-            onClick={() => void changePin(picker, target)}
-          >
-            {picker.pins.includes(target) ? 'Убрать с экрана' : 'Добавить в разбор'}
-          </button>
         </Dialog>
       )}
     </Context.Provider>
@@ -292,15 +239,11 @@ export function MiniPlot({ plot }: { plot: Pick<Plot, 'unit' | 'step' | 'lines'>
   );
 }
 function Pin({ m }: { m: Material }) {
-  const c = useMaterials();
-  const added = c.caseId ? m.pins.includes(c.caseId) : m.pins.length > 0;
+  const { caseId, pin } = useMaterials();
+  if (!caseId) return null;
   return (
-    <button onClick={() => c.pin(m)}>
-      {added
-        ? c.caseId
-          ? 'Добавлено · убрать с экрана'
-          : 'Добавлено · выбрать разбор'
-        : 'Добавить в разбор'}
+    <button type="button" onClick={() => pin(m)}>
+      {m.pins.includes(caseId) ? 'Добавлено · убрать с экрана' : 'Добавить в разбор'}
     </button>
   );
 }

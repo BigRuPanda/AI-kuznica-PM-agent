@@ -2228,7 +2228,7 @@ function Workspace({ user, onLogout }: { user: User; onLogout: () => void }) {
     </div>
   );
   return (
-    <MaterialsProvider home={home} caseId={route === 'case' ? id : undefined} refresh={refresh}>
+    <MaterialsProvider caseId={route === 'case' ? id : undefined}>
       {content}
     </MaterialsProvider>
   );
