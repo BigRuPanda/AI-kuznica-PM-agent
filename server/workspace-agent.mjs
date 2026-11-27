@@ -7,6 +7,7 @@ import { visibleCase, thread } from './workbench.mjs';
 import { newTopic, researchContext, researchIntent } from './agent-research.mjs';
 import { materialForResult, readMaterial } from './materials.mjs';
 import { chartObservations } from './chart-focus.mjs';
+import { archiveEvidence, archiveInquiry } from './archive-search.mjs';
 
 const system = [
   'Проверяй конкретное значение за дату через source_value. Для orders_index используй точное семейство из текущего разбора. Если строки нет, скажи, каких данных нет. Для фразы из исследования называй файл и лист с ячейкой или слайд. Темы ответа не являются дословной цитатой. Обозначай гипотезы явно.',
@@ -279,7 +280,10 @@ export async function runAssistant(
         })),
       };
     }
+    const archive = c && archiveInquiry(b.question) && !smallTalk && !b.screen?.calc && !range && !b.decisionReleaseId
+      ? archiveEvidence(db, b.question + ' ' + c.product).slice(0,4) : [];
     const context = {
+      archive: archive.length ? archive.map(row => row.text) : undefined,
       requestedPeriod:b.requestedPeriod || undefined,
       caseId,
       product: range?.product || research?.product || c?.product || last?.product,
@@ -351,6 +355,10 @@ export async function runAssistant(
       failures: {},
     };
     if (context.releaseDecision) note(state, 'release_decision', context.releaseDecision);
+    if (archive.length) {
+      note(state,'search',archive.flatMap(row=>row.refs));
+      state.completed.push('search');
+    }
     save(state);
   }
   const createRequested = state.caseId && authorizedWrite('draft', b.question) &&
@@ -382,12 +390,14 @@ export async function runAssistant(
     save(state);
     return result;
   };
+  const deadline = Date.now() + 90000;
   while (state.round < 6 || state.pending.length) {
     if (!state.pending.length) {
       const start = Date.now();
       let response;
       try {
-        response = await providerCall(env, state.messages, turnTools, 'auto', send);
+        if (start >= deadline) return stop('Время разбора истекло. Уже выполненные шаги сохранены. Можно продолжить с этого места.', undefined, 'partial');
+        response = await providerCall(env, state.messages, turnTools, 'auto', send, { timeout: deadline - start });
         if (state.issues) delete state.issues.provider;
       } catch (e) {
         state.round++;

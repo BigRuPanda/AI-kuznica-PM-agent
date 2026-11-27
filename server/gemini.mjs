@@ -27,7 +27,7 @@ export function geminiRequest(messages,tools,choice){
     ...(tools.length ? {tools:[{functionDeclarations:tools.map(({function:f})=>({name:f.name,description:f.description,parametersJsonSchema:f.parameters}))}],
       toolConfig:{functionCallingConfig:{mode:choice==='auto'?'AUTO':'ANY',...(typeof choice==='object'?{allowedFunctionNames:[choice.function.name]}:{})}}} : {})};
 }
-export async function geminiCall(env,messages,tools,choice,send,credentials=auth){
+export async function geminiCall(env,messages,tools,choice,send,credentials=auth,limits={}){
   const developer=env.LLM_BACKEND==='gemini';
   const model=env.LLM_MODEL||(developer?'gemini-3.5-flash':'gemini-3.5-flash-lite'),location=env.GOOGLE_CLOUD_LOCATION||'global';
   if(!/^[\w.-]+$/.test(model)||!/^[a-z0-9-]+$/.test(location))throw Error('Проверьте модель и регион Google Cloud.');
@@ -47,9 +47,11 @@ export async function geminiCall(env,messages,tools,choice,send,credentials=auth
   }
   const url=developer?'https://generativelanguage.googleapis.com/v1beta/models/'+model+':generateContent':
     'https://'+host+'/v1/'+prefix+'publishers/google/models/'+model+':generateContent';
-  const body=JSON.stringify(geminiRequest(messages,tools,choice));
+  const request=geminiRequest(messages,tools,choice);
+  if(limits.maxTokens)request.generationConfig={maxOutputTokens:limits.maxTokens};
+  const body=JSON.stringify(request);
   let res;
-  try{res=await send(url,{method:'POST',headers,redirect:'error',signal:AbortSignal.timeout(60000),body});}
+  try{res=await send(url,{method:'POST',headers,redirect:'error',signal:AbortSignal.timeout(limits.timeout ?? 60000),body});}
   catch{throw Object.assign(Error('Не удалось связаться с Google Cloud.'),{retryable:true});}
   if(!res.ok)throw Object.assign(Error('Google вернул HTTP '+res.status+'. '+({400:'Проверьте параметры модели и тип ключа.',401:'Проверьте аутентификацию.',403:developer?'Проверьте доступ ключа к Gemini API и модели.':'Проверьте биллинг, включение API и право aiplatform.endpoints.predict.',404:'Проверьте доступность ID модели.',429:'Исчерпана квота запросов.'}[res.status]||'Повторите запрос позже.')),{status:res.status});
   const response=await res.json(),parts=response.candidates?.[0]?.content?.parts;

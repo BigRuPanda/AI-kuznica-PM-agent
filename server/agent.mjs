@@ -36,21 +36,20 @@ function apiTools(){
     return {type:'function',function:{name:key,description,parameters}};
   });
 }
-export async function providerCall(env,messages,tools,choice='auto',send=fetch){
-  if(['gemini','vertex','vertex-express'].includes(env.LLM_BACKEND))return geminiCall(env,messages,tools,choice,send);
+export async function providerCall(env,messages,tools,choice='auto',send=fetch,limits={}){
+  if(['gemini','vertex','vertex-express'].includes(env.LLM_BACKEND))return geminiCall(env,messages,tools,choice,send,undefined,limits);
   if(!apiConfigured(env))throw Error('Для подключения модели задайте LLM_BASE_URL и LLM_MODEL в .env, а ключ — в LLM_API_KEY.');
   const target=new URL(env.LLM_BASE_URL.replace(/\/+$/,'')+'/chat/completions');
   if(target.protocol!=='https:'&&!(target.protocol==='http:'&&['localhost','127.0.0.1','[::1]'].includes(target.hostname)))throw Error('Для удалённого API модели требуется HTTPS.');
-  // A CPU-backed local model may need several minutes to process a cold tool catalog.
   const local = ['localhost','127.0.0.1','[::1]'].includes(target.hostname);
-  const timeout = local ? 240000 : 60000;
+  const timeout = Math.min(limits.timeout ?? 60000,60000);
   const signal = AbortSignal.timeout(timeout);
   const timedOut = e => signal.aborted || e?.name === 'TimeoutError';
   const timeoutError = () => Object.assign(Error('Модель не успела ответить за ' + timeout / 1000 + ' секунд.'),
     { timedOut: true, retryable: !local });
   let response;
   try{response=await send(target,{method:'POST',redirect:'error',signal,headers:{'Content-Type':'application/json',...(env.LLM_API_KEY?{Authorization:'Bearer '+env.LLM_API_KEY}:{})},
-    body:JSON.stringify({model:env.LLM_MODEL,messages,...(tools.length ? {tools,tool_choice:choice} : {})})});}catch(e){
+    body:JSON.stringify({model:env.LLM_MODEL,messages,...(limits.maxTokens ? {max_tokens:limits.maxTokens} : {}),...(tools.length ? {tools,tool_choice:choice} : {})})});}catch(e){
     if(timedOut(e))throw timeoutError();
     throw Object.assign(Error('Модель недоступна. Проверьте подключение и параметры .env.'),{retryable:true});
   }

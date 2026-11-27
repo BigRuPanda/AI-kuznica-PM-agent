@@ -160,7 +160,7 @@ async function main() {
           store.db,
           'demo_versions',
           permission?.archive
-            ? store.db.prepare('SELECT version FROM source_revisions WHERE sha=? ORDER BY rowid').all(permission.sha).map(row => row.version)
+            ? store.db.prepare('SELECT version FROM source_revisions WHERE rowid IN (SELECT max(rowid) FROM source_revisions WHERE sha=? GROUP BY file) ORDER BY file').all(permission.sha).map(row => row.version)
             : docs.map(d => digest(JSON.stringify(d))),
         );
         console.log('Демо-набор для новых аккаунтов жюри сохранён.');

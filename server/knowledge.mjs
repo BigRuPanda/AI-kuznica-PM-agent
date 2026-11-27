@@ -45,7 +45,8 @@ export function sourceRows(db, version, offset = 0, loc) {
     created: doc.created,
     total: facts.length,
     offset,
-    rows: facts.slice(offset, offset + 40).map((f) => ({ loc: f.loc, value: f.row || f.text })),
+    rows: facts.slice(offset, offset + 40).map((f) => ({ loc: f.loc,
+      value: f.detail ? f.detail.field + ' · ' + f.detail.answer : f.row || f.text })),
   };
 }
 

@@ -48,6 +48,24 @@ def interview_excerpt(value):
             return phrase
     return None
 
+# Index structured research answers. Contact fields, recordings and raw transcripts
+# are outside the research corpus. A sheet row links answers from the same interview.
+PRIVATE_FIELD = re.compile(r"контактн|номер телефона|^телефон$|e-?mail|почтовый адрес|фио|ф\.и\.о|^имя\b|фамили|название компании|инн|ссылка на|транскри|расшифров|запись интервью|реквизит|пароль|логин", re.I)
+PRIVATE_VALUE = re.compile(r"https?://\S+|[\w.+-]+@[\w.-]+|(?<!\w)(?:\+7|8)[\s()-]*(?:\d[\s()-]*){10}(?!\d)|\b\d{9,}\b|@[\w.]+|\b(?:ООО|АО|ПАО|ИП)\s+[«\"][^»\"]+[»\"]", re.I)
+PERSON = re.compile(r"\b[А-ЯЁ][а-яё]+\s+[А-ЯЁ][а-яё]+(?:\s+[А-ЯЁ][а-яё]+)?\b|\b[А-ЯЁ][а-яё]+\s+[А-ЯЁ]\.\s*[А-ЯЁ]\.")
+
+def research_detail(field, value, identifiers):
+    if not isinstance(field, str) or PRIVATE_FIELD.search(field) or not isinstance(value, str):
+        return None
+    if len(field) > 500 or re.search(r"пароль|паспорт|транскрипт|расшифровка интервью|(?:^|\n)\s*(?:интервьюер|респондент)\s*:", value, re.I):
+        return None
+    cleaned = PERSON.sub("[скрыто]", PRIVATE_VALUE.sub("[скрыто]", value)).strip()
+    for word in identifiers:
+        cleaned = re.sub(r"\b"+re.escape(word)+r"\b", "[скрыто]", cleaned, flags=re.I)
+    if not cleaned or cleaned == "[скрыто]":
+        return None
+    return {"field": field.strip(), "answer": cleaned}
+
 def price_comparison(headers, cells):
     fields = {name: cells.get(col) for col, name in headers.items()}
     match = fields.get("Сопоставимый продукт у конкурента")
@@ -134,6 +152,7 @@ def book(z, name):
         target=relations[rel]
         path=target.lstrip("/") if target.startswith("/") else posixpath.normpath(posixpath.join("xl",target))
         headers={}
+        survey=False
         for n,cells in sheet_rows(z,path,strings):
             if title in TABLES:
                 if not headers:
@@ -152,17 +171,40 @@ def book(z, name):
                     elif headers:
                         comparison=price_comparison(headers,cells)
                         if comparison: fact["comparison"]=comparison
+                        if "Цена конкурента, ₽" in headers.values():
+                            fields={label:cells.get(col) for col,label in headers.items()}
+                            if isinstance(fields.get("Конкурент"),str) and isinstance(fields.get("Продукт"),str):
+                                fact["prices"]={k:fields.get(k) for k in ("Конкурент","Продукт","Описание сравниваемого продукта",
+                                    "Сопоставимый продукт у конкурента","Цена конкурента, ₽","Цена store.softline.ru, ₽","Срок / кол-во")}
+                                checked=fields.get("Дата проверки")
+                                if isinstance(checked,(float,int)) and 1<=checked<100000:
+                                    fact["prices"]["Дата проверки"]=(datetime(1899,12,30)+timedelta(days=checked)).date().isoformat()
                     facts.append(fact)
-            elif n>=3:
-                for col,value in cells.items():
-                    if col in ("A","B") or not isinstance(value,str):
+            else:
+                if n <= 6 and not survey:
+                    headings=[v for v in cells.values() if isinstance(v,str)]
+                    survey=(len(headings)>=4 and (any(re.match(r"^(?:роль\b|должность\b|имя,|состав заказа$|выбор поставщика$|модель покупки$)",h,re.I)
+                                                      for h in headings) or sum("?" in h for h in headings)>=3))
+                    if survey:
+                        headers=cells
                         continue
-                    tags=[label for label,pattern in THEMES if re.search(pattern,value,re.I)]
-                    if tags:
-                        text="Темы ответа: "+", ".join(tags)
-                        excerpt=interview_excerpt(value)
+                    if n<=2:
+                        continue
+                identifiers = {word for col,value in cells.items() if isinstance(value,str) and
+                               re.search(r"^имя|фамили|фио|название компании", str(headers.get(col,"")), re.I)
+                               for word in re.findall(r"\b[А-ЯЁA-Z][а-яёa-z]{2,}\b",value)}
+                for col,value in cells.items():
+                    if not isinstance(value,str):
+                        continue
+                    detail=research_detail(headers.get(col),value,identifiers) if survey else None
+                    tags=[label for label,pattern in THEMES if re.search(pattern,value,re.I)] if n>=3 and col not in ("A","B") else []
+                    if detail or tags:
+                        text="Темы ответа: "+", ".join(tags) if tags else detail["field"]
+                        excerpt=interview_excerpt(value) if tags else None
                         if excerpt: text+="\nФрагмент записи: "+excerpt
-                        facts.append({"kind":"interview","loc":f"{title}!{col}{n}","text":text})
+                        fact={"kind":"interview","loc":f"{title}!{col}{n}","text":text}
+                        if detail: fact["detail"]=detail
+                        facts.append(fact)
     return facts
 
 def extract(data, name, depth=0):

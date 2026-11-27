@@ -153,7 +153,7 @@ test('the workspace reports a local model deadline and keeps the turn resumable 
     });
     const result = messages(s.db, user, thread).items.at(-1).body;
     assert.equal(calls, 1);
-    assert.match(result.text, /Модель не успела ответить за 240 секунд/);
+    assert.match(result.text, /Модель не успела ответить за 60 секунд/);
     assert.doesNotMatch(result.text, /Модель недоступна|параметры \.env/);
     assert.equal(result.canResume, true);
   } finally {

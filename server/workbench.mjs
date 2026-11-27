@@ -40,6 +40,7 @@ import {
 } from './agent-research.mjs';
 import { asksToDraw, chartFindings, chartObservations, resolveChartFocus } from './chart-focus.mjs';
 import { dayComparison, explicitDayWindow } from './day-comparison.mjs';
+import { archiveAnswer, archiveEvidence, archiveInquiry } from './archive-search.mjs';
 
 const chatItemColumns = '(seq INTEGER PRIMARY KEY AUTOINCREMENT,thread TEXT,author TEXT,role TEXT,body TEXT,created INTEGER);';
 
@@ -529,6 +530,17 @@ export async function answer(store, user, b, env = process.env, send = fetch, jo
   const daily = store.tx(() => dayComparison(db, user, b, history, shared));
   if (daily) return daily;
   const intent = researchIntent(b.question);
+  if (!focus && !b.rangeId && !b.materialIds?.length && !b.screen?.calc && !b.decisionReleaseId &&
+      !b.caseId && !intent.chart && archiveInquiry(b.question) && !history.at(-1)?.body.rangeId) {
+    const previous = history.at(-1)?.body;
+    const query = previous?.archiveQuestion && /^(?:а |тогда |уточни|а если|и что)/iu.test(b.question)
+      ? previous.archiveQuestion + '\n' + b.question : b.question;
+    const evidence = archiveEvidence(db, query);
+    if (evidence.length) return { ...await archiveAnswer(store, query, evidence, env, send, job), archiveQuestion: b.question };
+    if (/в архиве|по архиву|в загруженн[а-яё]* (?:книг|таблиц|источник)/iu.test(b.question))
+      return { mode:'archive', outcome:'clarification', steps:['search'], readSources:[],
+        text:'В загруженном архиве не нашлось совпадений. Уточните название продукта, показателя или исследования.' };
+  }
   if (focus?.id && !asksToDraw(b.question)) {
     intent.chart = false;
     if (!/проверь.*воронк|разбери.*воронк/i.test(b.question)) intent.funnel = false;
@@ -715,7 +727,7 @@ function briefConclusion(text, findings) {
 }
 
 function completeMaterials(store, user, job, b, result) {
-  if (['daily', 'source-value', 'release-observation', 'web', 'competitor-check'].includes(result.mode)) return result;
+  if (['daily', 'source-value', 'release-observation', 'web', 'competitor-check', 'archive'].includes(result.mode)) return result;
   if (result.chartChoices) return { ...result, materials: [] };
   const db = store.db;
   const r = JSON.parse(db.prepare('SELECT body FROM job_research WHERE job=?').get(job)?.body || 'null');

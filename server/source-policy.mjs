@@ -10,7 +10,8 @@ export function initSourcePolicy(db) {
       sha TEXT PRIMARY KEY,file TEXT NOT NULL,previous TEXT,origin TEXT NOT NULL,author TEXT NOT NULL,approved INTEGER NOT NULL);
     CREATE TABLE IF NOT EXISTS source_revisions(
       version TEXT PRIMARY KEY,file TEXT NOT NULL,sha TEXT NOT NULL,origin TEXT NOT NULL,author TEXT,approved INTEGER);
-    CREATE INDEX IF NOT EXISTS source_revisions_file ON source_revisions(file);`);
+    CREATE INDEX IF NOT EXISTS source_revisions_file ON source_revisions(file);
+    CREATE TABLE IF NOT EXISTS archive_indexes(sha TEXT PRIMARY KEY, format INTEGER NOT NULL);`);
 }
 
 function head(db, file) {
@@ -43,11 +44,15 @@ export function approveSource(store, { sha, file, origin, previous }, author, ex
 export function sourcePermission(db, expected, raw, file) {
   if (!expected) return null;
   const sha = digest(raw);
-  if (sha === expected && /\.zip$/i.test(file))
-    return { archive: true, sha, alreadyImported: !!db.prepare('SELECT 1 FROM source_archive WHERE sha=?').get(sha) };
+  const indexed = db.prepare('SELECT format FROM archive_indexes WHERE sha=?').get(sha)?.format === 2;
+  if (sha === expected && /\.zip$/i.test(file)) {
+    const exists = !!db.prepare('SELECT 1 FROM source_archive WHERE sha=?').get(sha);
+    return { archive: true, sha, alreadyImported: exists && indexed, refresh: exists && !indexed };
+  }
   const approved = db.prepare('SELECT * FROM source_approvals WHERE sha=? AND file=?').get(sha, file);
   if (!approved) throw Error('Загрузите исходный ZIP организатора или версию, согласованную администратором.');
-  return { ...approved, alreadyImported: !!db.prepare('SELECT 1 FROM source_revisions WHERE sha=? AND file=?').get(sha, file) };
+  const exists = !!db.prepare('SELECT 1 FROM source_revisions WHERE sha=? AND file=?').get(sha, file);
+  return { ...approved, alreadyImported: exists && indexed, refresh: exists && !indexed };
 }
 
 function saveRevision(db, doc, { sha, origin, author = null, approved = null }) {
@@ -122,13 +127,42 @@ export function importApproved(store, docs, permission, notify) {
   if (!permission) return importDocs(store, docs, { notify });
   if (permission.alreadyImported)
     return { inserted: 0, documents: store.db.prepare('SELECT count(*) n FROM documents').get().n };
+  const markIndexed = db => db.prepare('INSERT OR REPLACE INTO archive_indexes VALUES(?,2)').run(permission.sha);
+  if (permission.refresh) {
+    const candidates = [];
+    return importDocs(store, candidates, { notify: false, guard: db => {
+      if (db.prepare('SELECT format FROM archive_indexes WHERE sha=?').get(permission.sha)?.format === 2) return false;
+      for (const doc of docs) {
+        const prior = db.prepare('SELECT * FROM source_revisions WHERE file=? ORDER BY rowid DESC LIMIT 1').get(doc.file);
+        if (!prior || prior.sha !== permission.sha) continue;
+        const next = permission.archive ? doc : { ...doc, sourceFileSha256: prior.sha };
+        if (prior.version === digest(JSON.stringify(next))) continue;
+        const keys = factKeys(next);
+        const live = db.prepare('SELECT kind,key FROM facts WHERE file=?').all(next.file);
+        if (live.some(r => !keys.has(JSON.stringify([r.kind,r.key]))))
+          throw Error('При обновлении индекса пропала прежняя строка ' + next.file);
+        saveRevision(db, next, prior);
+        candidates.push(next);
+      }
+      markIndexed(db);
+      return true;
+    }});
+  }
   if (permission.archive)
-    return importDocs(store, docs, { notify, guard: db => validateArchive(db, docs, permission.sha) });
+    return importDocs(store, docs, { notify, guard: db => {
+      const valid = validateArchive(db, docs, permission.sha);
+      if (valid !== false && permission.alreadyImported !== undefined) markIndexed(db);
+      return valid;
+    } });
   const doc = docs[0];
   if (docs.length !== 1 || doc.file !== permission.file || !doc.facts.length)
     throw Error('В согласованном материале нет распознанных записей.');
   const revision = { ...doc, sourceFileSha256: permission.sha };
-  return importDocs(store, [revision], { notify, guard: db => validateRevision(db, revision, permission) });
+  return importDocs(store, [revision], { notify, guard: db => {
+    const valid = validateRevision(db, revision, permission);
+    if (valid !== false) markIndexed(db);
+    return valid;
+  } });
 }
 
 export function sourceHistory(db, file) {
