@@ -52,13 +52,32 @@ export async function providerCall(env,messages,tools,choice='auto',send=fetch,l
   const target=new URL(baseUrl.replace(/\/+$/,'')+'/chat/completions');
   if(target.protocol!=='https:'&&!(target.protocol==='http:'&&['localhost','127.0.0.1','[::1]'].includes(target.hostname)))throw Error('Для удалённого API модели требуется HTTPS.');
   let response;
-  const signal = AbortSignal.timeout(Math.max(1,Math.min(60000, limits.timeout ?? 60000)));
+  const timeout = Math.max(1,Math.min(60000, limits.timeout ?? 60000));
+  const signal = AbortSignal.timeout(timeout);
+  const timedOut = error => signal.aborted || error?.name === 'TimeoutError';
+  const timeoutError = () => {
+    const seconds = Math.ceil(timeout / 1000);
+    const unit = { one:'секунду', few:'секунды', many:'секунд', other:'секунды' }[new Intl.PluralRules('ru').select(seconds)];
+    return Object.assign(Error('Модель не успела ответить за ' + seconds + ' ' + unit + '.'), {timedOut:true});
+  };
   const history = messages.map(({usage, googleParts, ...message}) => message);
   try{response=await send(target,{method:'POST',redirect:'error',signal,headers:{'Content-Type':'application/json',...(key?{Authorization:'Bearer '+key}:{})},
-    body:JSON.stringify({model:env.LLM_MODEL,messages:history,...(tools.length?{tools,tool_choice:choice}:{}),...(limits.maxTokens?{max_tokens:limits.maxTokens}:{})})});}catch{if(signal.aborted)throw Object.assign(Error('Модель не успела ответить вовремя.'),{timedOut:true});throw Object.assign(Error('Модель недоступна. Проверьте подключение и параметры .env.'),{retryable:true});}
+    body:JSON.stringify({model:env.LLM_MODEL,messages:history,...(tools.length?{tools,tool_choice:choice}:{}),
+      ...(limits.maxTokens?{max_tokens:limits.maxTokens}:{}),
+      ...(limits.temperature!==undefined?{temperature:limits.temperature}:{})})});}
+  catch(error) {
+    if(timedOut(error))throw timeoutError();
+    throw Object.assign(Error('Модель недоступна. Проверьте подключение и параметры .env.'),{retryable:true});
+  }
   if(!response.ok)throw Object.assign(Error('Провайдер модели вернул HTTP '+response.status+'.'),{status:response.status});
-  const data=await readModelResponse(response,signal),reply=data?.choices?.[0]?.message;
-  if(!reply)throw Object.assign(Error('Модель вернула пустой ответ.'),{invalidModelResponse:true});return {...reply,usage:{input:data.usage?.prompt_tokens,output:data.usage?.completion_tokens}};
+  const data=await readModelResponse(response,signal).catch(error=>{
+    if(error.timedOut)throw timeoutError();
+    throw error;
+  });
+  const choiceReply=data?.choices?.[0], reply=choiceReply?.message;
+  if(!reply)throw Object.assign(Error('Модель вернула пустой ответ.'),{invalidModelResponse:true});
+  return {...reply,lengthLimited:choiceReply.finish_reason==='length',
+    usage:{input:data.usage?.prompt_tokens,output:data.usage?.completion_tokens}};
 }
 async function apiTurn(store,a,history,question,env,send){
   const ctx=a.context,tools=apiTools(),refs=new Map(),messages=[{role:'system',content:system},

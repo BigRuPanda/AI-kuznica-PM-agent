@@ -107,7 +107,11 @@ function authorizedWrite(op, question) {
 }
 function note(state, op, r) {
   if (r.error) return;
-  const refs=op==='source_value' || op==='search' ? r : op==='knowledge-source' ?
+  const refs=op==='release_decision' ?
+    [r.release, r.backlog, r.measurement, r.customer, r.competitor, ...(r.delivered || []),
+      ...(r.accountEvidence?.sources || []), ...(r.trend?.baseline?.rows || []),
+      ...(r.trend?.current?.rows || [])].filter(Boolean) :
+    op==='source_value' || op==='search' ? r : op==='knowledge-source' ?
     r.rows.slice(0,1).map(row=>({version:r.version,file:r.file,loc:row.loc})) : [];
   for(const row of refs || []) {
     if(!row.file || !row.loc || !row.version) continue;
@@ -259,7 +263,8 @@ export async function runAssistant(
         })),
       };
     }
-    const archive = c && archiveInquiry(b.question) && !smallTalk && !b.screen?.calc && !range && !b.analysisPeriod
+    const archive = c && archiveInquiry(b.question) && !smallTalk && !b.screen?.calc && !range &&
+        !b.materialIds?.length && !b.decisionReleaseId && !b.analysisPeriod
       ? archiveEvidence(db,b.question+' '+c.product,{product:c.product}).slice(0,4) : [];
     let decision;
     if (b.decisionReleaseId && !smallTalk) {
@@ -347,7 +352,24 @@ export async function runAssistant(
     if(archive.length){note(state,'search',archive.flatMap(r=>r.refs));state.completed.push('search');}
     save(state);
   }
-  const stop = (message, warning, outcome = 'done') => {
+  const singleIssue = state.caseId && authorizedWrite('draft', b.question) &&
+    /^(?:подготовь|создай|заведи|оформи|составь).{0,50}(?:задач|заявк|тикет)/iu.test(b.question) &&
+    !/существующ|статус|приоритет|комментар|исполнител|#[0-9]|№\s*\d|страниц|confluence|публикац|построй|график/iu.test(b.question);
+  const turnTools = singleIssue
+    ? tools.filter(t=>['draft','source_value','issue_search','search','view','knowledge_source','release_decision'].includes(t.function.name))
+    : tools;
+  const compact = state.compactRetry && !singleIssue && ![...writes].some(op=>authorizedWrite(op,b.question));
+  const readTools = new Set(['overview','metrics','view','calc','search','source_value','knowledge_source','knowledge_sources']);
+  if (state.anchorId || /график|период|воронк|динамик|участ/iu.test(b.question))
+    for (const name of ['chart','range_read','selection_context','neighboring','funnel']) readTools.add(name);
+  if (/задач|тикет|redmine|бэклог|#\d/iu.test(b.question))
+    for (const name of ['issue_search','issue_read','issue_options','backlog']) readTools.add(name);
+  if (/страниц|confluence|документ/iu.test(b.question))
+    for (const name of ['page_search','page_read']) readTools.add(name);
+  if (/релиз|выкладк/iu.test(b.question)) readTools.add('release_decision');
+  const modelTools = compact ? turnTools.filter(t=>readTools.has(t.function.name)) : turnTools;
+  const promptStart = state.compactRetry ? state.messages.findIndex(m=>m.role==='user' && m.content?.startsWith('{"question":')) : -1;
+  const stop = (message, warning, outcome = 'done', retryExhausted = false) => {
     const identifiers = [
       ...(state.rangeIds || []).map((id) => [id, 'выделенный участок']),
       [state.calc, 'сохранённый расчёт'],
@@ -363,6 +385,7 @@ export async function runAssistant(
       }
     const result = artifactResult(state, message, warning);
     result.outcome = outcome;
+    if (retryExhausted) result.retryExhausted = true;
     state.final = result;
     save(state);
     return result;
@@ -374,7 +397,9 @@ export async function runAssistant(
       let response;
       try {
         if (start >= deadline) return stop('Время разбора истекло. Уже выполненные шаги сохранены.',undefined,'partial');
-        response = await providerCall(env, state.messages, tools, 'auto', send,{timeout:deadline-start});
+        const messages = promptStart > 3 ? [state.messages[0],...state.messages.slice(promptStart-2)] : state.messages;
+        response = await providerCall(env, messages, modelTools, 'auto', send,
+          {timeout:deadline-start,...(state.compactRetry ? { maxTokens:160 } : {})});
         if (state.issues) delete state.issues.provider;
       } catch (e) {
         state.round++;
@@ -388,17 +413,21 @@ export async function runAssistant(
         }
         const range = state.anchorId ? readRange(db, user, state.anchorId) : null;
         const measured = range && 'Локальный расчёт по выделению:\n' + rangeComparisonText(range);
+        const repeatedTimeout = e.timedOut && state.compactRetry && state.lastTimeout===state.completed.length;
+        if (e.timedOut) state.lastTimeout = state.completed.length;
         return stop(
           [
             'Не удалось завершить поручение с помощью модели. ' + e.message,
             measured,
             state.completed.length ? 'Результаты выполненных шагов сохранены.' : null,
-            'Можно продолжить после восстановления связи.',
+            repeatedTimeout ? 'Сокращённый запрос тоже превысил лимит времени. Укажите один показатель или одно действие в новом сообщении.' :
+              e.timedOut ? 'Можно повторить с сокращённым контекстом.' : 'Можно продолжить после восстановления связи.',
           ]
             .filter(Boolean)
             .join('\n'),
           e.message,
           measured || state.completed.length || research?.children.length ? 'partial' : 'failed',
+          repeatedTimeout,
         );
       }
       db.prepare('INSERT INTO costs(job,model,elapsed,input,output) VALUES(?,?,?,?,?)').run(
@@ -429,7 +458,7 @@ export async function runAssistant(
           return stop('Уточните, что оценить в разборе: вывод, данные или следующий шаг?');
         }
         const draftRequested =
-          authorizedWrite('draft', b.question) && /задач|черновик|тикет/i.test(b.question);
+          authorizedWrite('draft', b.question) && /задач|заявк|черновик|тикет/i.test(b.question);
         // A plan in the draft describes future work. Keep any separate causal question in scope.
         const evidenceQuestion = draftRequested
           ? b.question.replace(/план(?:ом|а|е|у)?\s+(?:проверки|поиска|выяснения)\s+причин[а-яё]*/giu, '')
@@ -488,6 +517,8 @@ export async function runAssistant(
             'partial',
           );
         }
+        const draft = singleIssue && state.actions.find(action=>action.op==='draft' && action.state==='draft');
+        if (draft) return stop('Сохранён черновик «' + draft.title + '». Проверьте описание и подтвердите создание задачи.');
         return stop(result);
       }
       state.messages.push({
@@ -504,8 +535,20 @@ export async function runAssistant(
         op = opNames[call.function.name];
       let value, signature;
       try {
-        if (!op) throw Error('Неизвестная операция');
-        const args = JSON.parse(call.function.arguments || '{}');
+        if (!op || singleIssue && !turnTools.some(t=>t.function.name===call.function.name))
+          throw Error('Операция недоступна для этого поручения');
+        let args = JSON.parse(call.function.arguments || '{}');
+        if (op==='draft' && singleIssue) {
+          args = {caseId:state.caseId,title:args.title,description:args.description};
+          const prior = history.findLast(m=>m.role==='assistant' && m.body.caseId===state.caseId && m.body.readSources?.length);
+          const sources = (state.readSources?.length ? state.readSources : prior?.body.readSources || [])
+            .filter(s=>s.url.startsWith('#knowledge-source/') && s.label).slice(0,5);
+          if (sources.length) {
+            const citations = sources.map(s=>s.detail ? s.label+' · '+s.detail : s.label).join('\n');
+            args.description = (args.description || '').slice(0,Math.max(0,3950-citations.length)) +
+              '\n\nОснования из разбора:\n' + citations;
+          }
+        }
         const scope = b.analysisPeriod || b.screen?.requested;
         if (scope && ['view', 'chart'].includes(op)) {
           if (scope.from && (!args.from || args.from < scope.from)) args.from = scope.from;
@@ -513,6 +556,14 @@ export async function runAssistant(
           args.full ??= b.screen?.full;
         }
         if (scope?.through && op === 'search') args.asOf = scope.through;
+        if (scope && op === 'source_value' && (
+          (scope.from && args.date < scope.from) || (scope.through && args.date > scope.through)
+        )) throw Error('Запрошенная дата за пределами выбранного периода.');
+        if (op === 'release_decision') {
+          args.releaseId ||= b.decisionReleaseId;
+          args.product ||= b.product;
+          if (scope?.through && (!args.through || args.through > scope.through)) args.through = scope.through;
+        }
         if (op === 'funnel') {
           args.thread = b.thread;
           args.rangeId ||= state.anchorId;

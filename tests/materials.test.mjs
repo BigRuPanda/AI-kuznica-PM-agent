@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { evaluationCase } from '../scripts/eval-agent.mjs';
 import { openStore } from '../server/store.mjs';
-import { initEvidence, importDocs } from '../server/evidence.mjs';
+import { initEvidence, importDocs, setSetting } from '../server/evidence.mjs';
 import { initWorkbench, createThread, enqueue, workJobs, messages, resumeJob } from '../server/workbench.mjs';
 import { workspaceOperation } from '../server/workspace-operations.mjs';
 import { materialForResult, readMaterial, telegramParts } from '../server/materials.mjs';
@@ -62,6 +62,267 @@ function open() {
   initWorkbench(s.db);
   return s;
 }
+test('short reference questions in a case use a bounded plain reply and can repair a legacy timeout in place', async () => {
+  const s=open();
+  try {
+    const {thread,caseId,view}=sample(s);
+    const accounts={publicUser:()=>user};
+    const id=enqueue(s,user,{thread,caseId,question:'Кто такой Туринг?',screen:{calc:view.id}});
+    const timeout={mode:'analysis',text:'Модель не успела ответить за 60 секунд.',warning:'Модель не успела ответить за 60 секунд.',outcome:'failed'};
+    const row=s.db.prepare('SELECT body FROM jobs WHERE id=?').get(id);
+    s.db.prepare("UPDATE jobs SET status='failed',result=? WHERE id=?").run(JSON.stringify(timeout),id);
+    s.db.prepare('INSERT INTO agent_turns VALUES(?,?)').run(id,JSON.stringify({round:1,completed:[],final:timeout}));
+    s.db.prepare("INSERT INTO chat_items(thread,author,role,body,created) VALUES(?,'Агент','assistant',?,?)")
+      .run(thread,JSON.stringify({...timeout,jobId:id,inReplyTo:JSON.parse(row.body).questionSeq}),Date.now());
+    resumeJob(s.db,user,id);
+    assert.equal(messages(s.db,user,thread).items.at(-1).body.resuming,true);
+    await workJobs(s,accounts,api,async(_url,init)=>{
+      const req=JSON.parse(init.body);
+      assert.equal(req.tools,undefined);
+      assert.ok(req.max_tokens<=100);
+      assert.equal(req.messages.length,2);
+      assert.ok(!JSON.stringify(req.messages).includes(view.id));
+      return say('Алан Тьюринг — математик.');
+    });
+    const history=messages(s.db,user,thread).items;
+    assert.equal(history.length,2);
+    assert.equal(history[1].body.text,'Алан Тьюринг — математик.');
+    assert.equal(history[1].body.outcome,'done');
+    assert.ok(!history[1].body.canResume);
+    enqueue(s,user,{thread,caseId,question:'Ты кто?',screen:{calc:view.id}});
+    await workJobs(s,accounts,api,()=>assert.fail('identity should not need inference'));
+    assert.match(messages(s.db,user,thread).items.at(-1).body.text,/Signal/);
+  } finally {s.close();}
+});
+
+test('a repeated tool timeout reduces the prompt and ends a retry loop with no new progress', async () => {
+  const s=open();
+  try {
+    const {thread,caseId,view}=sample(s);
+    const id=enqueue(s,user,{thread,caseId,question:'Как обстоят дела в карточке?',screen:{calc:view.id}});
+    const requests=[];
+    const abort=async(_url,init)=>{requests.push(JSON.parse(init.body));throw new DOMException('timeout','TimeoutError');};
+    const accounts={publicUser:()=>user};
+    await workJobs(s,accounts,api,abort);
+    assert.equal(messages(s.db,user,thread).items.at(-1).body.canResume,true);
+    resumeJob(s.db,user,id);
+    await workJobs(s,accounts,api,abort);
+    assert.equal(requests.length,2);
+    assert.ok(requests[1].tools.length<requests[0].tools.length);
+    const items=messages(s.db,user,thread).items;
+    assert.equal(items.length,2);
+    assert.equal(items[1].body.canResume,false);
+    assert.match(items[1].body.text,/Сокращённый запрос/);
+    assert.throws(()=>resumeJob(s.db,user,id),/уточните/);
+  } finally {s.close();}
+});
+
+test('case advice uses the selected figures, a requested report is saved, and an ambiguous brand is clarified', async () => {
+  const s=open();
+  try {
+    const {thread,caseId,view}=sample(s), accounts={publicUser:()=>user};
+    s.db.prepare("UPDATE cases SET body=json_set(body,'$.signal',json('{}')) WHERE id=?").run(caseId);
+    const ask=async(question,screen)=>{
+      enqueue(s,user,{thread,caseId,question,screen});
+      await workJobs(s,accounts,api,()=>assert.fail('these case facts are already available'));
+      return messages(s.db,user,thread).items.at(-1).body;
+    };
+    const report=await ask('Собери разбор',{calc:view.id});
+    assert.equal(report.outcome,'done');
+    const material=report.materials.find(item=>item.kind==='report');
+    assert.ok(material);
+    assert.equal(readMaterial(s.db,user,material.id).contextCalc,view.id);
+    const advice=await ask('Что нужно проверить в текущем разборе?',{calc:view.id});
+    assert.equal(advice.outcome,'done');
+    assert.equal(advice.calc,view.id);
+    const measured=view.summary.find(s=>s.product===view.product);
+    if(Number.isFinite(measured?.before) && Number.isFinite(measured?.after)) assert.ok(advice.text.includes(view.pivot));
+    else assert.match(advice.text,/нет двух сопоставимых значений/);
+    s.db.prepare('UPDATE cases SET product=? WHERE id=?').run('Орион Desktop',caseId);
+    const clarification=await ask('Кто такой Орион?');
+    assert.equal(clarification.outcome,'clarification');
+    assert.match(clarification.text,/Орион Desktop/);
+    assert.equal(clarification.canResume,undefined);
+    assert.match((await ask('Про человека')).text,/Поиск в интернете/);
+  } finally {s.close();}
+});
+test('a general definition with an offline instruction is answered without archive citations or paid tools', async () => {
+  const s=open();
+  try {
+    const {thread}=sample(s);
+    enqueue(s,user,{thread,webSearch:true,question:'Что такое урбанистика? Ответь без интернета.'});
+    const send=async(url,opts)=>{
+      assert.equal(new URL(url).hostname,'localhost');
+      assert.equal(JSON.parse(opts.body).tools,undefined);
+      assert.equal(JSON.parse(opts.body).temperature,0);
+      return say('Урбанистика изучает развитие городов.');
+    };
+    await workJobs(s,{publicUser:()=>user},api,send);
+    const reply=messages(s.db,user,thread).items.at(-1).body;
+    assert.equal(reply.mode,'conversation');
+    assert.equal(reply.text,'Урбанистика изучает развитие городов.');
+    assert.equal(reply.readSources?.length || 0,0);
+  } finally {s.close();}
+});
+test('a simple order-index chart uses the saved case series without waiting for tool inference', async () => {
+  const s=open();
+  try {
+    const {thread,caseId,view}=sample(s);
+    enqueue(s,user,{thread,caseId,screen:{calc:view.id},question:'Нарисуй график индекса заказов по текущему разбору.'});
+    let calls=0;
+    await workJobs(s,{publicUser:()=>user},api,async()=>{calls++;throw Error('busy');});
+    const result=messages(s.db,user,thread).items.at(-1).body;
+    assert.equal(calls,0);
+    assert.equal(result.outcome,'done');
+    assert.ok(result.materials.some(m=>m.kind==='chart'));
+  } finally {s.close();}
+});
+test('exact weekly questions reference the recorded value or report the available dates without a model', async () => {
+  const s = open();
+  try {
+    importDocs(s, [{ file: 'orders.xlsx', facts: [{
+      kind: 'sales', loc: 'Продажи!A8',
+      row: { product_family: 'Продукт', week_start: '2026-02-02', orders_index: 0 },
+    }] }], { notify: false });
+    const thread = createThread(s.db, user, 'Продажи');
+    const ask = async (date, suffix) => {
+      enqueue(s, user, { thread, question: 'Какой индекс заказов Продукт за неделю с ' + date + '? ' + suffix });
+      await workJobs(s, { publicUser: () => user }, {});
+      return messages(s.db, user, thread).items.at(-1).body;
+    };
+    const value = await ask('2026-02-02', 'Дай ссылку на строку.');
+    assert.match(value.text, /— 0/);
+    assert.match(value.readSources[0].label, /orders.xlsx · Продажи!A8/);
+    const missing = await ask('2026-02-09', 'Проверь, есть ли в книге строка за эту дату.');
+    assert.match(missing.text, /нет строки за неделю с 2026-02-09/);
+    assert.match(missing.text, /последняя — 2026-02-02/);
+    assert.deepEqual(missing.readSources, []);
+  } finally {
+    s.close();
+  }
+});
+test('an explicit release observation uses the exact archived series and cutoff without a model', async () => {
+  const s = open();
+  try {
+    const row = (kind, loc, data) => ({ kind, loc, row: data });
+    const metric = 'cfg_orion_views';
+    const samples = (from, count, segment, value) => Array.from({ length: count }, (_, i) => row(
+      'metrics', (segment === 'desktop' ? 'Desktop' : 'Mobile') + '!A' + (from + i), {
+        product: 'Orion', metric_id: metric, segment, unit: 'visits',
+        date: '2026-05-' + String(from + i).padStart(2, '0'), value,
+      },
+    ));
+    importDocs(s, [{ file: 'Archive.xlsx', facts: [
+      row('dictionary', 'Dictionary!A2', { metric_id: metric, metric_name: 'Доля открывших конфигуратор' }),
+      row('dictionary', 'Dictionary!A3', { metric_id: 'cfg_orion_open', metric_name: 'Открытия конфигуратора' }),
+      row('backlog', 'Tasks!A2', { task_id: 'T-41', title: 'Orion', release_id: 'R-63',
+        linked_metric_ids: metric + ',cfg_orion_open', created_date: '2026-04-22' }),
+      row('backlog', 'Tasks!A3', { task_id: 'T-42', title: 'Orion', release_id: 'R-63',
+        linked_metric_ids: metric, created_date: '2026-05-20' }),
+      row('releases', 'Releases!A2', { release_id: 'R-63', description: 'Orion',
+        release_date: '2026-05-12', status: 'выпущен', release_type: 'minor',
+        related_task_ids: 'T-41,T-42', affected_metrics: metric }),
+      ...samples(5, 7, 'desktop', 4), ...samples(13, 7, 'desktop', 10),
+      ...samples(5, 7, 'mobile', 40), ...samples(13, 7, 'mobile', 5),
+    ] }], { notify: false });
+    s.db.prepare("INSERT INTO cases VALUES('orion','Orion','Orion','Исследуем','{}')").run();
+    setSetting(s.db, 'metrika_probe', { at: Date.UTC(2026, 10, 27, 12), status: 'ready' });
+    const thread = createThread(s.db, user, 'Эффект Orion');
+    const env = { ...api, SOURCE_ARCHIVE_SHA256: 'archive' };
+    let calls = 0;
+    const ask = async (question, caseId) => {
+      enqueue(s, user, { thread, question, caseId });
+      await workJobs(s, { publicUser: () => user }, env, async () => {
+        calls++;
+        return say('Ответ для другого поручения.');
+      });
+      return messages(s.db, user, thread).items.at(-1).body;
+    };
+    const limited = await ask('Разбери R-63 для Orion по данным на 14.05.2026. Какая задача связана и как изменился cfg_orion_views на desktop по двум окнам по 1 неделе? Проверь живые данные Метрики магазина. Не создавай задачу.');
+    assert.deepEqual(limited.steps, ['watch-options', 'effect-preview']);
+    assert.equal(limited.caseId, 'orion');
+    assert.match(limited.text, /R-63 вышел 2026-05-12/);
+    assert.match(limited.text, /T-41/);
+    assert.doesNotMatch(limited.text, /T-42|Наблюдаемое изменение/);
+    assert.match(limited.text, /2026-05-05 – 2026-05-11 · 7\/7 дней.*28 \/ 7 ≈ 4 визитов\/день/);
+    assert.match(limited.text, /2026-05-13 – 2026-05-19 · 2\/7 дней.*2026-05-15 – 2026-05-19/);
+    assert.match(limited.text, /рабочего счётчика.{0,50}недоступны/);
+    assert.match(limited.text, /Reports API ответил на проверку тестового счётчика 2026-11-27/);
+    const citations = limited.readSources.map(x => x.label);
+    for (const loc of ['Releases!A2', 'Tasks!A2', 'Dictionary!A2', 'Desktop!A13', 'Desktop!A14'])
+      assert.ok(citations.includes('Archive.xlsx · ' + loc));
+    assert.ok(citations.every(s => !/Mobile!|Desktop!A(?:15|16|17|18|19)/u.test(s)));
+    const plainLanguage = await ask('На 14 мая 2026 года проверь эффект R-63 для Orion. Можно ли сравнить долю визитов с открытием конфигуратора на десктопе по двум однонедельным окнам? Можно ли тем же объяснить падение самостоятельных заказов?');
+    assert.match(plainLanguage.text, /Срез на 2026-05-14 · Доля открывших конфигуратор \(cfg_orion_views\) · desktop/);
+    assert.match(plainLanguage.text, /2\/7 дней/);
+    assert.match(plainLanguage.text, /нельзя установить причину изменения индекса самостоятельных заказов/);
+
+    const missing = await ask('На 2026-05-19 проверь эффект r–63 на T‑41 по cfg_orion_views, одну неделю до и после.', 'orion');
+    assert.match(missing.text, /Какой разрез выбрать\?.*desktop, mobile/);
+    const clarified = await ask('Для mobile.', 'orion');
+    assert.match(clarified.text, /Наблюдаемое изменение · -35 визитов в день/);
+    assert.match(clarified.text, /cfg_orion_views\) · mobile/);
+    assert.ok(clarified.readSources.every(s => !/Desktop!/u.test(s.label)));
+    const absent = await ask('Каким был эффект R-63 на 2026-05-14 по cfg_unknown и desktop за 1 неделю до и после?', 'orion');
+    assert.match(absent.text, /нет доступного ряда cfg_unknown/);
+    assert.doesNotMatch(absent.text, /7\/7 дней|Индекс самостоятельных заказов/);
+    const byName = await ask('Доля открывших конфигуратор.', 'orion');
+    assert.match(byName.text, /Срез на 2026-05-14 · Доля открывших конфигуратор/);
+    const missingDate = await ask('Оцени эффект R-63 по cfg_orion_views desktop за 1 неделю до и после', 'orion');
+    assert.match(missingDate.text, /На какую дату среза/);
+    const missingBaseline = await ask('Срез на 14.05.2026. Оцени эффект R-63 по cfg_orion_views desktop за 1 неделю после релиза.', 'orion');
+    assert.match(missingBaseline.text, /Сколько недель взять до релиза и сколько после/);
+    assert.equal(calls, 0);
+    assert.deepEqual(JSON.parse(s.db.prepare("SELECT body FROM cases WHERE id='orion'").get().body), {});
+    assert.equal(s.db.prepare('SELECT count(*) AS n FROM draft_actions').get().n, 0);
+    const mixed = await ask('Сравни R-63 по cfg_orion_views desktop на 2026-05-14, 1 неделя до и после. Построй график.', 'orion');
+    assert.ok(calls > 0);
+    assert.notEqual(mixed.mode, 'release-observation');
+  } finally {
+    s.close();
+  }
+});
+test('the workspace reports a local model deadline and keeps the turn resumable after a single request', async () => {
+  const s = open();
+  try {
+    const thread = createThread(s.db, user, 'Таймаут модели');
+    let calls = 0;
+    enqueue(s, user, { thread, question: 'Что такое статистическая значимость?' });
+    await workJobs(s, { publicUser: () => user }, api, async () => {
+      calls++;
+      throw new DOMException('deadline', 'TimeoutError');
+    });
+    const result = messages(s.db, user, thread).items.at(-1).body;
+    assert.equal(calls, 1);
+    assert.match(result.text, /Модель не успела ответить за 32 секунды?/);
+    assert.doesNotMatch(result.text, /Модель недоступна|параметры \.env/);
+    assert.equal(result.canResume, true);
+  } finally {
+    s.close();
+  }
+});
+test('a request for a new issue returns its saved draft and waits for confirmation', async () => {
+  const s = open();
+  try {
+    const { caseId, thread } = sample(s);
+    enqueue(s, user, { caseId, thread, question: 'Подготовь заявку в Redmine по этому разбору' });
+    await workJobs(s, { publicUser: () => user }, api, async (_url, options) => {
+      const request = JSON.parse(options.body);
+      assert.ok(!request.tools.some(t => t.function.name === 'page_draft'));
+      if (request.messages.at(-1).role === 'tool') return say('Заявка уже доступна в Redmine.');
+      const args = { title: 'Проверить расчёт', description: 'Сверить значение с исходной книгой' };
+      const call = { id: 'new-issue', type: 'function', function: { name: 'draft', arguments: JSON.stringify(args) } };
+      return Response.json({ choices: [{ message: { tool_calls: [call] } }] });
+    });
+    const result = messages(s.db, user, thread).items.at(-1).body;
+    assert.deepEqual(result.steps, ['issue_search', 'draft']);
+    assert.equal(result.actions[0].state, 'draft');
+    assert.match(result.text, /черновик «Проверить расчёт»/);
+    assert.match(result.text, /подтвердите создание/);
+  } finally {
+    s.close();
+  }
+});
 test('chart corrections survive later turns and the open screen cannot replace the corrected series', async () => {
   const path = join(await mkdtemp(join(tmpdir(), 'chart-focus-')), 'data.sqlite');
   let s = openStore(path);

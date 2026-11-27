@@ -1,6 +1,7 @@
 import { externalAnswer } from './source-chat.mjs';
-import { sourceValues } from './knowledge.mjs';
-import { archiveEvidence, archiveInquiry, archiveAnswer, asksArchiveTask } from './archive-search.mjs';
+import { archiveEvidence, archiveInquiry, archiveAnswer, archiveIdStatus, asksArchiveTask } from './archive-search.mjs';
+import { briefConversation, caseBrief, caseBriefKind } from './chat-brief.mjs';
+import { weeklySourceAnswer } from './weekly-source-chat.mjs';
 import { initRanges, access, grant, compareRanges, readRange, readSnapshot } from './chart-ranges.mjs';
 import { randomUUID } from 'node:crypto';
 import {
@@ -408,8 +409,13 @@ export function messages(db, user, id) {
       .all(id)
       .map((x) => {
         const { authorId, ...body } = JSON.parse(x.body);
-        if (body.mode !== 'daily' && body.jobId && ['partial', 'failed'].includes(body.outcome))
-          body.canResume = !!db.prepare('SELECT 1 FROM jobs WHERE id=? AND user=?').get(body.jobId, user.id);
+        if (body.mode !== 'daily' && body.jobId && ['partial', 'failed'].includes(body.outcome)) {
+          const job = db.prepare('SELECT status FROM jobs WHERE id=? AND user=?').get(body.jobId,user.id);
+          if (job) {
+            body.resuming = ['queued','running'].includes(job.status) || undefined;
+            body.canResume = !body.retryExhausted && !body.resuming;
+          } else body.canResume = false;
+        }
         if (x.role === 'assistant' && !body.materials) {
           body.materials = materialsFromReply(db, user, id, body);
           db.prepare('UPDATE chat_items SET body=? WHERE seq=?').run(JSON.stringify(body), x.seq);
@@ -487,7 +493,7 @@ function recentDialogue(db, threadId, questionSeq) {
 
 function modelHistory(history, includeFacts) {
   return history.map(({ role, body }) => {
-    if (!includeFacts && role === 'assistant' && (body.calc || body.rangeId || body.materials?.length)) {
+    if (!includeFacts && role === 'assistant' && (body.calc || body.rangeId || body.materials?.length || body.readSources?.length)) {
       // Selection mode keeps the underlying report, quotes and figures on this server.
       return { role, content: JSON.stringify({ product: body.product, cards: body.cards, full: body.full }) };
     }
@@ -609,32 +615,13 @@ function factsForCards(view, cards, backlog) {
     lines.push(...view.corrections.map((x) => 'Поправка PM к ' + x.source + ': ' + x.comment));
   return lines;
 }
-function weeklySourceAnswer(db, question) {
-  const [request, ...followups] = question.toLowerCase().trim().split(/[?!.]+/u).map(s => s.trim()).filter(Boolean);
-  const lookup = request?.match(/^(?:какой|каков|чему равен|покажи|назови|скажи)\s+(?:был\s+)?индекс\s+(?:самостоятельных\s+)?заказов\s+(.+?)\s+за неделю с\s+(\d{4}-\d{2}-\d{2})$/u);
-  const citation = /^(?:укажи|покажи|назови|дай) (?:значение и )?(?:ссылку на )?(?:источник|строку|ячейку)(?: данных| в источнике| исходной книги| в книге)?$/u;
-  const checkRow = /^проверь,? есть ли (?:в (?:источнике|книге) )?строка(?: (?:за эту|на эту) дату)?$/u;
-  if (!lookup || followups.some(s => !citation.test(s) && !checkRow.test(s))) return;
-  const [, requestedProduct, date] = lookup;
-  const weeks = listSales(db).filter(r => r.product.toLowerCase() === requestedProduct);
-  if (!weeks.length) return;
-  const product = weeks[0].product;
-  const rows = sourceValues(db, { product, metric: 'orders_index', date });
-  const readSources = rows.map(r => ({
-    label: r.file + ' · ' + r.loc, url: '#knowledge-source/' + r.version + '/' + encodeURIComponent(r.loc),
-    detail: r.metric + ' = ' + r.value + ' · ' + date,
-  }));
-  const text = rows.length
-    ? rows.map(r => 'Индекс самостоятельных заказов ' + product + ' за неделю с ' + date + ' — ' + fmt(r.value) + '. ' + r.file + ' · ' + r.loc + (r.comment ? '. ' + r.comment : '')).join('\n')
-    : 'В загруженных продажах ' + product + ' нет строки за неделю с ' + date + '. Первая неделя в данных — ' + weeks[0].week + ', последняя — ' + weeks.at(-1).week + '.';
-  return { text, product, readSources, steps: ['source_value'], mode: 'source-value', outcome: 'done' };
-}
 export async function answer(store, user, b, env = process.env, send = fetch, job = randomUUID(), pageOptions) {
   const db = store.db;
   const { scope } = thread(db, user, b.thread);
   const shared = scope === 'group';
   const activeCase = b.caseId ? visibleCase(db,user,b.caseId) : null;
   if(shared && activeCase?.body.owner) throw Error('Личный разбор недоступен в группе');
+  if (b.screen?.calc) access(db,user,b.screen.calc,shared);
   const range=b.rangeId && (access(db,user,b.rangeId,shared),readRange(db,user,b.rangeId));
   const attachments=(b.materialIds || []).map(id=>readMaterial(db,user,id,shared));
   const comparisonContext=[
@@ -662,10 +649,43 @@ export async function answer(store, user, b, env = process.env, send = fetch, jo
     };
   if (focus?.id) b = { ...b, materialIds: [focus.id], screen: undefined };
   const history = recentDialogue(db, b.thread, b.questionSeq);
-  if (b.caseId) visibleCase(db, user, b.caseId);
-  if (!b.rangeId && !b.materialIds?.length && !focus) {
-    const weekly=weeklySourceAnswer(db,b.question);
-    if(weekly) return {...weekly,caseId:b.caseId};
+  const last = history.at(-1)?.body;
+  const previous = last && (!b.caseId || last.caseId === b.caseId) &&
+    (!b.decisionReleaseId || last.decisionReleaseId === b.decisionReleaseId) ? last : undefined;
+  const archiveScope = { product:activeCase?.product || b.product, ...b.analysisPeriod,
+    through:b.analysisPeriod?.through || b.screen?.asOf };
+  const sourceQuestion = !focus && !b.rangeId && !b.materialIds?.length && !last?.rangeId;
+  if (sourceQuestion) {
+    const ids = archiveInquiry(b.question) && archiveIdStatus(db,b.question,archiveScope);
+    if (ids?.missing?.length) {
+      const absent = 'В доступном архиве не найдены ' + ids.missing.join(', ') + '.';
+      if (ids.found.length) {
+        const evidence = archiveEvidence(db,b.question,archiveScope).filter(r=>['releases','backlog','task-link','measurement'].includes(r.kind));
+        const known = await archiveAnswer(store,b.question,evidence,{},send,job);
+        if (known) return {...known,text:known.text+'\n\n'+absent,archiveQuestion:b.question,
+          caseId:b.caseId,decisionReleaseId:b.decisionReleaseId};
+      }
+      return {mode:'archive',outcome:'clarification',steps:['search'],readSources:[],
+        text:absent+' Проверьте идентификатор в календаре релизов или бэклоге.'};
+    }
+    const { releaseObservationAnswer } = await import('./release-observation-chat.mjs');
+    const release = releaseObservationAnswer(store,user,b,env,shared,previous ? [history.at(-1)] : []);
+    if (release) return {...release,decisionReleaseId:b.decisionReleaseId};
+    const weekly = weeklySourceAnswer(db,b.question,previous,archiveScope);
+    if (weekly) return {...weekly,caseId:b.caseId,decisionReleaseId:b.decisionReleaseId};
+    if (!b.decisionReleaseId && !b.analysisPeriod && env.LLM_DATA_MODE==='analysis') {
+      const brief = await briefConversation(store,job,b.question,activeCase,env,send,history);
+      if (brief) return {...brief,caseId:b.caseId};
+      const kind = activeCase?.body.signal && caseBriefKind(b.question,activeCase.product);
+      if (kind) {
+        const research = store.tx(()=>prepareResearch(store,user,b,[],job,{analytical:true,report:kind==='report'}));
+        if (research?.contextCalc) {
+          access(db,user,research.contextCalc,shared);
+          const view = readSnapshot(db,user,research.contextCalc);
+          if (view.summary) return caseBrief(activeCase,{...view,id:research.contextCalc});
+        }
+      }
+    }
   }
   if (b.analysisPeriod && !b.rangeId && !b.materialIds?.length) {
     const screen = b.screen?.calc && readSnapshot(db, user, b.screen.calc);
@@ -680,16 +700,20 @@ export async function answer(store, user, b, env = process.env, send = fetch, jo
   const intent = researchIntent(b.question);
   const taskQuery = asksArchiveTask(b.question);
   const contextualTask = taskQuery && /(?:эт[а-яё]*|текущ[а-яё]*|выбранн[а-яё]*)\s+(?:релиз|выкладк)|(?:за ним|за ней|у него|к нему)|^(?:а\s+)?(?:какая задача|(?:назови|укажи) номер задачи)[?!.\s]*$/iu.test(b.question);
-  if (!focus && !b.rangeId && !b.materialIds?.length && !b.screen?.calc &&
-      ((!b.decisionReleaseId && !b.caseId) || (taskQuery && !(shared && activeCase?.body.owner))) &&
-      !intent.chart && !intent.funnel && !intent.report && !b.analysisPeriod && archiveInquiry(b.question) && !history.at(-1)?.body.rangeId) {
-    const previous = history.at(-1)?.body;
-    const query = previous?.archiveQuestion && (contextualTask || /^(?:а |тогда |уточни|а если|и что)/iu.test(b.question))
+  const explicitArchive = /интервью|респондент|справочник|в архиве|по архиву|в загруженн[а-яё]* (?:книг|таблиц|источник)/iu.test(b.question);
+  const caseSourceRequest = explicitArchive || taskQuery && (contextualTask || /релиз|тикет|[a-z]-\d/iu.test(b.question));
+  if (sourceQuestion && (!b.screen?.calc && !b.analysisPeriod || caseSourceRequest) &&
+      ((!b.decisionReleaseId && !b.caseId) || taskQuery || explicitArchive) &&
+      !intent.chart && !intent.funnel && !intent.report && archiveInquiry(b.question)) {
+    const archiveFollowUp = contextualTask || !explicitArchive && !/[a-z][a-z\d]*-\d+/iu.test(b.question) &&
+      /^(?:(?:а|и|тогда) )?(?:почему(?: так)?[?!. ]*$|что это значит|уточни|а если|как насч[её]т|у (?:него|неё|них)|в (?:ней|нём|нем)|по (?:нему|ней|ним)|за (?:эт[уои]|ту же)|какая из них)/iu.test(b.question);
+    const query = previous?.archiveQuestion && archiveFollowUp
       ? previous.archiveQuestion + '\n' + b.question : b.question;
     const releaseId = b.decisionReleaseId || (contextualTask ? activeCase?.body.release : undefined);
-    const evidence = archiveEvidence(db, query, {releaseId,product:activeCase?.product});
-    if (evidence.length && (!activeCase && !b.decisionReleaseId || evidence.some(row=>row.kind==='task-link'))) {
+    const evidence = archiveEvidence(db, query, {...archiveScope,releaseId});
+    if (evidence.length && (!activeCase && !b.decisionReleaseId || explicitArchive || evidence.some(row=>row.kind==='task-link'))) {
       return { ...await archiveAnswer(store, query, evidence, env, send, job), archiveQuestion: b.question,
+        decisionReleaseId:b.decisionReleaseId,
         ...(activeCase ? {caseId:activeCase.id,product:activeCase.product} : {}) };
     }
     if (taskQuery && !activeCase && !b.decisionReleaseId &&
@@ -737,6 +761,10 @@ async function answerTurn(store, user, b, env, send, job, history, intent) {
       mode: 'calculation',
     };
   }
+  const orderChartOnly = /^(?:пожалуйста[, ]+)?(?:построй|покажи|нарисуй|создай|сделай)\s+(?:мне\s+)?(?:график|диаграмму)\s+(?:динамики\s+)?индекса\s+(?:самостоятельных\s+)?заказов(?:\s+(?:по|для|в)\s+(?:(?:этому|этого|этом|текущему|текущего|текущем)\s+)?разбор[а-я]*)?[.!?\s]*$/iu.test(b.question);
+  if (research?.requestedChart && orderChartOnly && !b.materialIds?.length && !b.rangeId)
+    return {mode:'calculation',outcome:'done',product:research.product,caseId:b.caseId,
+      text:research.findings.join('\n') || research.requestedChart.title,chartMaterial:research.requestedChart};
   if (analyticalModel) {
     const { runAssistant } = await import('./workspace-agent.mjs');
     return runAssistant(store, user, b, env, send, job, history, research, intent);
@@ -873,7 +901,7 @@ function briefConclusion(text, findings) {
 }
 
 function completeMaterials(store, user, job, b, result) {
-  if (['daily','source-value','archive','web','public-page','competitor-check'].includes(result.mode)) return result;
+  if (['daily','source-value','archive','release-observation','web','public-page','competitor-check'].includes(result.mode)) return result;
   if (result.chartChoices) return { ...result, materials: [] };
   const db = store.db;
   const r = JSON.parse(db.prepare('SELECT body FROM job_research WHERE job=?').get(job)?.body || 'null');
@@ -988,9 +1016,14 @@ export function resumeJob(db, user, id) {
   const j = db.prepare('SELECT * FROM jobs WHERE id=? AND user=?').get(id, user.id);
   if (!j) throw Error('Поручение недоступно');
   if (!['failed', 'partial'].includes(j.status)) return { id };
+  if (JSON.parse(j.result || '{}').retryExhausted) throw Error('Для следующей попытки уточните вопрос.');
   const row = db.prepare('SELECT body FROM agent_turns WHERE job=?').get(id);
   if (row) {
     const state = JSON.parse(row.body);
+    if (state.lastTimeout!==undefined || state.final?.warning?.includes('не успела ответить')) {
+      state.compactRetry=true;
+      state.lastTimeout ??= state.completed?.length || 0;
+    }
     delete state.final;
     delete state.providerRetried;
     delete state.reminder;

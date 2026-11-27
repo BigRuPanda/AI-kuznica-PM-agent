@@ -1,9 +1,10 @@
 import { marketOffers } from './market-offers.mjs';
 import { visibleCase } from './workbench.mjs';
 import { checkOffer } from './competitor-check.mjs';
+import { noWeb } from './web-search.mjs';
 
 export function competitorQuestion(question) {
-  if (/(?:без интернета|не проверяй|на дату|на момент|по состоянию на\s+(?!сегодня)|\d{4}-\d{2}-\d{2}|\d{1,2}[./]\d{1,2}[./]\d{2,4})/iu.test(question)) return false;
+  if (noWeb(question) || /(?:не проверяй|на дату|на момент|по состоянию на\s+(?!сегодня)|\d{4}-\d{2}-\d{2}|\d{1,2}[./]\d{1,2}[./]\d{2,4})/iu.test(question)) return false;
   return /(?:проверь|проверить|сверь|сверить|обнови|актуальн|сейчас|сегодня)/iu.test(question) &&
     /(?:цен[ауые]|предложени|карточк[ауи]|лицензи|артикул)/iu.test(question) &&
     /конкурент|продавц|allsoft|аллсофт|[a-z0-9-]+\.(?:ru|com)\b|артикул/iu.test(question);
@@ -13,13 +14,14 @@ export async function competitorAnswer(store, user, b, env, send, shared, job) {
   const question = b.question.toLowerCase();
   const today = new Date().toISOString().slice(0, 10);
   const decision = b.caseId ? visibleCase(store.db, user, b.caseId) : null;
+  if (shared && decision?.body.owner) throw Error('Личный разбор недоступен в группе');
   const domains = question.match(/[a-z0-9-]+(?:\.[a-z0-9-]+)*\.(?:ru|com)\b/g) || [];
   const all = marketOffers(store.db, null, today);
   const named = [...new Set(all.map(o => o.merchant))].filter(m => question.includes(m.split('.')[0].toLowerCase()) ||
     (m === 'allsoft.ru' && question.includes('аллсофт')));
   const sku = /\b(?=[a-z0-9-]*[a-z])(?=[a-z0-9-]*\d)[a-z0-9-]{7,32}\b/i.exec(question)?.[0];
   const product = /kaspersky|каспер/u.test(question) ? 'Kaspersky' : /astra|астр/u.test(question) ? 'Astra' : null;
-  const source = product || (!sku && decision?.product);
+  const source = product || (!sku && (b.product || decision?.product));
   const offers = (source ? marketOffers(store.db, source, today) : all).filter(o =>
     (!domains.length || domains.includes(o.merchant)) && (!named.length || named.includes(o.merchant)) &&
     (!sku || o.sku?.toLowerCase() === sku));

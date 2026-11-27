@@ -10,7 +10,7 @@ const stems = text => {
     .replace(/компьютер[а-я]*|десктоп[а-я]*/gu,'desktop').replace(/мобильн[а-я]*|телефон[а-я]*/gu,'mobile')
     .match(/[\p{L}\d_]+/gu) || [];
   return [...new Set(words.filter(w => !stop.has(w) && w.length > 1).map(w =>
-    /^[а-я]+$/u.test(w) ? w.replace(/(?:иями|ями|ами|ого|ему|ому|ями|ах|ях|ов|ев|ей|ой|ую|ых|ым|ом|ами|ия|ие|ии|ы|и|а|я|у|е|ю)$/u,'').slice(0,7) : w))];
+    /^[а-я]+$/u.test(w) ? w.replace(/(?:иями|ями|ами|ого|ему|ому|ией|ах|ях|ов|ев|ей|ой|ую|ых|ым|ом|ия|ие|ии|ию|ы|и|а|я|у|е|ю)$/u,'').slice(0,7) : w))];
 };
 const translit = w => [...w].map(c => ({а:'a',б:'b',в:'v',г:'g',д:'d',е:'e',ж:'zh',з:'z',и:'i',й:'y',к:'k',
   л:'l',м:'m',н:'n',о:'o',п:'p',р:'r',с:'s',т:'t',у:'u',ф:'f',х:'kh',ц:'ts',ч:'ch',ш:'sh',щ:'shch',ъ:'',ы:'y',ь:'',э:'e',ю:'yu',я:'ya'}[c] ?? c)).join('');
@@ -29,7 +29,7 @@ function archiveIndex(db) {
   const versions=db.prepare('SELECT DISTINCT version FROM facts ORDER BY version').all().map(r=>r.version);
   const stamp=versions.join('/')+':'+db.prepare('SELECT generation FROM case_investigation_sources WHERE id=1').get().generation;
   if (indexes.get(db)?.stamp===stamp) return indexes.get(db);
-  const records=[], metrics=[], sales=[], freq=new Map();
+  const records=[], metrics=[], sales=[];
   const byVersion=Map.groupBy(db.prepare('SELECT version,loc FROM facts').all(),r=>r.version);
   const doc=db.prepare('SELECT file,body FROM documents WHERE version=?');
   for(const version of versions) {
@@ -61,16 +61,22 @@ function archiveIndex(db) {
       records.push(group);
     }
   }
-  let totalTerms=0;
   for(const r of records) {
     r.words=new Set(stems(r.text));
-    totalTerms+=r.words.size;
     r.titleWords=new Set(stems(r.data?.metric_name || r.data?.title || r.prices?.Продукт || ''));
-    for(const w of r.words) freq.set(w,1+(freq.get(w)||0));
   }
-  const averageTerms=totalTerms/records.length || 1;
-  const result={stamp,records,metrics,sales,freq,averageTerms};
+  const result={stamp,records,metrics,sales};
   indexes.set(db,result);return result;
+}
+
+function termStatistics(records) {
+  let total=0;
+  const freq=new Map();
+  for (const r of records) {
+    total+=r.words.size;
+    for (const word of r.words) freq.set(word,1+(freq.get(word)||0));
+  }
+  return {records,freq,averageTerms:total/records.length || 1};
 }
 
 function ranked(rows, words, idx) {
@@ -89,7 +95,7 @@ function ranked(rows, words, idx) {
 
 const sourceText = r => {
   const d=r.data;
-  if(r.kind==='dictionary') return [d.metric_name,d.formula_or_logic,d.bad_signal,d.comment].filter(Boolean).join('. ');
+  if(r.kind==='dictionary') return [d.metric_name,d.what_it_means,d.formula_or_logic,d.bad_signal,d.comment].filter(Boolean).join('. ');
   if(r.kind==='releases') return [d.release_id,d.release_date,d.description].filter(Boolean).join(' · ');
   if(r.kind==='backlog') return [d.task_id,d.title,d.description_short].filter(Boolean).join(' · ');
   return r.text;
@@ -114,31 +120,72 @@ function excerpt(r, words) {
   return {text:retained.map(f=>f.field.slice(0,130)+' — '+passage(f.answer,words,size)).join('\n'),refs:retained.map(f=>f.ref)};
 }
 
-export function archiveEvidence(db, question, {releaseId,product}={}) {
-  const idx=archiveIndex(db), words=stems(question);
-  const q=question.toLowerCase(), dates=explicitDates(q,String(new Date().getFullYear()));
+function archiveScope(db, {product,from,through}) {
+  const idx=archiveIndex(db);
   const corrections=product?db.prepare('SELECT source,comment FROM feedback WHERE product=? ORDER BY id').all(product):[];
   const excluded=new Map(corrections.map(row=>[row.source,row.comment.startsWith('[Исключить связь]')]));
-  const visible=idx.records.filter(r=>!r.refs.some(s=>excluded.get(s.file+' · '+s.loc)) &&
-    !excluded.get(r.data?.sourceFile+' · '+r.data?.sourceLoc));
-  const candidates=ranked(visible,words,idx);
+  const visible=r=>!r.refs.some(s=>excluded.get(s.file+' · '+s.loc)) &&
+    !excluded.get(r.data?.sourceFile+' · '+r.data?.sourceLoc);
+  const inPeriod=date=>!date || (!from || from<=date) && (!through || date<=through);
+  const records=idx.records.filter(r=>visible(r) && inPeriod(r.data?.release_date || r.data?.created_date || r.data?.date));
+  const visibleTasks=new Set(records.filter(r=>r.kind==='backlog').map(r=>r.data.task_id));
+  return {
+    records,
+    hiddenTasks:new Set(idx.records.filter(r=>r.kind==='backlog' && !visibleTasks.has(r.data.task_id)).map(r=>r.data.task_id)),
+    metrics:idx.metrics.filter(r=>visible(r) && inPeriod(r.data.date) && (!product || r.data.product===product)),
+    sales:idx.sales.filter(r=>visible(r) && inPeriod(r.data.week_start)),
+  };
+}
+
+const archiveIds = question => question.match(/(?<![\p{L}\d_-])[a-z][a-z\d]*-\d+(?![\p{L}\d_-])/giu) || [];
+
+export function archiveIdStatus(db, question, scope = {}) {
+  const ids=archiveIds(question);
+  if (!ids.length || !/релиз|задач|тикет|б[еэ]клог/iu.test(question)) return;
+  const { records,hiddenTasks }=archiveScope(db,scope);
+  const entries=records.flatMap(r=>r.kind==='releases' ? [r.data.release_id,...taskIdsOf(r).filter(id=>!hiddenTasks.has(id))] :
+    r.kind==='backlog' ? [r.data.task_id,...list(r.data.release_id)] : []);
+  const known=new Set(entries.filter(Boolean).map(id=>id.toUpperCase()));
+  const prefixes=new Set([...known].map(id=>id.split('-')[0]));
+  const requested=[...new Set(ids.map(id=>id.toUpperCase()))].filter(id=>/^[RT]-/u.test(id) || prefixes.has(id.split('-')[0]));
+  return {found:requested.filter(id=>known.has(id)),missing:requested.filter(id=>!known.has(id))};
+}
+
+export function archiveEvidence(db, question, {releaseId,product,from,through,now = Date.now()}={}) {
+  const idx=archiveScope(db,{product,from,through}), words=stems(question);
+  const q=question.toLowerCase(), dates=explicitDates(q,String(new Date(now).getFullYear()));
+  const visible=idx.records;
+  const candidates=ranked(visible,words,termStatistics(visible));
   const topScore=candidates[0]?.score ?? Infinity;
   const evidence=[];
   const add=(text,refs,kind)=>{if(text && refs?.length && !evidence.some(x=>x.text===text)) evidence.push({text,refs,kind});};
   const addRow=r=>{if(r){const x=excerpt(r,words);add(x.text,x.refs,r.fields?'interview':r.kind);}};
   const metricRank=candidates.filter(h=>h.r.kind==='dictionary');
   const taskQuery=asksArchiveTask(q);
-  const mentionedIds=new Set(q.match(/(?<![\p{L}\d_-])[a-z][a-z\d]*-\d+(?![\p{L}\d_-])/giu) || []);
+  const mentionedIds=new Set(archiveIds(q));
   const exactId=id=>mentionedIds.has(String(id).toLowerCase());
   const backlog=visible.filter(r=>r.kind==='backlog');
   const calendar=visible.filter(r=>r.kind==='releases');
   const namedReleases=calendar.filter(r=>exactId(r.data.release_id) || (!mentionedIds.size && r.data.release_id===releaseId));
   const namedTasks=backlog.filter(r=>exactId(r.data.task_id));
+  if(!namedReleases.length && !namedTasks.length && taskQuery)
+    namedReleases.push(...calendar.filter(r=>taskIdsOf(r).some(id=>!idx.hiddenTasks.has(id) && exactId(id))));
   const taskLookup=taskQuery || namedTasks.length>0;
-  const priceQuery=/цен|дешев|дороже|стоимост|артикул/iu.test(q);
+  const priceQuery=/(?<![\p{L}])цен|дешев|дороже|стоимост|артикул/iu.test(q);
   const price=candidates.filter(h=>h.r.prices);
   const relevantPrice=priceQuery && price[0]?.score>=topScore*.70;
   const interview=candidates.find(h=>h.r.kind==='interview' && h.r.fields);
+  const asksRespondent=/интервью|респондент|со слов (?:покупателя|клиента)/iu.test(q);
+  if (!mentionedIds.size && !dates.length && asksRespondent &&
+      (!taskQuery || !/номер|тикет|б[еэ]клог/iu.test(q))) {
+    const corpus=termStatistics(visible.filter(r=>r.fields));
+    addRow(ranked(corpus.records,words,corpus)[0]?.r);
+    return evidence;
+  }
+  if (!mentionedIds.size && !dates.length && !taskQuery && /справочник/iu.test(q) && metricRank.length) {
+    for (const {r} of metricRank.filter(h=>h.score>=metricRank[0].score*.91).slice(0,3)) addRow(r);
+    return evidence;
+  }
   const relevantInterview=interview && interview.score>=topScore*.85 &&
     !(dates.length && /просмотр|визит|заказ|индекс|показател/iu.test(q));
   if(relevantPrice && !namedReleases.length && !taskLookup) {
@@ -179,7 +226,9 @@ export function archiveEvidence(db, question, {releaseId,product}={}) {
       if(taskLookup) {
         const tasks=backlog.filter(t=>linkedTask(t,release) && (!namedTasks.length || namedTasks.includes(t)));
         const labels=tasks.map(t=>[t.data.task_id,t.data.title].filter(Boolean).join(' — '));
-        if(!namedTasks.length) labels.push(...taskIdsOf(release).filter(id=>!tasks.some(t=>t.data.task_id===id)));
+        if(!namedTasks.length) labels.push(...taskIdsOf(release).filter(id=>
+          !idx.hiddenTasks.has(id) && (![...mentionedIds].some(id=>/^t-/u.test(id)) || exactId(id)) &&
+          !tasks.some(t=>t.data.task_id===id)));
         add(labels.length ? 'Задачи '+release.data.release_id+'\n'+labels.join('\n') : 'Связь с запрошенной задачей в '+release.data.release_id+' не подтверждена.',
           [...release.refs,...tasks.flatMap(t=>t.refs)],'task-link');
       }
@@ -230,7 +279,7 @@ export function archiveEvidence(db, question, {releaseId,product}={}) {
 }
 
 export function archiveInquiry(question) {
-  return !/(?:построй|нарисуй|график|диаграмм|создай|заведи|оформи|подготовь|составь|сохрани|запиши|закрепи|опубликуй|отправь|экспортируй|закрой|назначь|обнови|прокомментируй|отслеживай|redmine|confluence|уведомлен|разберись|проверь воронк|на дату среза|по состоянию на)/iu.test(question) &&
+  return !/(?:построй|нарисуй|график|диаграмм|создай|заведи|оформи|подготовь|составь|сохрани|запиши|закрепи|опубликуй|отправь|экспортируй|закрой|назначь|обнови|прокомментируй|отслеживай|redmine|confluence|уведомлен|разберись|проверь воронк)/iu.test(question) &&
     /\?|како|сколько|почему|покажи|найди|назови|укажи|сравни|где|когда|зачем|ответь|расскажи/iu.test(question);
 }
 export async function archiveAnswer(store, question, evidence, env, send, job) {
@@ -240,6 +289,7 @@ export async function archiveAnswer(store, question, evidence, env, send, job) {
   const fallback=()=>evidence.map(x=>x.text).join('\n\n');
   const result={mode:'archive',outcome:'done',steps:['search'],readSources};
   if(evidence.every(x=>x.kind==='interview')) return {...result,text:'Из записей интервью:\n\n'+fallback()};
+  if(evidence.every(x=>x.kind==='dictionary')) return {...result,text:fallback()};
   // Measured values, computed differences and their calendar context are already readable.
   if(evidence.some(x=>x.kind==='measurement' || x.kind==='task-link')) return {...result,text:fallback()};
   if(env.LLM_DATA_MODE !== 'analysis' || !apiConfigured(env)) return {...result,text:fallback()};
