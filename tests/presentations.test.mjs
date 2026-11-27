@@ -55,7 +55,7 @@ test('case deck freezes its evidence, checks access on every version and resumes
   db.prepare("UPDATE cases SET title='Другая версия' WHERE id='sample'").run();
   let calls=0;
   await workPresentations(store,local,async()=>{
-    calls++;return Response.json({choices:[{message:{content:'{"slides":[0]}'}}]});
+    calls++;return Response.json({choices:[{message:{content:'{"slides":{"finding":0,"checks":1}}'}}]});
   });
   const {deck,notice}=readPresentation(db,author,id);
   assert.equal(calls,1);assert.equal(notice,null);assert.equal(deck.title,'Оформление заказа');
@@ -456,13 +456,15 @@ test('the presentation editor cannot send a private snapshot through ProxyAPI',a
   assert.match(result.notice,/по шаблону/);
 });
 
-test('the loopback presentation editor requests a strict JSON schema',async t=>{
+test('the loopback presentation editor constrains each section to its own choices',async t=>{
   const store=await fixture(t),db=store.db;
+  const note='Покупатели увидели стоимость доставки на первом шаге.';
+  db.prepare("UPDATE cases SET body=json_set(body,'$.notes',json(?)) WHERE id='sample'").run(JSON.stringify([{text:note,created:Date.now()}]));
   const {id}=startPresentation(store,author,'sample','strict-editor-schema');
   const requests=[];
   await workPresentations(store,local,async (url,{body})=>{
     requests.push({url:String(url),body:JSON.parse(body)});
-    return Response.json({choices:[{message:{content:'{"slides":[0]}'}}]});
+    return Response.json({choices:[{message:{content:'{"slides":{"finding":1,"checks":2}}'}}]});
   });
   assert.equal(requests.length,1);
   assert.equal(requests[0].url,'http://127.0.0.1:8080/v1/chat/completions');
@@ -472,5 +474,15 @@ test('the loopback presentation editor requests a strict JSON schema',async t=>{
   assert.equal(format.json_schema.strict,true);
   assert.deepEqual(format.json_schema.schema.required,['slides']);
   assert.equal(format.json_schema.schema.additionalProperties,false);
-  assert.equal(readPresentation(db,author,id).status,'ready');
+  const sections=format.json_schema.schema.properties.slides;
+  assert.deepEqual(sections.required,['finding','checks']);
+  assert.deepEqual(sections.properties.finding.enum,[0,1]);
+  assert.deepEqual(sections.properties.checks.enum,[2]);
+  const result=readPresentation(db,author,id);
+  assert.equal(result.notice,null);
+  assert.equal(result.deck.slides.find(slide=>slide.slot==='finding').title,note);
+
+  const invalid=startPresentation(store,author,'sample','wrong-editor-section');
+  await workPresentations(store,local,async()=>Response.json({choices:[{message:{content:'{"slides":{"finding":2,"checks":0}}'}}]}));
+  assert.match(readPresentation(db,author,invalid.id).notice,/проверяемый план/u);
 });
