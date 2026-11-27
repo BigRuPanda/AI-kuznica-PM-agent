@@ -7,7 +7,7 @@ import {databasePath,root} from './config.mjs';
 import {DAY,instant,parseEvents,kinds} from './import.mjs';
 export const hash=value=>createHash('sha256').update(value).digest('hex');
 export function name(value,max=180){if(typeof value!=='string'||!value.trim()||value.trim().length>max)throw Error('Проверьте длину текстового поля (1–'+max+').');return value.trim();}
-export function openStore(path=databasePath(), {seedDemo=true}={}){
+export function openStore(path=databasePath(), {seedDemo=!process.env.SOURCE_ARCHIVE_SHA256}={}){
   if(path!==':memory:')mkdirSync(dirname(path),{recursive:true});
   const db=new DatabaseSync(path);
   db.exec(`PRAGMA busy_timeout=10000; PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL;
