@@ -190,7 +190,6 @@ function Releases({id,journal,user,generation,onForm}:{id:string;journal:Journal
                 <small className="message-context">{segmentNames[m.context.segment]} · срез на {rel?dayDate(rel.launch,m.context.day):''}</small>
               </article>)}
               {narrow&&error&&<p role="alert">{error}</p>}
-              {busy&&<p className="chat-typing" role="status"><span aria-hidden="true"><i/><i/><i/></span> Агент проверяет данные…</p>}
             </div>
           </div>
         </div>
@@ -201,7 +200,10 @@ function Releases({id,journal,user,generation,onForm}:{id:string;journal:Journal
             write('Сколько дней обычно проходит от выставления счёта до оплаты? Построй график медианы.');
             requestId.current='';chatBox.current?.focus();
           }}>Исследовать скорость оплаты</button>
-          <small>{metricNames[viewMetric]} · {segmentNames[seg]}</small>
+          <small className="chat-typing" role="status">
+            {busy ? <><span aria-hidden="true"><i/><i/><i/></span> Агент проверяет данные…</> :
+              `${metricNames[viewMetric]} · ${segmentNames[seg]}`}
+          </small>
           <div className="composer-row">
             <textarea ref={chatBox} aria-label="Спросить агента" required maxLength={1500} rows={1} value={question}
               placeholder="Спросить агента…" onChange={e=>{write(e.target.value);requestId.current='';}}

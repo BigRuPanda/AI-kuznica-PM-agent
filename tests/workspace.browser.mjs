@@ -1120,6 +1120,58 @@ test('Softline workspace, upgrade and browser journeys', async t => {
     await member.reload();
     await visible(member.getByRole('link',{name:'Профиль',exact:true}));
   });
+  await journey('CSV release keeps pending feedback visible while reading expanded history', async () => {
+    const releaseId = 'R-001';
+    const { context } = await (await admin.request.get(base+'/api/report?releaseId='+releaseId)).json();
+    const store = app.space('team');
+    for (let index = 0; index < 24; index++) {
+      store.addMessage(releaseId, 'pending-feedback-'+index, {
+        role:'user', author:'Участник', text:'Сохранённый вопрос '+index, context, created:index+1,
+      });
+    }
+    const result = [];
+    for (const width of [1440, 390]) {
+      const page = await login('member','#release/'+releaseId,{viewport:{width,height:900}});
+      try {
+        if (width === 390) await role(page,'Обсуждение ›').click();
+        const discussion = page.getByRole('complementary',{name:'Обсуждение релиза'});
+        await discussion.getByRole('button',{name:/Предыдущие сообщения/}).click();
+        const history = discussion.locator('.chat-history');
+        assert.ok(await history.evaluate(list => list.scrollHeight > list.clientHeight * 2));
+        await history.evaluate(list => { list.scrollTop = 0; });
+        await field(discussion,'Спросить агента').fill('Проверка состояния отправки');
+
+        const hold = Promise.withResolvers();
+        await page.route('**/api/chat', async route => {
+          await hold.promise;
+          await route.continue();
+        }, {times:1});
+        const isReply = message => message.url().endsWith('/api/chat');
+        const response = page.waitForResponse(isReply);
+        const status = discussion.getByRole('status').filter({hasText:'Агент проверяет данные…'});
+        try {
+          await Promise.all([page.waitForRequest(isReply),role(discussion,'Отправить вопрос').click()]);
+          await visible(status);
+          const intersection = await status.evaluate(element => new Promise(resolve => {
+            const observer = new IntersectionObserver(([entry]) => {
+              observer.disconnect();
+              resolve(entry.intersectionRatio);
+            });
+            observer.observe(element);
+          }));
+          result.push({width, inView:intersection >= 0.95, scrollTop:await history.evaluate(list => list.scrollTop)});
+        } finally {
+          hold.resolve();
+          assert.ok((await response).ok());
+        }
+        await status.waitFor({state:'hidden'});
+      } finally { await page.context().close(); }
+    }
+    assert.deepEqual(result, [
+      {width:1440, inView:true, scrollTop:0},
+      {width:390, inView:true, scrollTop:0},
+    ]);
+  });
   await journey('judge writes in an isolated demo and mobile attachment returns to its conversation', async () => {
     await go(judge,'overview');
     await judge.getByRole('link',{name:'Открыть разбор'}).first().click();
