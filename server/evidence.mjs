@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { observedEffect } from './effect-plan.mjs';
 export const digest = (value) => createHash('sha256').update(value).digest('hex');
 export function verifySourceArchive(bytes, expected) {
   if (expected && digest(bytes) !== expected)
@@ -47,7 +48,7 @@ export function setSetting(db, k, v) {
   db.prepare('INSERT OR REPLACE INTO settings VALUES(?,?)').run(k, JSON.stringify(v));
 }
 export const defaultRules = { threshold: 25, controlTolerance: 10, recovery: 90 };
-function identity(f, file) {
+export function identity(f, file) {
   const r = f.row ?? {};
   if (f.kind === 'sales') return JSON.stringify([r.product_family, r.week_start]);
   if (f.kind === 'metrics') return JSON.stringify([r.metric_id, r.date, r.product, r.segment]);
@@ -56,13 +57,15 @@ function identity(f, file) {
   if (f.kind === 'releases') return r.release_id;
   return file + '/' + f.loc;
 }
-export function importDocs(store, docs, { notify = true } = {}) {
+export function importDocs(store, docs, { notify = true, guard } = {}) {
   const { db } = store;
   const save = db.prepare(
     'INSERT INTO facts VALUES(?,?,?,?,?,?) ON CONFLICT(kind,key) DO UPDATE SET version=excluded.version,file=excluded.file,loc=excluded.loc,body=excluded.body',
   );
   return store.tx(() => {
     let inserted = 0;
+    if (guard?.(db) === false)
+      return { inserted, documents: db.prepare('SELECT count(*) n FROM documents').get().n };
     for (const doc of docs) {
       if (!Array.isArray(doc.facts) || typeof doc.file !== 'string') throw Error('Некорректный документ');
       const version = digest(JSON.stringify(doc));
@@ -124,6 +127,14 @@ export function listSales(db) {
     }))
     .sort((a, b) => a.week.localeCompare(b.week));
 }
+function signalText(info, product) {
+  const week = dateMs(info.week);
+  const through = iso(week + 6 * 86400000);
+  const headline = info.rule === 'relative'
+    ? `Индекс самостоятельных заказов: ${fmt(info.change)}% за ${iso(week - 3 * WEEK)} — ${through} к 12 предыдущим неделям. Порог падения: ${fmt(info.threshold)}%.`
+    : `Индекс самостоятельных заказов ниже ${fmt(info.threshold)} две недели подряд. ${info.week} — ${through}: ${fmt(info.value)} п.`;
+  return [product, headline, 'Источник: ' + info.source].join('\n');
+}
 export function scan(db, notify = true) {
   const all = listSales(db),
     rules = setting(db, 'rules', defaultRules);
@@ -183,7 +194,7 @@ export function scan(db, notify = true) {
                 id + channel,
                 channel,
                 'queued',
-                JSON.stringify({ caseId: id, text: desc + ' · ' + product + ' · ' + w.week }),
+                JSON.stringify({ kind: 'product-signal', caseId: id, text: signalText(info, product) }),
               );
             }
         }
@@ -388,6 +399,7 @@ export function rankBacklog(db, product) {
 export function effect(db, c) {
   const plan = c.body.watch;
   if (!plan) return null;
+  if (plan.version === 2) return observedEffect(db,c);
   const start = iso(dateMs(monday(plan.deployed)) + (monday(plan.deployed) === plan.deployed ? 0 : WEEK));
   const end = iso(dateMs(start) + 3 * WEEK);
   const all = listSales(db),

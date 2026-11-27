@@ -36,6 +36,7 @@ export type Release = {
 export type Home = {
   bridgeEnabled: boolean;
   archiveOnly?: boolean;
+  metrikaProbe?: { status: 'ready' | 'error'; at: number; reason?: string } | null;
   integrations: Record<'redmine' | 'confluence', import('./tracking').Integration>;
   user: User;
   cases: Case[];

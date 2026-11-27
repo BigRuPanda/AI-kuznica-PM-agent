@@ -222,6 +222,23 @@ def report_text(report):
             f"Итог проверки: {report['status']}. Тестовые визиты исключены.\n{report['web']}")
 
 
+def generated_flag(project_id, required):
+    project = services.redmine(f'projects/{project_id}.json?include=issue_custom_fields')['project']
+    flag = next((f for f in project.get('issue_custom_fields', [])
+                 if f['name'].lower() == 'сгенерирована ии-помощником'), None)
+    if not flag and required:
+        raise ValueError('Включите в проекте Redmine поле-флаг «сгенерирована ИИ-помощником» для задач.')
+    return flag
+
+
+def verify_generated_flag(issue, flag):
+    fields = issue.get('custom_fields')
+    if fields is None:
+        fields = services.redmine(f"issues/{int(issue['id'])}.json")['issue'].get('custom_fields', [])
+    if not any(str(f['id']) == str(flag['id']) and str(f['value']).lower() in ('1', 'true') for f in fields):
+        raise ValueError('Redmine не подтвердил поле-флаг «сгенерирована ИИ-помощником» для созданной задачи.')
+
+
 def create_task(p):
     ref,title,detail = [str(p.get(k,'')).strip() for k in ('reference','title','description')]
     if (p.get('confirmed') is not True or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]{0,99}',ref)
@@ -232,6 +249,7 @@ def create_task(p):
     extra = issue_fields(p.get('fields',{}),creating=True)
     fingerprint = digest(encode([ref,title,detail,report_id] + ([extra] if extra else [])))
     project_id = services.project()
+    require_flag = setting('REDMINE_REQUIRE_AI_FLAG') == 'true'
     marker = 'Signal-Ref: '+digest(encode([services.redmine_url(),project_id,ref]))[:36]
     with db() as c:
         c.execute('BEGIN IMMEDIATE')
@@ -243,6 +261,7 @@ def create_task(p):
             if existing['remote']:
                 return task_view(existing)
         else:
+            flag = generated_flag(project_id, require_flag)
             c.execute('INSERT INTO tasks(ref,fingerprint,marker,report_id,title) VALUES(?,?,?,?,?)',
                       (ref,fingerprint,marker,report_id,title))
     if existing:
@@ -250,8 +269,12 @@ def create_task(p):
         if len(found)!=1:
             raise ValueError('Отправка ожидает сверки в Redmine. Число задач с меткой: '+str(len(found))+'. '+marker)
         issue = found[0]
+        if require_flag:
+            verify_generated_flag(issue, generated_flag(project_id, require_flag))
     else:
         fields = dict(project_id=project_id,subject=title,description='\n\n'.join(filter(None,[detail,report_text(report) if report else None,marker])))
+        if flag:
+            fields['custom_fields'] = [{'id':flag['id'],'value':'1'}]
         tracker_id = setting('REDMINE_TRACKER_ID')
         if tracker_id:
             fields['tracker_id'] = int(tracker_id)
@@ -263,6 +286,8 @@ def create_task(p):
                 with db() as c:
                     c.execute('DELETE FROM tasks WHERE ref=? AND remote IS NULL',(ref,))
             raise
+        if require_flag:
+            verify_generated_flag(issue, flag)
     if issue['project']['id']!=project_id:
         raise ValueError('Ответ Redmine относится к другому проекту.')
     with db() as c:

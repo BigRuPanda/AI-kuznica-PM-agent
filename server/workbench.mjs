@@ -494,6 +494,12 @@ export async function answer(store, user, b, env = process.env, send = fetch, jo
   const db = store.db;
   const { scope } = thread(db, user, b.thread);
   const shared = scope === 'group';
+  const history = recentDialogue(db, b.thread, b.questionSeq);
+  if (!b.rangeId && !b.materialIds?.length) {
+    const { releaseObservationAnswer } = await import('./release-observation-chat.mjs');
+    const release = releaseObservationAnswer(store, user, b, env, shared, history);
+    if (release) return release;
+  }
   let focus;
   if (!b.rangeId && b.materialIds?.length === 1) {
     if (readMaterial(db, user, b.materialIds[0], shared).plot) focus = { id: b.materialIds[0] };
@@ -508,7 +514,6 @@ export async function answer(store, user, b, env = process.env, send = fetch, jo
         'Какой график вы имеете в виду?\n' + focus.choices.map((c, i) => i + 1 + '. ' + c.label).join('\n'),
     };
   if (focus?.id) b = { ...b, materialIds: [focus.id], screen: undefined };
-  const history = recentDialogue(db, b.thread, b.questionSeq);
   if (b.caseId) visibleCase(db, user, b.caseId);
   if (!b.rangeId && !b.materialIds?.length) {
     const value = weeklySourceAnswer(db, b.question);
@@ -703,7 +708,7 @@ function briefConclusion(text, findings) {
 }
 
 function completeMaterials(store, user, job, b, result) {
-  if (result.mode === 'daily' || result.mode === 'source-value') return result;
+  if (['daily', 'source-value', 'release-observation'].includes(result.mode)) return result;
   if (result.chartChoices) return { ...result, materials: [] };
   const db = store.db;
   const r = JSON.parse(db.prepare('SELECT body FROM job_research WHERE job=?').get(job)?.body || 'null');
@@ -902,7 +907,25 @@ export async function deliver(store, env, send, mailSend = mail, accounts) {
     .get(Date.now(), env.NOTIFICATIONS_ENABLED === 'true' ? 1 : 0);
   if (!d) return;
   const b = JSON.parse(d.body);
-  const personal = b.owner && accounts ? destination(accounts,b.owner,d.channel) : null;
+  const automation = b.caseId && !b.owner && (!b.chat || b.proactive || b.kind === 'product-signal');
+  const caseOwner = automation
+    ? db.prepare("SELECT json_extract(body,'$.owner') AS owner FROM cases WHERE id=?").get(b.caseId)?.owner
+    : undefined;
+  const namedSignal = automation && (caseOwner || env.SIGNAL_OWNER_LOGIN || env.SOURCE_ARCHIVE_SHA256);
+  if (namedSignal && b.chat) {
+    db.prepare("UPDATE deliveries SET state='cancelled' WHERE id=? AND state='queued'").run(d.id);
+    return;
+  }
+  const signalOwner = namedSignal && !caseOwner && accounts && env.SIGNAL_OWNER_LOGIN
+    ? accounts.prepare("SELECT id FROM users WHERE login=? COLLATE NOCASE AND space='team' AND role!='judge'")
+      .get(env.SIGNAL_OWNER_LOGIN.trim())?.id
+    : undefined;
+  const recipient = b.owner || caseOwner || signalOwner;
+  const personal = recipient && accounts ? destination(accounts,recipient,d.channel) : null;
+  if (namedSignal && !personal) {
+    db.prepare('UPDATE deliveries SET next=? WHERE id=?').run(Date.now() + 60000, d.id);
+    return;
+  }
   if (b.owner && (!personal || digest(personal) !== b.addressHash)) {
     db.prepare("UPDATE deliveries SET state='cancelled' WHERE id=?").run(d.id);
     return;
@@ -915,7 +938,7 @@ export async function deliver(store, env, send, mailSend = mail, accounts) {
         .filter(Boolean),
     ),
   ];
-  if (d.channel === 'telegram' && !b.owner && !b.chat && destinations.length > 1) {
+  if (d.channel === 'telegram' && !personal && !b.owner && !b.chat && destinations.length > 1) {
     store.tx(() => {
       for (const chat of destinations)
         db.prepare(
@@ -941,7 +964,7 @@ export async function deliver(store, env, send, mailSend = mail, accounts) {
     return;
   const appUrl = env.APP_BASE_URL || 'http://127.0.0.1:8090';
   const links = [b.issueUrl, b.caseId && appUrl + '/#case/' + b.caseId].filter(Boolean);
-  const accessibleLinks = d.channel === 'telegram' && b.owner
+  const accessibleLinks = d.channel === 'telegram' && recipient
     ? links.filter(link => !['localhost','127.0.0.1','[::1]'].includes(new URL(link).hostname)) : links;
   const text = [b.text, ...accessibleLinks].join('\n');
   try {

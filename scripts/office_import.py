@@ -23,6 +23,52 @@ THEMES = [
     ("рекомендации", r"рекомендац"), ("лицензии", r"лицензи")]
 CONTACT = re.compile(r"[\w.+-]+@[\w.-]+|\+7[\s()\d-]{9,}|\bИНН\b", re.I)
 
+# Verbatim excerpts are opt-in: every word in the whole cell must be non-identifying.
+# Other cells contribute only the existing thematic labels.
+INTERVIEW_WORDS = set("""
+я мы клиент покупатель клиенты он они через только или и а в на по из за у с со при
+не да нет когда если как что для без часто иногда обычно всегда сложно трудно удобно
+выбрать выбор выбора выборе подобрать подбор подбора нужную версию версии версий
+лицензию лицензии лицензий лицензия условия условиям цена цены срок редакцию
+менеджера менеджер менеджеру менеджером закупает покупает купить купили покупаем
+закупки заказ заказа онлайн самостоятельно консультация помощь информация информации
+нехватка недостаточно сложным лицензиям идеальный вариант остальное сдерживает
+запутанная политика по критика программное обеспечение касперский kaspersky astra
+linux cyberbackup
+""".split())
+
+def interview_excerpt(value):
+    if len(value) > 500 or re.search(r"[^\w\s.,:;!?()«»\"—–-]|[\d_]", value):
+        return None
+    if not set(re.findall(r"[\w]+", value.casefold())).issubset(INTERVIEW_WORDS):
+        return None
+    for phrase in re.split(r"[.!?;\n]", value):
+        phrase = phrase.strip()
+        if 15 <= len(phrase) <= 170 and re.search(r"сложн|запутан|выбор|подбор|нехватк", phrase, re.I):
+            return phrase
+    return None
+
+def price_comparison(headers, cells):
+    fields = {name: cells.get(col) for col, name in headers.items()}
+    match = fields.get("Сопоставимый продукт у конкурента")
+    if match not in ("Да", "Частично"):
+        return None
+    merchant, product = fields.get("Конкурент"), fields.get("Продукт")
+    offered, store = fields.get("Цена конкурента, ₽"), fields.get("Цена store.softline.ru, ₽")
+    checked = fields.get("Дата проверки")
+    if not isinstance(merchant, str) or not isinstance(product, str) or not isinstance(checked, (int, float)):
+        return None
+    if not all(isinstance(v, (int, float)) and v > 0 for v in (offered, store)):
+        return None
+    if not 1 <= checked < 100000:
+        return None
+    description = fields.get("Описание сравниваемого продукта")
+    sku = re.search(r"артикул\s*:\s*([\w.-]+)", description or "", re.I)
+    return {"merchant": merchant, "product": product, "competitorPrice": offered, "storePrice": store,
+            "license": fields.get("Редакция / лицензия"), "terms": fields.get("Срок / кол-во"),
+            "match": match, "sku": sku.group(1) if sku else None,
+            "checked": (datetime(1899,12,30) + timedelta(days=checked)).date().isoformat()}
+
 def read(z, key):
     if z.getinfo(key).file_size > LIMIT:
         raise ValueError("Слишком большой файл внутри архива")
@@ -100,14 +146,23 @@ def book(z, name):
             elif competitor:
                 line=" · ".join(str(v)[:320] for v in cells.values())[:1600]
                 if not CONTACT.search(line):
-                    facts.append({"kind":"competitor","loc":f"{title}!A{n}","text":line})
+                    fact={"kind":"competitor","loc":f"{title}!A{n}","text":line}
+                    if "Сопоставимый продукт у конкурента" in cells.values():
+                        headers=cells
+                    elif headers:
+                        comparison=price_comparison(headers,cells)
+                        if comparison: fact["comparison"]=comparison
+                    facts.append(fact)
             elif n>=3:
                 for col,value in cells.items():
                     if col in ("A","B") or not isinstance(value,str):
                         continue
                     tags=[label for label,pattern in THEMES if re.search(pattern,value,re.I)]
                     if tags:
-                        facts.append({"kind":"interview","loc":f"{title}!{col}{n}","text":"Темы ответа: "+", ".join(tags)})
+                        text="Темы ответа: "+", ".join(tags)
+                        excerpt=interview_excerpt(value)
+                        if excerpt: text+="\nФрагмент записи: "+excerpt
+                        facts.append({"kind":"interview","loc":f"{title}!{col}{n}","text":text})
     return facts
 
 def extract(data, name, depth=0):

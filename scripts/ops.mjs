@@ -3,8 +3,9 @@ import { basename, dirname, join, resolve } from 'node:path';
 import { DatabaseSync, backup } from 'node:sqlite';
 import { databasePath } from '../server/config.mjs';
 import { openStore } from '../server/store.mjs';
-import { initEvidence, importDocs, verifySourceArchive, cases, analysisView, setSetting, digest } from '../server/evidence.mjs';
-import { metrika, telegram, python, mail } from '../server/connectors.mjs';
+import { initEvidence, cases, analysisView, setSetting, digest } from '../server/evidence.mjs';
+import { initSourcePolicy, sourcePermission, importApproved } from '../server/source-policy.mjs';
+import { metrika, probeMetrika, telegram, python, mail } from '../server/connectors.mjs';
 import { openAccounts, workspacePath } from '../server/accounts.mjs';
 import { initConnections, personalConnection, targetFor } from '../server/tracker-connections.mjs';
 const [op, file] = process.argv.slice(2),
@@ -82,7 +83,7 @@ async function main() {
       const db = new DatabaseSync(workspacePath(base, user.space));
       try {
         initConnections(db);
-        if (targetFor(db, user, service).local) throw Error('Выбрано локальное демо. Настройте адрес сервиса');
+        if (targetFor(db, user, service, env).local) throw Error('Выбрано локальное демо. Настройте адрес сервиса');
         await personalConnection(db, user, {service, action:'check'}, env, fetch);
         console.log('Личный доступ подтверждён · ' + service);
       } finally {
@@ -94,6 +95,11 @@ async function main() {
     return;
   }
   if (op === 'check-metrika') {
+    if (env.SOURCE_ARCHIVE_SHA256) {
+      await probeMetrika(env);
+      console.log('Ответ Reports API получен. Данные счётчика не загружены.');
+      return;
+    }
     const r = await metrika();
     console.log('Ответ API получен. Строк: ' + r.docs[0].facts.length);
     return;
@@ -136,23 +142,26 @@ async function main() {
     }
     return;
   }
-  const store = openStore(base);
+  const store = openStore(base, { seedDemo: !env.SOURCE_ARCHIVE_SHA256 });
   try {
     initEvidence(store.db);
+    initSourcePolicy(store.db);
     if (op === 'import' || op === 'prepare-demo') {
       if (!file) throw Error('Укажите путь к XLSX, PPTX или ZIP');
       const path = resolve(file);
       const bytes = await readFile(path);
-      verifySourceArchive(bytes, env.SOURCE_ARCHIVE_SHA256);
-      const docs = JSON.parse(await python('office_import.py', [basename(path)], bytes));
-      console.log(
-        importDocs(store, docs, { notify: op === 'import' && env.NOTIFICATIONS_ENABLED === 'true' }),
-      );
+      const permission = sourcePermission(store.db, env.SOURCE_ARCHIVE_SHA256, bytes, basename(path));
+      if (op === 'prepare-demo' && permission && !permission.archive)
+        throw Error('Для демо-набора используйте исходный ZIP организатора.');
+      const docs = permission?.alreadyImported ? [] : JSON.parse(await python('office_import.py', [basename(path)], bytes));
+      console.log(importApproved(store, docs, permission, op === 'import' && env.NOTIFICATIONS_ENABLED === 'true'));
       if (op === 'prepare-demo') {
         setSetting(
           store.db,
           'demo_versions',
-          docs.map((d) => digest(JSON.stringify(d))),
+          permission?.archive
+            ? store.db.prepare('SELECT version FROM source_revisions WHERE sha=? ORDER BY rowid').all(permission.sha).map(row => row.version)
+            : docs.map(d => digest(JSON.stringify(d))),
         );
         console.log('Демо-набор для новых аккаунтов жюри сохранён.');
       }

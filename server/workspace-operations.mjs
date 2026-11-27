@@ -1,5 +1,7 @@
 import { randomUUID } from 'node:crypto';
+import { decisionDraft, releaseDecision } from './release-decision.mjs';
 import { z } from 'zod/v4';
+import { makeObservationPlan, observationOptions, observedEffect } from './effect-plan.mjs';
 import {
   analysisView,
   cases,
@@ -82,11 +84,23 @@ const publishInput = {
 };
 const watchInput = {
   caseId: id,
-  deployed: z.string(),
-  percent: z.coerce.number().positive().max(300),
+  deployed: optional,
+  percent: z.coerce.number().positive().max(300).optional(),
   control: optional,
+  metric: optional, segment: optional, releaseId: optional, taskId: optional,
+  baselineWeeks: z.coerce.number().int().min(1).max(12).optional(),
+  observationWeeks: z.coerce.number().int().min(1).max(12).optional(),
+  target: z.number().finite().nullable().optional(),
+  direction: z.enum(['at-least','at-most']).optional(), condition: optional,
 };
 export const operations = {
+  release_decision: [
+    'Разобрать результат выпущенной функции для семейства: сравнить индекс, релиз, измерение, интервью, цены конкурентов и бэклог. Для истории through — дата последнего доступного дня.',
+    { caseId: id.optional(), product: optional, releaseId: optional, through: optional },
+  ],
+  'release-tracker': ['Найти задачи, связанные с решением по релизу.', { caseId: id, releaseId: id }],
+  'release-tracker-draft': ['Подготовить задачу или комментарий по решению в чате разбора.',
+    { caseId: id, releaseId: id, key: id.optional() }],
   funnel: [
     'Рассчитать по счётчикам этапы подбора, завершение и корзину, проверить сегменты и покрытие. Используй для вопросов о пути покупки. В чате thread и rangeId подставит сервер.',
     {
@@ -185,7 +199,9 @@ export const operations = {
     'Сохранить явно высказанную поправку к источнику',
     { ...caseInput, source: text, comment: text },
   ],
-  watch: ['Назначить наблюдение по подтверждённой дате выкладки и цели', watchInput],
+  watch: ['Сохранить условия проверки эффекта. Если нет подтверждённой даты, ждать выкладки. Цель задаёт продакт.', watchInput],
+  'watch-options': ['Метрики, разрезы, релизы и задачи для наблюдения за продуктом.', caseInput],
+  'effect-preview': ['Прочитать сравнение показателя на указанную дату без изменения плана.', {...watchInput, asOf:optional}],
   decide: [
     'Изменить статус разбора по просьбе пользователя',
     { ...caseInput, state: z.enum(['Исследуем', 'Нужно решение', 'Завершено']) },
@@ -278,6 +294,36 @@ export function workspaceOperation(
   const b = meta ? z.object(meta[1]).parse(input) : input;
   const current = () => visibleCase(db, user, b.caseId);
   if (op === 'knowledge-sources') return excelSources(db);
+  if (op === 'release_decision') return releaseDecision(db, user, b, sharedOnly);
+  if (op === 'release-tracker' || op === 'release-tracker-draft') {
+    if (sharedOnly) throw Error('Откройте личный чат этого разбора');
+    const decision = releaseDecision(db, user, b);
+    if (decision.historical) throw Error('Откройте текущий срез для работы с задачами');
+    const proposed = decisionDraft(decision, env.APP_BASE_URL);
+    const target = targetFor(db, user, 'redmine', env);
+    const queries = [...new Set([decision.backlog?.title, proposed.title, decision.product,
+      decision.measurement?.metric].filter(Boolean))];
+    return Promise.resolve(trackerClient(store, user, target, env, send, b.caseId)).then(async api => {
+      const hits = api.searchProject ? await api.searchProject(queries) :
+        (await Promise.all(queries.map(query => api.search(query, true)))).flat();
+      const normalized = title => title.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
+      const exact = new Set([decision.backlog?.title, proposed.title].filter(Boolean).map(normalized));
+      const items = [...new Map(hits.map(item => [item.key, item])).values()]
+        .map(({ key, title, url, status, canComment = true }) =>
+          ({ key, title, url, status, canComment, exact: exact.has(normalized(title)) }))
+        .sort((a, b) => Number(b.exact) - Number(a.exact));
+      if (op === 'release-tracker') return { items, local: !!target.local };
+      if (b.key && !items.some(item => item.key === b.key)) throw Error('Повторите поиск и выберите задачу из результатов');
+      if (b.key && items.some(item => item.key === b.key && !item.canComment))
+        throw Error('Откройте найденную задачу в Redmine для добавления комментария.');
+      if (!b.key && items.some(item => item.exact)) throw Error('Найдена подходящая задача. Предложите комментарий к ней.');
+      const body = b.key
+        ? { caseId: b.caseId, key: b.key, comment: proposed.description }
+        : { caseId: b.caseId, ...proposed };
+      const draftId = digest(JSON.stringify([user.id, b.caseId, b.releaseId, b.key, proposed.description]));
+      return prepareTracker(store, user, 'issue', body, env, send, draftId);
+    });
+  }
   if (op === 'knowledge-source') return sourceRows(db, b.version, b.offset, b.loc);
   if (op === 'funnel') {
     if (!b.thread) throw Error('Укажите беседу для сохранения результата');
@@ -640,7 +686,23 @@ export function workspaceOperation(
     );
     return { ok: true };
   }
+  if (op === 'watch-options') return observationOptions(db,current());
+  if ((op === 'watch' && b.metric) || op === 'effect-preview') {
+    const c = current();
+    if (env.SOURCE_ARCHIVE_SHA256 && b.deployed && !b.releaseId)
+      throw Error('Выберите подтверждённую выкладку из журнала релизов.');
+    const plan = makeObservationPlan(db, c, b);
+    const result = observedEffect(db, {...c, body:{...c.body, watch:plan}}, b.asOf);
+    if (op === 'watch') {
+      c.body.watch = plan;
+      delete c.body.watchReviewed;
+      c.state = 'Наблюдаем эффект';
+      updateCase(db,c);
+    }
+    return {caseId:c.id, ...result};
+  }
   if (op === 'watch') {
+    if (!b.deployed || !b.percent) throw Error('Укажите метрику или дату выкладки и целевой процент от базы.');
     const c = current(),
       v = analysisView(db, { caseId: c.id, control: b.control });
     if (
@@ -657,6 +719,7 @@ export function workspaceOperation(
       controlBase: v.summary[1].before,
       tolerance: setting(db, 'rules', defaultRules).controlTolerance,
     };
+    delete c.body.watchReviewed;
     c.state = 'Наблюдаем эффект';
     updateCase(db, c);
     return { caseId: c.id, ...effect(db, c) };

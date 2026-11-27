@@ -4,6 +4,8 @@ import { BridgePages, useTrackingVisibility } from './tracking-visibility';
 import { RangeResult } from './range-result';
 import { Knowledge, NotificationSettings } from './notifications';
 import { SourceExtract } from './knowledge-source';
+import { EffectPlan } from './effect-plan';
+import { ReleaseDecision } from './release-decision';
 import { rangeLabel, RangeChart, DAY } from './range-chart';
 import type { Attachment } from './range-chart';
 import { SavedChart } from './calculations';
@@ -170,6 +172,7 @@ const stepNames: Record<string, string> = {
   page_read: 'Прочитана страница',
   'knowledge-sources': 'Найдены книги Excel',
   'knowledge-source': 'Прочитаны строки документа',
+  release_decision: 'Проверены данные по релизу',
   source_value: 'Проверено значение в исходной книге',
   page_draft: 'Подготовлена публикация в Confluence',
   'create-case': 'Создан личный разбор',
@@ -207,7 +210,11 @@ function Overview({ home, onAsk }: { home: Home; onAsk: () => void }) {
           <h1>Обзор</h1>
           {home.user.role === 'judge' && <span className="state">Демо</span>}
         </div>
-        <button onClick={onAsk}>Спросить помощника</button>
+        <div className="actions">
+          {home.archiveOnly && home.products.length > 0 &&
+            <a className="primary arrow-action" href="#release-decision">Решение по релизу <Icon name="arrow" /></a>}
+          <button onClick={onAsk}>Спросить помощника</button>
+        </div>
       </div>
       <section aria-labelledby="attention-title">
         <h2 id="attention-title">Требует внимания</h2>
@@ -258,6 +265,7 @@ function Chat({
   id,
   userId,
   caseId,
+  decisionReleaseId,
   threads,
   action,
   onResult,
@@ -271,6 +279,7 @@ function Chat({
   id: string;
   userId: string;
   caseId?: string;
+  decisionReleaseId?: string;
   threads: Thread[];
   action: Action;
   onResult?: (b: Msg['body']) => void;
@@ -693,6 +702,7 @@ function Chat({
             const body = {
               thread: id,
               question: (context ? 'О графике «' + context + '». ' : '') + q,
+              decisionReleaseId,
               caseId,
               screen,
               materialIds: [...new Set([material?.id, pasted].filter(Boolean))],
@@ -1149,8 +1159,15 @@ function Investigation({
     [pinned, prefix],
   );
   const [mobileChat, chatMode] = useState(false);
+  const [advancedEffectOpen, setAdvancedEffectOpen] = useState(false);
   const taskTitle = useRef<HTMLHeadingElement>(null);
   const effectSection = useRef<HTMLDetailsElement>(null);
+  const effectReady = !!d;
+  useEffect(() => {
+    if (section !== 'effect' || !effectReady || !effectSection.current) return;
+    effectSection.current.open = true;
+    effectSection.current.scrollIntoView({block:'start'});
+  }, [section, effectReady]);
   if (!d) return <p className={err ? 'error' : 'empty'} role={err ? 'alert' : 'status'}>{err || 'Загружаем разбор…'}</p>;
   const v = d.view,
     c = d.case;
@@ -1287,6 +1304,8 @@ function Investigation({
           />
           <details className="paper effect-panel" ref={effectSection}>
             <summary>Проверка эффекта</summary>
+            {home.archiveOnly || (d.effect && 'plan' in d.effect) ?
+              <EffectPlan caseId={id} saved={d.effect} archiveOnly={home.archiveOnly} reload={async () => {await load(); await refresh();}}/> : <>
             <p>{d.effect?.state || 'Укажите дату выкладки и цель.'}</p>
             {c.body.watch && d.effect && <dl className="comparison-dates">
               <div><dt>Дата выкладки</dt><dd>{c.body.watch.deployed}</dd></div>
@@ -1316,6 +1335,10 @@ function Investigation({
               </label>
               <button>Назначить проверку</button>
             </form>
+            <details onToggle={event => setAdvancedEffectOpen(event.currentTarget.open)}>
+              <summary>Настроить метрику и окно наблюдения</summary>
+              {advancedEffectOpen && <EffectPlan caseId={id} saved={null} reload={async () => {await load(); await refresh();}}/>}
+            </details></>}
             <button
               onClick={() => confirm('finish')}
               disabled={completed}
@@ -1477,9 +1500,43 @@ function Investigation({
     </>
   );
 }
+type SourceVersion = { version: string; created: number; total: number; origin: string | null; author: string | null; active: boolean };
+
+function SourceHistory({ file, current }: { file: string; current: string }) {
+  const [open, setOpen] = useState(false);
+  const [history, setHistory] = useState<SourceVersion[]>([]);
+  const [error, setError] = useState('');
+  useEffect(() => {
+    if (!open) return;
+    let active = true;
+    setHistory([]);
+    setError('');
+    post<{versions: SourceVersion[]}>('source-history', { file }).then(
+      value => { if (active) setHistory(value.versions); },
+      failure => { if (active) setError(failure.message); },
+    );
+    return () => { active = false; };
+  }, [file, current, open]);
+  return <details onToggle={event => setOpen(event.currentTarget.open)}>
+    <summary>История версий</summary>
+    {error && <p role="alert">{error}</p>}
+    {!history.length && !error && <p role="status">Загружаем версии…</p>}
+    {history.length > 0 && <ul>{history.map(version => <li key={version.version}>
+      <a href={'#knowledge-source/' + version.version}>{new Date(version.created).toLocaleString('ru-RU')} · {version.version.slice(0, 8)}</a>
+      {' · '}{version.origin || 'Ранее загруженная версия'}
+      {version.author && ' · ' + version.author}
+      {version.active && ' · Текущая'}
+    </li>)}</ul>}
+  </details>;
+}
+
 function Sources({ home, action, refresh }: { home: Home; action: Action; refresh: () => Promise<void> }) {
   const [notice, say] = useState('');
+  const [selected, select] = useState<File>();
+  const [origin, setOrigin] = useState('');
   const admin = home.user.role === 'admin';
+  const versionFile = home.archiveOnly && selected && /\.(xlsx|pptx)$/i.test(selected.name) ? selected : null;
+  const current = versionFile ? home.sources.find(source => source.file === versionFile.name) : undefined;
   return (
     <>
       <div className="page-head">
@@ -1490,9 +1547,10 @@ function Sources({ home, action, refresh }: { home: Home; action: Action; refres
           <form
             onSubmit={(e) => {
               e.preventDefault();
-              const file = new FormData(e.currentTarget).get('file') as File;
+              const file = selected;
+              if (!file) return;
               action(async () => {
-                say('Читаем материалы…');
+                say('');
                 const r = await fetch('/api/team/upload', {
                   method: 'POST',
                   headers: { 'X-File-Name': encodeURIComponent(file.name) },
@@ -1500,16 +1558,35 @@ function Sources({ home, action, refresh }: { home: Home; action: Action; refres
                 });
                 const v = await r.json();
                 if (!r.ok) throw Error(v.error);
-                say('Добавлено версий: ' + v.inserted);
+                say(v.inserted ? 'Добавлено версий: ' + v.inserted : 'Файл уже был загружен.');
                 await refresh();
               });
             }}
           >
             <label>
               Книга, презентация или архив
-              <input name="file" type="file" accept=".xlsx,.pptx,.zip" required />
+              <input name="file" type="file" accept=".xlsx,.pptx,.zip" required onChange={e => {
+                select(e.currentTarget.files?.[0]);
+                setOrigin('');
+                say('');
+              }} />
             </label>
+            {home.archiveOnly && <p>Загрузите исходный ZIP. Чтобы добавить или обновить один материал, согласуйте его версию.</p>}
+            {versionFile && <label>
+              Происхождение материала
+              <input value={origin} onChange={e => setOrigin(e.currentTarget.value)} maxLength={400} />
+            </label>}
             <div className="actions source-actions">
+              {versionFile && <button type="button" disabled={!origin.trim()} onClick={() => action(async () => {
+                say('');
+                const bytes = await versionFile.arrayBuffer();
+                const checksum = await crypto.subtle.digest('SHA-256', bytes);
+                const sha = Array.from(new Uint8Array(checksum), b => b.toString(16).padStart(2, '0')).join('');
+                await post('approve-source', { sha, file: versionFile.name, origin, previous: current?.version ?? null });
+                say('Версия согласована. Теперь её можно загрузить.');
+              })}>
+                Согласовать версию
+              </button>}
               <button className="primary">Загрузить и пересчитать</button>
               {!home.archiveOnly && <button
                 type="button"
@@ -1531,11 +1608,12 @@ function Sources({ home, action, refresh }: { home: Home; action: Action; refres
         <h3>Загруженные материалы</h3>
         {home.sources.map((s) => (
           <div className="event-row" key={s.file}>
-            <b>{s.total > 0 && (home.bridgeEnabled || home.archiveOnly) ? <a href={'#knowledge-source/'+s.version}>{s.file}</a> : s.file}</b>
+            <b>{s.total > 0 && /\.(xlsx|pptx)$/i.test(s.file) ? <a href={'#knowledge-source/'+s.version}>{s.file}</a> : s.file}</b>
             <small>
               {s.role === 'reference' ? 'Справочный файл · содержимое не индексируется' : 'Распознано записей: ' + s.total}
               {' · '}Версий: {s.versions} · {new Date(s.updated).toLocaleDateString('ru-RU')}
             </small>
+            {home.archiveOnly && /\.(xlsx|pptx)$/i.test(s.file) && <SourceHistory file={s.file} current={s.version} />}
           </div>
         ))}
         {!home.sources.length && <p>Источники пока не загружены.</p>}
@@ -1560,6 +1638,20 @@ function Settings({ home, action, refresh, menu, changeMenu }: {
         <h1>Настройки команды</h1>
       </div>
       <Connections home={home} action={action} refresh={refresh} />
+      {admin && home.archiveOnly && (
+        <section className="paper">
+          <h3>Яндекс Метрика</h3>
+          <p>Проверка Reports API на тестовом счётчике. Источник чисел разбора — архив организатора.</p>
+          <button type="button" onClick={() => action(async () => {
+            try { await post('metrika-probe'); }
+            finally { await refresh(); }
+          })}>Проверить Reports API</button>
+          {home.metrikaProbe && <p role="status">
+            {home.metrikaProbe.status === 'ready' ? 'Reports API ответил' : 'Ошибка Reports API · ' + home.metrikaProbe.reason}
+            {' · '}{new Date(home.metrikaProbe.at).toLocaleString('ru-RU')}
+          </p>}
+        </section>
+      )}
       {home.user.role !== 'judge' && <NotificationSettings />}
       <section className="paper menu-preference" aria-labelledby="menu-preference-title">
         <h3 id="menu-preference-title">Положение меню</h3>
@@ -1821,7 +1913,8 @@ function Workspace({ user, onLogout }: { user: User; onLogout: () => void }) {
         </a>
         <nav aria-label="Основные разделы">
           {tabs.map(([k, t]) => {
-            const active = !settings && (route === k || (k === 'cases' && ['case','snapshot','range','material','demo-issue','demo-page','releases-list','release-detail','release','releases','calc'].includes(route)));
+            const active = !settings && (route === k || (k === 'overview' && route === 'release-decision') ||
+              (k === 'cases' && ['case','snapshot','range','material','demo-issue','demo-page','releases-list','release-detail','release','releases','calc'].includes(route)));
             return (
             <a
               className={active ? 'active' : ''}
@@ -1878,6 +1971,11 @@ function Workspace({ user, onLogout }: { user: User; onLogout: () => void }) {
           <section className="paper">
             <MaterialDetail id={id} />
           </section>
+        ) : route === 'release-decision' ? (
+          <ReleaseDecision action={action} renderChat={(thread, caseId, releaseId) => (
+            <Chat key={thread + '/' + releaseId} id={thread} caseId={caseId} decisionReleaseId={releaseId}
+              userId={home.user.id} threads={home.threads} action={action} />
+          )} />
         ) : ['releases', 'release', 'calc'].includes(route) ? (
           <ReleaseAnalytics route={route} requestedId={id} author={user.name} admin={user.role === 'admin'} />
         ) : route === 'case' ? (

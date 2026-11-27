@@ -52,6 +52,16 @@ export function bridgeTracker(db, user, env, send) {
     if (!row) throw Error('Задача недоступна в этом рабочем пространстве');
     return '/tasks/' + encodeURIComponent(row.reference);
   }
+  function search(query) {
+    const q = query.trim().toLowerCase();
+    return visibleRows()
+      .map((r) => {
+        const b = JSON.parse(r.body);
+        return { key: r.external, url: b.receipt?.url, title: b.title };
+      })
+      .filter((r) => (r.key + ' ' + r.title).toLowerCase().includes(q))
+      .slice(0, 25);
+  }
   async function create(changes, marker, beforeWrite) {
     const id = marker.slice(3);
     const draft = db.prepare('SELECT body FROM draft_actions WHERE id=? AND user=?').get(id, user.id);
@@ -78,15 +88,16 @@ export function bridgeTracker(db, user, env, send) {
   return {
     read: (key) => bridge(env, send, path(key) + '/details'),
     options: () => bridge(env, send, '/issue-options'),
-    search(query) {
-      const q = query.trim().toLowerCase();
-      return visibleRows()
-        .map((r) => {
-          const b = JSON.parse(r.body);
-          return { key: r.external, url: b.receipt?.url, title: b.title };
-        })
-        .filter((r) => (r.key + ' ' + r.title).toLowerCase().includes(q))
-        .slice(0, 25);
+    search,
+    async searchProject(queries) {
+      const params = new URLSearchParams(queries.map(query => ['query', query]));
+      const { items } = await bridge(env, send, '/project-issues?' + params);
+      const known = new Set(db.prepare(`SELECT external FROM draft_actions d
+        JOIN redmine_drafts r ON r.draft=d.id WHERE external IS NOT NULL`).all().map(row => number(row.external)));
+      return [
+        ...items.filter(item => !known.has(number(item.key))).map(item => ({ ...item, canComment: false })),
+        ...queries.flatMap(search),
+      ];
     },
     async save(key, changes, marker, beforeWrite) {
       if (!key) return create(changes, marker, beforeWrite);

@@ -42,6 +42,12 @@ if project.new_record?
   project.trackers = Tracker.sorted.to_a
   project.save!
 end
+flag = IssueCustomField.find_or_initialize_by(name: 'сгенерирована ИИ-помощником')
+flag.assign_attributes(field_format: 'bool', is_filter: true, visible: true, editable: true, default_value: '0') if flag.new_record?
+raise 'Expected a filterable boolean issue field' unless flag.field_format == 'bool' && flag.is_filter?
+flag.save!
+project.issue_custom_fields << flag unless project.issue_custom_fields.include?(flag)
+project.trackers.each { |tracker| flag.trackers << tracker unless flag.trackers.include?(tracker) }
 user = User.find_or_initialize_by(login: 'signal-demo')
 if user.new_record?
   user.assign_attributes(firstname: 'Signal', lastname: 'Demo', mail: 'signal-demo@example.invalid',

@@ -44,11 +44,18 @@ export async function providerCall(env,messages,tools,choice='auto',send=fetch){
   // A CPU-backed local model may need several minutes to process a cold tool catalog.
   const local = ['localhost','127.0.0.1','[::1]'].includes(target.hostname);
   const timeout = local ? 240000 : 60000;
+  const signal = AbortSignal.timeout(timeout);
+  const timedOut = e => signal.aborted || e?.name === 'TimeoutError';
+  const timeoutError = () => Object.assign(Error('Модель не успела ответить за ' + timeout / 1000 + ' секунд.'),
+    { timedOut: true, retryable: !local });
   let response;
-  try{response=await send(target,{method:'POST',redirect:'error',signal:AbortSignal.timeout(timeout),headers:{'Content-Type':'application/json',...(env.LLM_API_KEY?{Authorization:'Bearer '+env.LLM_API_KEY}:{})},
-    body:JSON.stringify({model:env.LLM_MODEL,messages,tools,tool_choice:choice})});}catch{throw Object.assign(Error('Модель недоступна. Проверьте подключение и параметры .env.'),{retryable:true});}
+  try{response=await send(target,{method:'POST',redirect:'error',signal,headers:{'Content-Type':'application/json',...(env.LLM_API_KEY?{Authorization:'Bearer '+env.LLM_API_KEY}:{})},
+    body:JSON.stringify({model:env.LLM_MODEL,messages,tools,tool_choice:choice})});}catch(e){
+    if(timedOut(e))throw timeoutError();
+    throw Object.assign(Error('Модель недоступна. Проверьте подключение и параметры .env.'),{retryable:true});
+  }
   if(!response.ok)throw Object.assign(Error('Провайдер модели вернул HTTP '+response.status+'.'),{status:response.status});
-  const data=await response.json(),reply=data.choices?.[0]?.message;
+  const data=await response.json().catch(e=>{throw timedOut(e)?timeoutError():e;}),reply=data.choices?.[0]?.message;
   if(!reply)throw Error('Модель вернула пустой ответ.');return {...reply,usage:{input:data.usage?.prompt_tokens,output:data.usage?.completion_tokens}};
 }
 async function apiTurn(store,a,history,question,env,send){

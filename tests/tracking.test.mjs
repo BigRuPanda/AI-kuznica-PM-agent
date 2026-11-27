@@ -58,7 +58,7 @@ function siteMock() {
     if (p === '/pm/users/current.json') return json({ user: { id: 5 } });
     if (p.endsWith('/rest/api/user/current')) return json({ type: 'known', userKey: 'fixture' });
     if (p === '/pm/projects/store.json')
-      return json({ project: { id: 7, trackers: [{ id: 1, name: 'Задача' }] } });
+      return json({ project: { id: 7, trackers: [{ id: 1, name: 'Задача' }], issue_custom_fields: [{id: 6, name:'сгенерирована ИИ-помощником'}] } });
     if (p === '/pm/enumerations/issue_priorities.json')
       return json({ issue_priorities: [{ id: 4, name: 'Высокий' }] });
     if (p === '/pm/projects/store/memberships.json')
@@ -68,6 +68,7 @@ function siteMock() {
     if (p === '/pm/issues.json' && method === 'GET') return json({ issues: remote.issues });
     if (p === '/pm/issues.json' && method === 'POST') {
       assert.equal(b.issue.project_id, 7);
+      assert.deepEqual(b.issue.custom_fields, [{id:6, value:'1'}]);
       const issue = {
         id: remote.issues.length + 1,
         project: { id: 7 },

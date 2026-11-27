@@ -72,11 +72,23 @@ function client(send, label, base, headers) {
     });
 }
 const list = (rows = []) => rows.map((r) => ({ id: String(r.id), name: r.name }));
-export function redmine(target, token, send) {
+const generatedFlagName = 'сгенерирована ии-помощником';
+const generatedFlagError = 'Включите в проекте Redmine поле-флаг «сгенерирована ИИ-помощником» для задач.';
+export function redmine(target, token, send, { requireGeneratedFlag = false } = {}) {
   const call = client(send, 'Redmine', target.url, { 'X-Redmine-API-Key': token });
   const projectPath = '/projects/' + encodeURIComponent(target.scope);
   async function project() {
-    return (await call(projectPath + '.json?include=trackers')).project;
+    return (await call(projectPath + '.json?include=trackers,issue_custom_fields')).project;
+  }
+  function generatedFlag(p) {
+    const flag = p.issue_custom_fields?.find(f => f.name.toLowerCase() === generatedFlagName);
+    if (!flag && requireGeneratedFlag) throw Error(generatedFlagError);
+    return flag;
+  }
+  async function verifyGeneratedFlag(issue, flag) {
+    const fields = issue.custom_fields ?? (await call('/issues/' + numeric(issue.id) + '.json')).issue.custom_fields;
+    if (!fields?.some(f => String(f.id) === String(flag.id) && ['1', 'true'].includes(String(f.value))))
+      throw Error('Redmine не подтвердил поле-флаг «сгенерирована ИИ-помощником» для созданной задачи.');
   }
   function item(i) {
     const transition = (i.journals || []).findLast((j) =>
@@ -201,19 +213,26 @@ export function redmine(target, token, send) {
         await call('/issues/' + numeric(key) + '.json', 'PUT', { issue: fields });
         return { key: String(key), url: target.url + '/issues/' + numeric(key) };
       }
-      fields.project_id = (await project()).id;
+      const p = await project();
+      const flag = generatedFlag(p);
+      fields.project_id = p.id;
+      if (flag) fields.custom_fields = [{ id: flag.id, value: '1' }];
       fields.description = [fields.description, 'Сгенерирована ИИ-помощником.', marker]
         .filter(Boolean)
         .join('\n\n');
       beforeWrite?.();
       const { issue } = await call('/issues.json', 'POST', { issue: fields });
+      if (requireGeneratedFlag) await verifyGeneratedFlag(issue, flag);
       return { key: numeric(issue.id), url: target.url + '/issues/' + numeric(issue.id) };
     },
     async recover(key, marker) {
       const matches = key ? [await read(key)] : await search(marker, true);
-      return matches.find(
+      const match = matches.find(
         (i) => i.description.includes(marker) || i.comments.some((j) => j.text.includes(marker)),
       );
+      if (match && !key && requireGeneratedFlag)
+        await verifyGeneratedFlag({ id: match.key }, generatedFlag(await project()));
+      return match;
     },
   };
 }

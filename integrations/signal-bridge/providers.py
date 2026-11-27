@@ -79,6 +79,37 @@ def find_marker(project_id, marker):
         if not issues:
             raise ServiceError('Redmine вернул неполный список задач.')
 
+def project_issues(queries):
+    """Return metadata for public, untracked issues within the configured project."""
+    if not 1 <= len(queries) <= 6 or any(not 1 <= len(q.strip()) <= 240 for q in queries):
+        raise ValueError('Укажите до шести поисковых фраз длиной до 240 символов.')
+    terms = {' '.join(q.casefold().split()) for q in queries}
+    project_id, offset, matches = project(), 0, []
+    base = (setting('REDMINE_PUBLIC_URL') or redmine_url()).rstrip('/')
+    while True:
+        params = parse.urlencode(dict(project_id=project_id, subproject_id='!*',
+                                      status_id='*', limit=100, offset=offset, sort='updated_on:desc,id:desc'))
+        page = redmine('issues.json?'+params)
+        issues = page['issues']
+        for issue in issues:
+            if issue['project']['id'] != project_id or issue.get('is_private') is not False:
+                continue
+            description = issue.get('description') or ''
+            if any(line.startswith('Signal-Ref: ') for line in description.splitlines()):
+                continue
+            title = issue['subject']
+            normalized = ' '.join(title.casefold().split())
+            searchable = normalized + ' ' + ' '.join(description.casefold().split())
+            if any(term in searchable for term in terms):
+                matches.append((normalized in terms, dict(key='Redmine #'+str(issue['id']),
+                    url=base+'/issues/'+str(issue['id']), title=title, status=issue['status']['name'])))
+        offset += len(issues)
+        if offset >= page['total_count']:
+            matches.sort(key=lambda row: row[0], reverse=True)
+            return [item for _, item in matches[:25]]
+        if not issues:
+            raise ServiceError('Redmine вернул неполный список задач.')
+
 
 def telegram(method, data, token=None, timeout=18):
     import re

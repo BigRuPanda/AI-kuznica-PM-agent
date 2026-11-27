@@ -11,7 +11,6 @@ import { application } from './http.mjs';
 import {
   initEvidence,
   importDocs,
-  verifySourceArchive,
   updateCase,
   cases,
   digest,
@@ -37,7 +36,8 @@ import {
 import { bindTelegram, contactAction, initContacts } from './notification-contacts.mjs';
 import { collectClosures, knowledge } from './redmine-bridge.mjs';
 import { syncWatches } from './redmine-watch.mjs';
-import { python, metrika, mail, telegram } from './connectors.mjs';
+import { python, metrika, probeMetrika, mail, telegram } from './connectors.mjs';
+import { initSourcePolicy, approveSource, sourcePermission, importApproved, sourceHistory, protectedSources } from './source-policy.mjs';
 import { preview, revisePage } from './tracker-workflow.mjs';
 import { configure, connectionInfo, personalConnection, finishOAuth } from './tracker-connections.mjs';
 import { remoteMcp } from './team-mcp.mjs';
@@ -56,8 +56,10 @@ export function createTeamApp({
     spaces = new Map(),
     legacy = new Map(),
     busy = new Set(),
+    working = new Set(),
     authAttempts = new Map();
   initContacts(accounts.db);
+  let stopping = false;
   let nextClosures = 0,
     nextTelegram = 0;
   const urlBase = new URL(env.APP_BASE_URL || 'http://127.0.0.1:8090'),
@@ -66,6 +68,7 @@ export function createTeamApp({
     if (!spaces.has(id)) {
       const s = openStore(workspacePath(base, id), { seedDemo: !env.SOURCE_ARCHIVE_SHA256 });
       initEvidence(s.db);
+      initSourcePolicy(s.db);
       initWorkbench(s.db, env);
 
       spaces.set(id, s);
@@ -79,7 +82,9 @@ export function createTeamApp({
     const docs = versions.map((v) =>
       JSON.parse(db.prepare('SELECT body FROM documents WHERE version=?').get(v).body),
     );
-    importDocs(space(id), docs, { notify: false });
+    if (docs.length) importApproved(space(id), docs, env.SOURCE_ARCHIVE_SHA256
+      ? { archive: true, sha: env.SOURCE_ARCHIVE_SHA256 }
+      : null, false);
   }
   const safeUser = (u) => ({ id: u.id, name: u.name, login: u.login, role: u.role, space: u.space });
   function admin(u) {
@@ -148,12 +153,17 @@ export function createTeamApp({
     db.prepare('INSERT OR IGNORE INTO known_updates VALUES(?)').run(update.update_id);
   }
   async function tick() {
-    if (spaces.size === 0) return;
+    if (stopping) return;
     for (const [id, s] of spaces) {
+      if (!working.has(id)) {
+        working.add(id);
+        void workJobs(s, accounts, env, send)
+          .catch(() => console.error('Поручение в чате завершилось ошибкой'))
+          .finally(() => working.delete(id));
+      }
       if (busy.has(id)) continue;
       busy.add(id);
       void (async () => {
-        await workJobs(s, accounts, env, send);
         const minutes = Number(env.METRIKA_SYNC_MINUTES || 0),
           sync = setting(s.db, 'last_metrika_sync', { at: 0 });
         if (!env.SOURCE_ARCHIVE_SHA256 && id === 'team' && env.METRIKA_TOKEN && minutes >= 5 && Date.now() - sync.at >= minutes * 60000) {
@@ -167,10 +177,12 @@ export function createTeamApp({
           }
         }
         for (const c of cases(s.db).filter((x) => x.state === 'Наблюдаем эффект' && x.body.watch)) {
+          const plan = c.body.watch;
+          if (c.body.watchReviewed || plan.reviewed) continue;
           const report = effect(s.db, c);
-          if (report?.actual != null && !c.body.watch.reviewed) {
+          if (Number.isFinite(report?.actual)) {
             s.tx(() => {
-              c.body.watch.reviewed = true;
+              c.body.watchReviewed = true;
               c.state = 'Нужно решение';
               updateCase(s.db, c);
               if (id === 'team')
@@ -178,7 +190,7 @@ export function createTeamApp({
                   s.db
                     .prepare("INSERT OR IGNORE INTO deliveries(id,channel,state,body) VALUES(?,?,'queued',?)")
                     .run(
-                      digest(c.id + JSON.stringify(c.body.watch)) + channel,
+                      digest(c.id + JSON.stringify({...plan, reviewed:true})) + channel,
                       channel,
                       JSON.stringify({ caseId: c.id, text: report.state }),
                     );
@@ -303,11 +315,12 @@ export function createTeamApp({
           if (!/\.(xlsx|zip|pptx)$/i.test(name) || name.length > 250)
             throw Error('Выберите XLSX, PPTX или ZIP');
           const raw = await readBody(req, 32 * 1024 * 1024);
-          verifySourceArchive(raw, env.SOURCE_ARCHIVE_SHA256);
-          const docs = JSON.parse(await python('office_import.py', [name], raw, env));
+          const store = space(user.space);
+          const approved = sourcePermission(store.db, env.SOURCE_ARCHIVE_SHA256, raw, name);
+          const docs = approved?.alreadyImported ? [] : JSON.parse(await python('office_import.py', [name], raw, env));
           return reply(
             200,
-            importDocs(space(user.space), docs, { notify: env.NOTIFICATIONS_ENABLED === 'true' }),
+            importApproved(store, docs, approved, env.NOTIFICATIONS_ENABLED === 'true'),
           );
         }
         if (!req.headers['content-type']?.startsWith('application/json'))
@@ -328,6 +341,24 @@ export function createTeamApp({
         }
         const store = space(user.space),
           db = store.db;
+        if (op === 'approve-source') {
+          admin(user);
+          if (!env.SOURCE_ARCHIVE_SHA256) throw Error('Согласование доступно в пространстве организатора.');
+          approveSource(store, b, user.name, env.SOURCE_ARCHIVE_SHA256);
+          return reply(200, { approved: true });
+        }
+        if (op === 'source-history') return reply(200, { versions: sourceHistory(db, b.file) });
+        if (op === 'metrika-probe') {
+          admin(user);
+          try {
+            const result = await probeMetrika(env, send);
+            setSetting(db, 'metrika_probe', result);
+            return reply(200, result);
+          } catch (e) {
+            setSetting(db, 'metrika_probe', { at: Date.now(), status: 'error', reason: e.message });
+            throw e;
+          }
+        }
         if (op === 'logout') {
           accounts.logout(token);
           return reply(200, {}, { 'Set-Cookie': tokenCookie('', 0) });
@@ -342,15 +373,17 @@ export function createTeamApp({
           );
         }
         if (op === 'integration-config') {
-          configure(db, user, b);
+          configure(db, user, b, env);
           return reply(200, connectionInfo(db, user, env));
         }
         if (op === 'integration-access') return reply(200, await personalConnection(db, user, b, env, send));
         if (op === 'overview')
           return reply(200, {
             ...dashboard(db, user),
+            ...(env.SOURCE_ARCHIVE_SHA256 ? { sources: protectedSources(db) } : {}),
             bridgeEnabled: !!env.SIGNAL_BRIDGE_URL,
             archiveOnly: !!env.SOURCE_ARCHIVE_SHA256,
+            metrikaProbe: user.role === 'admin' ? setting(db, 'metrika_probe', null) : null,
             integrations: connectionInfo(db, user, env),
           });
         if (op === 'invite') {
@@ -563,9 +596,10 @@ export function createTeamApp({
     }
   });
   async function close() {
+    stopping = true;
     if (timer) clearInterval(timer);
     if (server.listening) await new Promise((r) => server.close(r));
-    while (busy.size) await new Promise((r) => setTimeout(r, 50));
+    while (busy.size || working.size) await new Promise((r) => setTimeout(r, 50));
     for (const s of spaces.values()) s.close();
     accounts.db.close();
   }

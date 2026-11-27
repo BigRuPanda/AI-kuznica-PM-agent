@@ -10,6 +10,7 @@ import { chartObservations } from './chart-focus.mjs';
 
 const system = [
   'Проверяй конкретное значение за дату через source_value. Для orders_index используй точное семейство из текущего разбора. Если строки нет, скажи, каких данных нет. Для фразы из исследования называй файл и лист с ячейкой или слайд. Темы ответа не являются дословной цитатой. Обозначай гипотезы явно.',
+  'Для решения по выпущенной функции используй release_decision: сформулируй предмет релиза, динамику, измерение и следующую проверку. Если пользователь назвал дату среза, передай её в through. В таком ответе используй только данные среза. В чате карточки context.releaseDecision содержит проверенный срез выбранного релиза.',
 
   'На запрос о статусе задачи, версии страницы или комментарии верни только запрошенные поля. Цитируй комментарий при закрытии дословно из issue_read.closingNote.text. У метрик, комментариев Redmine и источников Excel разное происхождение.',
   'Если запрошенный результат недоступен или шаг завершился ошибкой, сообщи об этом первым предложением, назови конкретную причину. Отдельно покажи только выполненную часть. Соблюдай запрошенные даты и детализацию; альтернативные данные подпиши отдельно.',
@@ -26,7 +27,9 @@ const system = [
 ].join(' ');
 const greeting =
   /^(?:привет(?:ик|ствую)?|здравствуй(?:те)?|доброе утро|добрый (?:день|вечер)|hello|hi)(?:[, ]+агент)?[!.? …]*$/iu;
-const tools = Object.entries(operations).map(([name, [description, shape]]) => {
+const tools = Object.entries(operations)
+  .filter(([name]) => !['release-tracker', 'release-tracker-draft'].includes(name))
+  .map(([name, [description, shape]]) => {
   const parameters = z.toJSONSchema(z.object(shape));
   delete parameters.$schema;
   return { type: 'function', function: { name: name.replaceAll('-', '_'), description, parameters } };
@@ -124,7 +127,10 @@ function note(state, op, r) {
       if (!sources.some(s => s.url === url)) sources.push({ url, label });
     }
   }
-  const references = ['source_value', 'search'].includes(op) ? r : [];
+  const references = op === 'release_decision'
+    ? [r.release, r.backlog, r.measurement, r.customer, r.competitor,
+      r.trend.baseline?.rows.at(-1), r.trend.current?.rows.at(-1)].filter(Boolean)
+    : ['source_value', 'search'].includes(op) ? r : [];
   for (const row of references.slice(0, 8)) {
     const url = '#knowledge-source/' + row.version + '/' + encodeURIComponent(row.loc);
     const sources = state.readSources ??= [];
@@ -144,6 +150,10 @@ function note(state, op, r) {
   }
   if (op === 'create-case') {
     state.caseId = r.id;
+    state.product = r.product;
+  }
+  if (op === 'release_decision' && !state.caseId && r.caseId) {
+    state.caseId = r.caseId;
     state.product = r.product;
   }
   if (op === 'selection_context' && r.comparison)
@@ -306,6 +316,9 @@ export async function runAssistant(
             }
           : null,
       visible,
+      releaseDecision: c && b.decisionReleaseId && !shared && !smallTalk
+        ? workspaceOperation(store, user, 'release_decision', { caseId, releaseId: b.decisionReleaseId }, env, send)
+        : undefined,
       selection: range ? concise('range_read', range) : null,
     };
     state = {
@@ -336,6 +349,7 @@ export async function runAssistant(
       pending: [],
       failures: {},
     };
+    if (context.releaseDecision) note(state, 'release_decision', context.releaseDecision);
     save(state);
   }
   const createRequested = state.caseId && authorizedWrite('draft', b.question) &&
@@ -344,7 +358,7 @@ export async function runAssistant(
   const singleIssue = createRequested && !/страниц|confluence|публикац|документаци|построй|график|создай разбор/iu.test(b.question);
   const turnTools = singleIssue ? [
     createIssueTool,
-    ...tools.filter(t => ['source_value','issue_search','search','view','knowledge_source','knowledge_sources'].includes(t.function.name)),
+    ...tools.filter(t => ['source_value','issue_search','search','view','knowledge_source','knowledge_sources','release_decision'].includes(t.function.name)),
   ] : tools;
   const allowedOps = new Set(turnTools.map(t => opNames[t.function.name]));
   const stop = (message, warning, outcome = 'done') => {
@@ -397,7 +411,7 @@ export async function runAssistant(
             'Не удалось завершить поручение с помощью модели. ' + e.message,
             measured,
             state.completed.length ? 'Результаты выполненных шагов сохранены.' : null,
-            'Можно продолжить после восстановления связи.',
+            e.timedOut ? 'Попробуйте сузить вопрос или продолжите поручение.' : 'Можно продолжить после восстановления связи.',
           ]
             .filter(Boolean)
             .join('\n'),
@@ -525,7 +539,10 @@ export async function runAssistant(
           args.calc ||= b.screen?.calc;
           args.product ||= state.product;
         }
-        if (!args.caseId && operations[op][1].caseId && state.caseId) args.caseId = state.caseId;
+        if (op === 'release_decision') {
+          if (!args.caseId && !args.product) args.caseId = state.caseId;
+          if (!args.releaseId && b.decisionReleaseId && args.caseId === state.caseId) args.releaseId = b.decisionReleaseId;
+        } else if (!args.caseId && operations[op][1].caseId && state.caseId) args.caseId = state.caseId;
         if (['range_read', 'selection_context'].includes(op) && !args.id) args.id = state.rangeIds.at(-1);
         if (
           ['draft', 'prepare_publish'].includes(op) &&

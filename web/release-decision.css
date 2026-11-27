@@ -1,0 +1,60 @@
+.release-decision { display: grid; gap: 1rem; }
+.release-decision :is(.page-head, .paper) { margin-block: 0; }
+.decision-filters {
+  display: flex;
+  align-items: end;
+  flex-wrap: wrap;
+  gap: .75rem 1rem;
+}
+.decision-filters label { display: grid; gap: .35rem; min-width: 0; max-width: 100%; }
+.decision-filters select { max-width: 100%; }
+.decision-hero { align-items: start; }
+.decision-hero h2 { margin: .55rem 0; }
+.decision-next { display: grid; justify-items: start; gap: .6rem; }
+.decision-next :is(h3, p) { margin: 0; }
+.decision-next a { display: inline-flex; align-items: center; gap: .3rem; }
+.decision-values {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 1rem 1.4rem;
+  font-variant-numeric: tabular-nums;
+}
+.decision-values div { display: grid; gap: .25rem; }
+.decision-values strong { font-size: clamp(1.55rem, 3vw, 2.65rem); line-height: 1; }
+.decision-values :is(small, div > span), .decision-issues small { color: var(--muted); }
+.decision-change { font-size: 1.15rem; font-weight: 700; }
+.decision-change[data-negative='true'] { color: var(--accent-text); }
+.decision-evidence, .decision-chat-grid { display: grid; gap: 1rem; align-items: start; }
+.decision-evidence { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.decision-chat-grid { grid-template-columns: minmax(260px, .8fr) minmax(0, 1.2fr); }
+.decision-evidence h2 { font-size: 1.05rem; }
+.decision-evidence blockquote {
+  margin: 1rem 0;
+  border-inline-start: 2px solid currentColor;
+  padding-inline-start: .8rem;
+  font-size: 1.08rem;
+}
+.decision-source { display: inline-block; font-size: .83rem; overflow-wrap: anywhere; }
+.decision-prices { display: flex; flex-wrap: wrap; gap: .5rem 1rem; }
+.decision-prices dd { margin: .3rem 0 0; font-weight: 700; }
+.decision-weeks, .decision-issues { list-style: none; padding: 0; }
+.decision-weeks li, .decision-issues li {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: .3rem 1rem;
+  padding-block: .45rem;
+  border-block-start: 1px solid var(--line);
+}
+.decision-issues small { display: block; }
+.decision-chat { scroll-margin-block-start: 1rem; }
+.decision-chat-grid .tracker-preview { overflow-wrap: anywhere; }
+@media (max-width: 1050px) {
+  .decision-evidence { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .decision-chat-grid { grid-template-columns: minmax(0, 1fr); }
+}
+@media (max-width: 700px) {
+  .decision-evidence { grid-template-columns: minmax(0, 1fr); }
+}

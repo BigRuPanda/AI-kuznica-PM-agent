@@ -53,6 +53,20 @@ async function request(send, url, options = {}) {
   }
   return res.status === 204 ? {} : await res.json();
 }
+export async function probeMetrika(env = process.env, send = fetch) {
+  const ids = required(env, 'METRIKA_COUNTER_IDS');
+  if (!/^\d+(,\d+)*$/.test(ids)) throw Error('Проверьте METRIKA_COUNTER_IDS');
+  const counter = ids.split(',')[0];
+  const query = new URLSearchParams({
+    ids: counter, dimensions: 'ym:s:date', metrics: 'ym:s:visits',
+    date1: '7daysAgo', date2: 'yesterday', limit: '1',
+  });
+  const url = 'https://api-metrika.yandex.net/stat/v1/data?' + query;
+  const report = await request(send, url, { headers: { Authorization: 'OAuth ' + required(env, 'METRIKA_TOKEN') } });
+  if (!Array.isArray(report?.data) || !Number.isSafeInteger(report.total_rows) || report.total_rows < 0)
+    throw Error('Метрика вернула неполный ответ');
+  return { at: Date.now(), status: 'ready' };
+}
 export async function metrika(env = process.env, send = fetch) {
   const ids = required(env, 'METRIKA_COUNTER_IDS'),
     token = required(env, 'METRIKA_TOKEN');

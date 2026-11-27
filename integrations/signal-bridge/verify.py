@@ -27,7 +27,7 @@ class Checks(unittest.TestCase):
     def setUp(self):
         self.enterContext(patch.object(bridge,'STATE',Path(self.enterContext(tempfile.TemporaryDirectory()))))
         self.config={'REDMINE_URL':'http://localhost:3000','REDMINE_PROJECT':'demo',
-                     'TELEGRAM_BOT_TOKEN':'123:test','TELEGRAM_CHAT_ID':'44'}
+                     'TELEGRAM_BOT_TOKEN':'123:test','TELEGRAM_CHAT_ID':'44','REDMINE_REQUIRE_AI_FLAG':'true'}
         get=lambda k,default='':self.config.get(k,default)
         for mod in (bridge,svc):
             self.enterContext(patch.object(mod,'setting',side_effect=get))
@@ -37,10 +37,16 @@ class Checks(unittest.TestCase):
         self.enterContext(patch.object(svc,'project',return_value=2))
         self.issue={'id':11,'project':{'id':2},'subject':'Проверка','status':{'id':1,'name':'Open'},'updated_on':'2026-11-26'}
         self.posts=[]
+        self.flags=[{'id':3,'name':'сгенерирована ИИ-помощником'}]
         def redmine(path,data=None,method=None):
+            if path=='projects/2.json?include=issue_custom_fields':
+                return {'project':{'issue_custom_fields':self.flags}}
             if path=='issues.json' and data:
+                expected=[{'id':3,'value':'1'}] if self.flags else []
+                self.assertEqual(data['issue'].get('custom_fields',[]),expected)
                 self.posts.append(data)
                 self.issue['description']=data['issue']['description']
+                self.issue['custom_fields']=expected
                 return {'issue':self.issue}
             if path.startswith('issues.json?'):
                 return {'issues':[self.issue],'total_count':1}
@@ -53,6 +59,14 @@ class Checks(unittest.TestCase):
         bridge.init()
         self.report=bridge.refresh_report()
         self.p=dict(reference='SIG-8',title='Проверка',description='Проверить период',report_id=self.report['id'],confirmed=True)
+
+    def test_flag_is_required_only_by_the_protected_profile(self):
+        self.flags.clear()
+        with self.assertRaisesRegex(ValueError, 'поле-флаг'):
+            bridge.create_task(self.p)
+        self.assertEqual(self.posts, [])
+        self.config.pop('REDMINE_REQUIRE_AI_FLAG')
+        self.assertEqual(bridge.create_task(self.p)['redmine_id'], 11)
 
     def test_task_without_report_does_not_attach_the_latest(self):
         with patch.object(bridge, 'get_report', side_effect=AssertionError('Unexpected report lookup')):

@@ -8,7 +8,7 @@ from urllib.parse import urlsplit, unquote, parse_qs
 
 import bridge
 from config import setting
-from providers import ServiceError
+from providers import ServiceError, project_issues
 
 
 def record_job(name, func):
@@ -77,6 +77,9 @@ class Handler(BaseHTTPRequestHandler):
                     'telegram':bool(setting('TELEGRAM_BOT_TOKEN') and setting('TELEGRAM_CHAT_ID'))})
             elif path=='/reports/latest': result = bridge.get_report()
             elif path=='/issue-options': result = bridge.issue_options()
+            elif path=='/project-issues':
+                queries = parse_qs(urlsplit(self.path).query).get('query', [])
+                result = {'items': project_issues(queries)}
             elif path.startswith('/tasks/') and path.endswith('/details'):
                 result = bridge.issue_details(unquote(path[7:-8]))
             elif path.startswith('/reports/'): result = bridge.get_report(path[9:])

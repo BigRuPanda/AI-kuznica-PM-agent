@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { evaluationCase } from '../scripts/eval-agent.mjs';
 import { openStore } from '../server/store.mjs';
-import { initEvidence, importDocs } from '../server/evidence.mjs';
+import { initEvidence, importDocs, setSetting } from '../server/evidence.mjs';
 import { initWorkbench, createThread, enqueue, workJobs, messages, resumeJob } from '../server/workbench.mjs';
 import { workspaceOperation } from '../server/workspace-operations.mjs';
 import { materialForResult, readMaterial, telegramParts } from '../server/materials.mjs';
@@ -56,6 +56,106 @@ test('exact weekly questions reference the recorded value or report the availabl
     assert.match(missing.text, /нет строки за неделю с 2026-02-09/);
     assert.match(missing.text, /последняя — 2026-02-02/);
     assert.deepEqual(missing.readSources, []);
+  } finally {
+    s.close();
+  }
+});
+test('an explicit release observation uses the exact archived series and cutoff without a model', async () => {
+  const s = open();
+  try {
+    const row = (kind, loc, data) => ({ kind, loc, row: data });
+    const metric = 'cfg_orion_views';
+    const samples = (from, count, segment, value) => Array.from({ length: count }, (_, i) => row(
+      'metrics', (segment === 'desktop' ? 'Desktop' : 'Mobile') + '!A' + (from + i), {
+        product: 'Orion', metric_id: metric, segment, unit: 'visits',
+        date: '2026-05-' + String(from + i).padStart(2, '0'), value,
+      },
+    ));
+    importDocs(s, [{ file: 'Archive.xlsx', facts: [
+      row('dictionary', 'Dictionary!A2', { metric_id: metric, metric_name: 'Доля открывших конфигуратор' }),
+      row('dictionary', 'Dictionary!A3', { metric_id: 'cfg_orion_open', metric_name: 'Открытия конфигуратора' }),
+      row('backlog', 'Tasks!A2', { task_id: 'T-41', title: 'Orion', release_id: 'R-63',
+        linked_metric_ids: metric + ',cfg_orion_open', created_date: '2026-04-22' }),
+      row('backlog', 'Tasks!A3', { task_id: 'T-42', title: 'Orion', release_id: 'R-63',
+        linked_metric_ids: metric, created_date: '2026-05-20' }),
+      row('releases', 'Releases!A2', { release_id: 'R-63', description: 'Orion',
+        release_date: '2026-05-12', status: 'выпущен', release_type: 'minor',
+        related_task_ids: 'T-41,T-42', affected_metrics: metric }),
+      ...samples(5, 7, 'desktop', 4), ...samples(13, 7, 'desktop', 10),
+      ...samples(5, 7, 'mobile', 40), ...samples(13, 7, 'mobile', 5),
+    ] }], { notify: false });
+    s.db.prepare("INSERT INTO cases VALUES('orion','Orion','Orion','Исследуем','{}')").run();
+    setSetting(s.db, 'metrika_probe', { at: Date.UTC(2026, 10, 27, 12), status: 'ready' });
+    const thread = createThread(s.db, user, 'Эффект Orion');
+    const env = { ...api, SOURCE_ARCHIVE_SHA256: 'archive' };
+    let calls = 0;
+    const ask = async (question, caseId) => {
+      enqueue(s, user, { thread, question, caseId });
+      await workJobs(s, { publicUser: () => user }, env, async () => {
+        calls++;
+        return say('Ответ для другого поручения.');
+      });
+      return messages(s.db, user, thread).items.at(-1).body;
+    };
+    const limited = await ask('Разбери R-63 для Orion по данным на 14.05.2026. Какая задача связана и как изменился cfg_orion_views на desktop по двум окнам по 1 неделе? Проверь живые данные Метрики магазина. Не создавай задачу.');
+    assert.deepEqual(limited.steps, ['watch-options', 'effect-preview']);
+    assert.equal(limited.caseId, 'orion');
+    assert.match(limited.text, /R-63 вышел 2026-05-12/);
+    assert.match(limited.text, /T-41/);
+    assert.doesNotMatch(limited.text, /T-42|Наблюдаемое изменение/);
+    assert.match(limited.text, /2026-05-05 – 2026-05-11 · 7\/7 дней.*28 \/ 7 ≈ 4 визитов\/день/);
+    assert.match(limited.text, /2026-05-13 – 2026-05-19 · 2\/7 дней.*2026-05-15 – 2026-05-19/);
+    assert.match(limited.text, /рабочего счётчика.{0,50}недоступны/);
+    assert.match(limited.text, /Reports API ответил на проверку тестового счётчика 2026-11-27/);
+    const citations = limited.readSources.map(x => x.label);
+    for (const loc of ['Releases!A2', 'Tasks!A2', 'Dictionary!A2', 'Desktop!A13', 'Desktop!A14'])
+      assert.ok(citations.includes('Archive.xlsx · ' + loc));
+    assert.ok(citations.every(s => !/Mobile!|Desktop!A(?:15|16|17|18|19)/u.test(s)));
+    const plainLanguage = await ask('На 14 мая 2026 года проверь эффект R-63 для Orion. Можно ли сравнить долю визитов с открытием конфигуратора на десктопе по двум однонедельным окнам? Можно ли тем же объяснить падение самостоятельных заказов?');
+    assert.match(plainLanguage.text, /Срез на 2026-05-14 · Доля открывших конфигуратор \(cfg_orion_views\) · desktop/);
+    assert.match(plainLanguage.text, /2\/7 дней/);
+    assert.match(plainLanguage.text, /нельзя установить причину изменения индекса самостоятельных заказов/);
+
+    const missing = await ask('На 2026-05-19 проверь эффект r–63 на T‑41 по cfg_orion_views, одну неделю до и после.', 'orion');
+    assert.match(missing.text, /Какой разрез выбрать\?.*desktop, mobile/);
+    const clarified = await ask('Для mobile.', 'orion');
+    assert.match(clarified.text, /Наблюдаемое изменение · -35 визитов в день/);
+    assert.match(clarified.text, /cfg_orion_views\) · mobile/);
+    assert.ok(clarified.readSources.every(s => !/Desktop!/u.test(s.label)));
+    const absent = await ask('Каким был эффект R-63 на 2026-05-14 по cfg_unknown и desktop за 1 неделю до и после?', 'orion');
+    assert.match(absent.text, /нет доступного ряда cfg_unknown/);
+    assert.doesNotMatch(absent.text, /7\/7 дней|Индекс самостоятельных заказов/);
+    const byName = await ask('Доля открывших конфигуратор.', 'orion');
+    assert.match(byName.text, /Срез на 2026-05-14 · Доля открывших конфигуратор/);
+    const missingDate = await ask('Оцени эффект R-63 по cfg_orion_views desktop за 1 неделю до и после', 'orion');
+    assert.match(missingDate.text, /На какую дату среза/);
+    const missingBaseline = await ask('Срез на 14.05.2026. Оцени эффект R-63 по cfg_orion_views desktop за 1 неделю после релиза.', 'orion');
+    assert.match(missingBaseline.text, /Сколько недель взять до релиза и сколько после/);
+    assert.equal(calls, 0);
+    assert.deepEqual(JSON.parse(s.db.prepare("SELECT body FROM cases WHERE id='orion'").get().body), {});
+    assert.equal(s.db.prepare('SELECT count(*) AS n FROM draft_actions').get().n, 0);
+    const mixed = await ask('Сравни R-63 по cfg_orion_views desktop на 2026-05-14, 1 неделя до и после. Построй график.', 'orion');
+    assert.ok(calls > 0);
+    assert.notEqual(mixed.mode, 'release-observation');
+  } finally {
+    s.close();
+  }
+});
+test('the workspace reports a local model deadline and keeps the turn resumable after a single request', async () => {
+  const s = open();
+  try {
+    const thread = createThread(s.db, user, 'Таймаут модели');
+    let calls = 0;
+    enqueue(s, user, { thread, question: 'Что такое статистическая значимость?' });
+    await workJobs(s, { publicUser: () => user }, api, async () => {
+      calls++;
+      throw new DOMException('deadline', 'TimeoutError');
+    });
+    const result = messages(s.db, user, thread).items.at(-1).body;
+    assert.equal(calls, 1);
+    assert.match(result.text, /Модель не успела ответить за 240 секунд/);
+    assert.doesNotMatch(result.text, /Модель недоступна|параметры \.env/);
+    assert.equal(result.canResume, true);
   } finally {
     s.close();
   }
