@@ -2027,6 +2027,15 @@ test('Softline workspace, upgrade and browser journeys', async t => {
     const viewRequest = (id, match=()=>true) => page.waitForResponse(r =>
       r.url().endsWith('/api/team/view') && r.ok() &&
       r.request().postDataJSON()?.caseId === id && match(r.request().postDataJSON()));
+    const completeAnswer = async response => {
+      const {id} = await response.json();
+      const status = store.db.prepare('SELECT status, result FROM jobs WHERE id=?');
+      while (status.get(id)?.status === 'queued')
+        await workJobs(store,app.accounts,{...fixtureEnv,DATA_PROFILE:'local'},transport);
+      const job = status.get(id);
+      assert.equal(job?.status,'done',job?.result);
+      return JSON.parse(job.result);
+    };
     const open = async (id, name) => {
       const [response] = await Promise.all([
         viewRequest(id),
@@ -2054,9 +2063,9 @@ test('Softline workspace, upgrade and browser journeys', async t => {
     await Promise.all([viewRequest(caseId,v => v.control === control), peer.selectOption(control)]);
     await role(card('trend'),'Закрепить').click();
     await field(page,'Вопрос агенту').fill(query);
-    await submit(page,'ask',()=>role(page,'Отправить').click());
+    const [sources] = await submit(page,'ask',()=>role(page,'Отправить').click());
     const filtered = viewRequest(caseId,v => v.sourceQuery === query);
-    await workJobs(store,app.accounts,{...fixtureEnv,DATA_PROFILE:'local'},transport);
+    await completeAnswer(sources);
     await filtered;
     await visible(card('evidence'));
     await role(card('evidence'),'Закрепить').click();
@@ -2148,6 +2157,36 @@ test('Softline workspace, upgrade and browser journeys', async t => {
       await page.unroute(viewUrl,delayEarlier);
     }
 
+    // The chat still answers against the submitted calculation while the personal view can change.
+    await field(page,'Вопрос агенту').fill('Сравни продажи Kaspersky');
+    const [sales] = await submit(page,'ask',()=>role(page,'Отправить').click());
+    const [manual] = await Promise.all([viewRequest(caseId,v => !v.full),full.uncheck()]);
+    const selection = {...expected,control:'Astra',full:false};
+    assert.deepEqual(fields(manual),selection);
+    const answer = await completeAnswer(sales);
+    assert.equal(answer.full,true,JSON.stringify(answer));
+    assert.deepEqual(answer.cards,['summary','trend']);
+    const reply = page.locator('.bubble.assistant').filter({hasText:answer.text.split('\n')[0]});
+    await visible(reply);
+    assert.equal(await full.isChecked(),false);
+    assert.equal(answer.sourceQuery,undefined);
+    const [afterSales] = await Promise.all([viewRequest(caseId),page.reload()]);
+    assert.deepEqual(fields(afterSales),selection);
+    await visible(role(card('evidence'),'Открепить'));
+    await visible(reply);
+
+    // An explicitly requested full-week calculation may still update the filter.
+    await field(page,'Вопрос агенту').fill('Сравни продажи только за полные недели');
+    const [onlyFull] = await submit(page,'ask',()=>role(page,'Отправить').click());
+    const explicitlyFiltered = viewRequest(caseId,v => v.full);
+    await completeAnswer(onlyFull);
+    assert.deepEqual(fields(await explicitlyFiltered),{...selection,full:true});
+
+    await role(page,'Сбросить вид').click();
+    const [reset] = await Promise.all([viewRequest(caseId),role(page.getByRole('dialog'),'Сбросить').click()]);
+    assert.deepEqual(fields(reset),initial);
+    assert.deepEqual(await cardOrder(),defaults);
+
     // Old records can omit newer fields. A later edit fills only its own field.
     await page.evaluate(key => localStorage.setItem(key,JSON.stringify({cards:['evidence','trend'],pinned:['trend']})),key);
     const [legacy] = await Promise.all([viewRequest(caseId),page.reload()]);
@@ -2159,13 +2198,19 @@ test('Softline workspace, upgrade and browser journeys', async t => {
     await visible(role(card('trend'),'Открепить'));
     assert.deepEqual(await cardOrder(),['evidence','trend']);
 
-    await role(page,'Сбросить вид').click();
-    const [reset] = await Promise.all([viewRequest(caseId),role(page.getByRole('dialog'),'Сбросить').click()]);
-    assert.deepEqual(fields(reset),initial);
-    assert.deepEqual(await cardOrder(),defaults);
-    await page.evaluate(key => localStorage.setItem(key,'{broken'),key);
-    const [corrupt] = await Promise.all([viewRequest(caseId),page.reload()]);
+    await page.evaluate(key => {
+      localStorage.setItem(key,'{broken');
+      localStorage.setItem(key+'/period',JSON.stringify({from:'2026-02-30',through:20261001}));
+      localStorage.setItem(key+'/metric-series',JSON.stringify({ctr:{product:'Kaspersky'},reach:'obsolete'}));
+    },key);
+    const [corrupt] = await Promise.all([
+      page.waitForResponse(r => r.url().endsWith('/api/team/view') && r.request().postDataJSON()?.caseId === caseId),
+      page.reload(),
+    ]);
+    assert.ok(corrupt.ok(),await corrupt.text());
     assert.deepEqual(fields(corrupt),initial);
+    const {from,through,ratioSelections} = corrupt.request().postDataJSON();
+    assert.deepEqual({from,through,ratioSelections},{from:undefined,through:undefined,ratioSelections:{}});
     await visible(card('summary'));
     assert.deepEqual(await cardOrder(),defaults);
   });

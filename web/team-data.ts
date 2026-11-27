@@ -258,6 +258,7 @@ export type Msg = {
     rounds?: number;
     steps?: string[];
     full?: boolean;
+    fullWeeksFilter?: boolean;
     sourceQuery?: string;
     cards?: string[];
     warning?: string;

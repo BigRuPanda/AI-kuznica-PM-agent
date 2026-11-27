@@ -388,6 +388,11 @@ function modelHistory(history, includeFacts) {
   });
 }
 
+function asksForFullWeeks(question) {
+  return /(?:^|[^а-яё])полн(?:ые|ых|ым|ыми)\s+недел/iu.test(question) ||
+    /(?:исключ[а-яё]*|без)\s+(?:неполн[а-яё]*\s+недел|последн[а-яё]*(?:\s+(?:неполн[а-яё]*\s+)?недел|\s*[.!?…]*$))/iu.test(question);
+}
+
 function fallbackPlan(question, products, context) {
   const q = question
     .toLowerCase()
@@ -434,7 +439,7 @@ function fallbackPlan(question, products, context) {
   return {
     product,
     cards,
-    full: /исключ|полны[ех]|без последн/.test(q) || Boolean(context.full),
+    full: asksForFullWeeks(question) || Boolean(context.full),
     query: question,
   };
 }
@@ -723,6 +728,7 @@ async function answerTurn(store, user, b, env, send, job, history, intent) {
       plan = { product: context.product, full: context.full, cards: ['timeline', 'evidence'], query: b.question };
     if (plan.text) return { text: plan.text, mode: 'local', warning };
   }
+  const sourceQuery = plan.cards.includes('evidence') ? plan.query : undefined;
   const view =
     b.screen?.calc && !b.analysisPeriod && plan.product === context.product && plan.full === b.screen.full
       ? { ...readSnapshot(db, user, b.screen.calc), id: b.screen.calc }
@@ -732,7 +738,7 @@ async function answerTurn(store, user, b, env, send, job, history, intent) {
           full: plan.full,
           ...(b.analysisPeriod || b.screen?.requested),
           control: b.control ?? b.screen?.control,
-          sourceQuery: plan.cards.includes('evidence') ? plan.query : '',
+          sourceQuery,
         });
   grant(db, view.id, 'thread', b.thread);
   const lines = factsForCards(view, plan.cards, view.backlog || []);
@@ -743,9 +749,10 @@ async function answerTurn(store, user, b, env, send, job, history, intent) {
     warning,
     product: view.product,
     full: view.full,
+    fullWeeksFilter: asksForFullWeeks(b.question) ? view.full : undefined,
     calc: view.id,
     cards: plan.cards,
-    sourceQuery: plan.cards.includes('evidence') ? plan.query : '',
+    sourceQuery,
     mode: model ? 'llm' : 'calculation',
     caseId: b.caseId,
   };

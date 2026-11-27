@@ -25,12 +25,12 @@ import { flushSync } from 'react-dom';
 import { ChatScenarioMenu } from './chat-scenario-menu';
 import { loadScenarioDraft, selectScenario, serializeScenarioDraft } from './chat-scenarios';
 import { post, jump, num } from './team-data';
-import type { Home, User, Case, Detail, View, Msg, Thread, InvestigationRun, RatioSelections } from './team-data';
+import type { Home, User, Case, Detail, View, Msg, Thread, InvestigationRun } from './team-data';
 import { describeMeasurement, MeasurementFields, measurementPayload, metricName, WatchSummary } from './measurement';
 import { AgreedMeasurement, InvestigationMeasurement } from './investigation-measurement';
 import { EffectPlan } from './effect-plan';
 import { Cards, initialCards, labels } from './work-cards';
-import { patchCaseView, readCaseView, readCaseViewObject } from './case-view-preferences';
+import { patchCaseView, readCasePeriod, readCaseRatioSelections, readCaseView } from './case-view-preferences';
 import type { CaseViewPreferences } from './case-view-preferences';
 import { InterviewSearch } from './interview-search';
 import { Icon } from './icons';
@@ -1152,8 +1152,8 @@ function Investigation({
   const prefix = 'pm-view/' + home.user.id + '/' + id;
   const [viewState, setViewState] = useState(() => ({
     preferences: readCaseView(prefix),
-    period: readCaseViewObject<{from: string; through: string}>(prefix + '/period') || {},
-    ratioSelections: readCaseViewObject<RatioSelections>(prefix + '/metric-series') || {},
+    period: readCasePeriod(prefix + '/period'),
+    ratioSelections: readCaseRatioSelections(prefix + '/metric-series'),
     inputsVersion: 0,
   }));
   const currentView = useRef(viewState);
@@ -1250,7 +1250,7 @@ function Investigation({
         const pinned = currentView.current.preferences?.pinned || [];
         updatePreferences({
           cards: [...new Set([...pinned, ...m.cards])],
-          ...(m.full !== undefined ? { full: m.full } : {}),
+          ...(m.fullWeeksFilter !== undefined ? { full: m.fullWeeksFilter } : {}),
           ...(m.sourceQuery !== undefined ? { sourceQuery: m.sourceQuery } : {}),
         });
       }
