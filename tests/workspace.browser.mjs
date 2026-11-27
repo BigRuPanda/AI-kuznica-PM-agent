@@ -811,8 +811,29 @@ test('Softline workspace, upgrade and browser journeys', async t => {
       const groupDraft = await input(member).inputValue();
       assert.ok(groupDraft.startsWith('Сравни целевую метрику') && groupDraft.endsWith(attached));
       await visible(member.locator('.chat-composer .range-attachment'));
+      // Both users must share the same tab storage for this to test account isolation.
+      async function switchAccount(user) {
+        await role(admin, 'Выйти').click();
+        await field(admin, 'Логин').fill('fixture-' + user);
+        await field(admin, 'Пароль').fill('fixture-password');
+        await role(admin, 'Войти').click();
+        await visible(admin.locator('.session-role'));
+        await go(admin, 'chats/group');
+        await visible(input(admin));
+      }
       await go(admin, 'chats/group');
-      assert.notEqual(await input(admin).inputValue(), groupDraft);
+      await input(admin).fill('Уточнение администратора');
+      await choose(admin, 1);
+      const adminDraft = await input(admin).inputValue();
+      await switchAccount('member');
+      assert.equal(await input(admin).inputValue(), '');
+      await input(admin).fill('Уточнение участника');
+      await switchAccount('admin');
+      assert.equal(await input(admin).inputValue(), adminDraft);
+      await choose(admin, 2);
+      assert.deepEqual((await input(admin).inputValue()).split('\n\n').slice(1), ['Уточнение администратора']);
+      await switchAccount('member');
+      assert.equal(await input(admin).inputValue(), 'Уточнение участника');
       assert.equal(requests.length, 1);
       await submit(member, 'ask', () => role(member, 'Спросить помощника').click());
       assert.equal(requests.length, 2);
