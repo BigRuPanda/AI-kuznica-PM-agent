@@ -2,7 +2,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { openStore } from '../server/store.mjs';
 import { analysisView, initEvidence, importDocs } from '../server/evidence.mjs';
-import { grant } from '../server/chart-ranges.mjs';
+import { grant, readSnapshot } from '../server/chart-ranges.mjs';
+import { readMaterial } from '../server/materials.mjs';
 import { answer, initWorkbench, createThread, enqueue, workJobs, messages } from '../server/workbench.mjs';
 import { webQuestion } from '../server/web-search.mjs';
 import { competitorQuestion } from '../server/competitor-chat.mjs';
@@ -251,4 +252,39 @@ test('carousel chat on a saved screen admits only the selected metric versions a
       metricVersions:view.metricVersions,decision}}, {},()=>assert.fail('Expected a local archive answer'));
   assert.match(frozen.text,/14 → 28/u);
   assert.ok(frozen.readSources.some(s=>s.url.includes(view.metricVersions[0]) && s.label.includes('Clicks!')));
+});
+
+test('released-decision chart preparation applies the signed cutoff before saving source rows', async t => {
+  const store=openStore(':memory:',{seedDemo:false});
+  t.after(()=>store.close());
+  initEvidence(store.db);
+  initWorkbench(store.db);
+  const facts=[['2026-04-27',45],['2026-05-04',35],['2026-05-11',999],['2026-05-18',1234]].map(([week,value],i)=>({
+    kind:'sales',loc:'Sales!A'+(i+2),row:{product_family:'Astra OS',week_start:week,orders_index:value},
+  }));
+  importDocs(store,[{file:'weekly-release.xlsx',facts}],{notify:false});
+  const salesVersion=store.db.prepare("SELECT version FROM facts WHERE kind='sales' LIMIT 1").get().version;
+  const thread=createThread(store.db,user,'Разбор релиза');
+  const through='2026-05-10';
+  const release={decisionReleaseId:'R-02',decisionThrough:through,releaseDecisionSnapshot:{
+    releaseId:'R-02',product:'Astra OS',through,salesVersions:[salesVersion],releaseVersions:[],metricVersions:[],
+  }};
+  const chart=async (scope,suffix='')=>{
+    const job='chart-fixture-'+(suffix || (scope.decisionThrough ? 'saved' : 'current'));
+    const reply=await answer(store,user,{thread,product:'Astra OS',...scope,
+      question:'Построй график индекса самостоятельных заказов'+suffix},{},()=>assert.fail('Expected a local chart'),job);
+    const prepared=JSON.parse(store.db.prepare('SELECT body FROM job_research WHERE job=?').get(job).body);
+    const material=readMaterial(store.db,user,(reply.chartMaterial || prepared.requestedChart).id);
+    return readSnapshot(store.db,user,material.plot.base.calcId);
+  };
+  const current=await chart({});
+  assert.ok(current.summary[0].rows.some(r=>r.value===1234));
+  const saved=await chart(release);
+  assert.equal(saved.cut,through);
+  assert.deepEqual(saved.summary[0].rows.map(r=>r.value),[45,35]);
+  const narrower=await chart(release,' по состоянию на 2026-05-03');
+  assert.equal(narrower.cut,'2026-05-03');
+  assert.deepEqual(narrower.summary[0].rows.map(r=>r.value),[45]);
+  importDocs(store,[{file:'weekly-release.xlsx',facts:facts.map(f=>({...f,row:{...f.row,orders_index:17}}))}],{notify:false});
+  await assert.rejects(chart(release),/нет подтверждённых версий/u);
 });

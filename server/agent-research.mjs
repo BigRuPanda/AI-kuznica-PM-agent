@@ -3,7 +3,7 @@ import { analysisView, digest, fmt, listSales, productFamily as family } from '.
 import { materialForResult, readMaterial, sourceSection } from './materials.mjs';
 import { DAY } from './import.mjs';
 import { chartFindings, chartObservations } from './chart-focus.mjs';
-import { aggregateMetric, normalizeObservation, observationKey } from './metric-observations.mjs';
+import { aggregateMetric, normalizeObservation, observationKey, observationWithin } from './metric-observations.mjs';
 
 const date = (ms) => new Date(ms).toISOString().slice(0, 10);
 const metrics = [
@@ -375,8 +375,10 @@ export function prepareResearch(store, user, b, history, job, intent = researchI
     funnelAvailable = false;
   if (intent.funnel && periods.length) {
     const frozen = frozenSources(db, view);
+    const boundary = b.decisionThrough && b.analysisPeriod;
     const rows = frozen.rows
       .filter((r) => metrics.some((m) => m[0] === r.metric_id) || r.metric_id === 'cfg_step_dropoff')
+      .filter((r) => !boundary || observationWithin(r,boundary.from,boundary.through))
       .filter((r) => !view.full || !r.partial && !/неполн/i.test(r.comment || ''))
       .map((r) => ({ ...r, details: JSON.parse(r.detail_json || '{}') }));
     const selectedSegment = /мобильн|телефон/i.test(b.question)
@@ -412,7 +414,8 @@ export function prepareResearch(store, user, b, history, job, intent = researchI
     checks.push('Проверен предшествующий период воронки');
     const end = Math.max(...periods.map((p) => p.to));
     const events = frozen.releases
-      .filter((e) => family(e.description) === family(product) && e.release_date <= date(end - 1))
+      .filter((e) => family(e.description) === family(product) && e.release_date <= date(end - 1) &&
+        (!boundary?.from || e.release_date>=boundary.from))
       .sort((a, b) => b.release_date.localeCompare(a.release_date))
       .slice(0, 8);
     if (events.length)

@@ -1,6 +1,8 @@
 import {archiveInquiry,archiveEvidence} from './archive-search.mjs';
 import { z } from 'zod/v4';
 import { providerCall } from './agent.mjs';
+import { checkReleaseReferencePeriod, checkReleaseSourceVersions } from './release-chat-scope.mjs';
+import { observationWithin } from './metric-observations.mjs';
 import { operations, writes, workspaceOperation } from './workspace-operations.mjs';
 import { access, readRange, readSnapshot, grant } from './chart-ranges.mjs';
 import { digest } from './evidence.mjs';
@@ -558,6 +560,19 @@ export async function runAssistant(
           if (scope.through && (!args.through || args.through > scope.through)) args.through = scope.through;
           args.full ??= b.screen?.full;
         }
+        if (releaseSnapshot) {
+          if (op==='chart' && args.releaseId) throw Error('Для выбранного среза укажите архивный показатель и разрез.');
+          if (op==='effect-preview') {
+            args.asOf = [args.asOf,scope.through].filter(Boolean).sort()[0];
+            checkReleaseSourceVersions(db,releaseSnapshot,args.asOf);
+          }
+          const calcId = op==='calc' ? args.id : op==='chart' ? args.calc : undefined;
+          if (calcId) checkReleaseReferencePeriod(readSnapshot(db,user,calcId),scope);
+          if (['range_read','selection_context'].includes(op) && (args.id || state.rangeIds.at(-1)))
+            checkReleaseReferencePeriod(readRange(db,user,args.id || state.rangeIds.at(-1)),scope);
+          if (['view','chart','funnel'].includes(op) && !calcId)
+            checkReleaseSourceVersions(db,releaseSnapshot,scope.through);
+        }
         if (scope?.through && op === 'search') args.asOf = scope.through;
         if (scope && op === 'source_value' && (
           (scope.from && args.date < scope.from) || (scope.through && args.date > scope.through)
@@ -566,11 +581,20 @@ export async function runAssistant(
           args.releaseId ||= b.decisionReleaseId;
           args.product ||= b.product;
           if (scope?.through && (!args.through || args.through > scope.through)) args.through = scope.through;
+          if (releaseSnapshot) {
+            if (args.releaseId !== releaseSnapshot.releaseId || args.product && args.product !== releaseSnapshot.product)
+              throw Error('Этот запрос относится к другому релизу или семейству.');
+            if (!releaseSnapshot.decision || args.through!==releaseSnapshot.through)
+              checkReleaseSourceVersions(db,releaseSnapshot,args.through);
+          }
         }
         if (op === 'funnel') {
           args.thread = b.thread;
           args.rangeId ||= state.anchorId;
-          args.calc ||= b.screen?.calc;
+          args.calc ||= b.screen?.calc || (releaseSnapshot && research?.contextCalc) || undefined;
+          if (releaseSnapshot && !args.calc && !args.rangeId)
+            throw Error('Для расчёта воронки нужен сохранённый срез релиза.');
+          if (releaseSnapshot && args.calc) checkReleaseReferencePeriod(readSnapshot(db,user,args.calc),scope);
           args.product ||= state.product;
         }
         if (!args.caseId && operations[op][1].caseId && state.caseId) args.caseId = state.caseId;
@@ -706,7 +730,10 @@ export async function runAssistant(
               };
               r = r.filter(row=>{
                 const kind = op==='search' ? row.kind : ['orders_index','family_orders_idx'].includes(row.metric) ? 'sales' : 'metrics';
-                return !versions[kind] || versions[kind].includes(row.version);
+                if (versions[kind] && !versions[kind].includes(row.version)) return false;
+                const date = row.date || row.data?.date || row.data?.week_start || row.data?.release_date || row.data?.created_date;
+                const step = kind==='sales' ? 7 : row.stepDays || row.data?.step_days || 1;
+                return !date || observationWithin({date,step_days:step},scope.from,scope.through);
               });
             }
             if (matches)

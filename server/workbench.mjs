@@ -2,6 +2,7 @@ import { externalAnswer } from './source-chat.mjs';
 import { archiveEvidence, archiveInquiry, archiveAnswer, archiveIdStatus, asksArchiveTask } from './archive-search.mjs';
 import { briefConversation, caseBrief, caseBriefKind } from './chat-brief.mjs';
 import { weeklySourceAnswer } from './weekly-source-chat.mjs';
+import { checkReleaseReferencePeriod, checkReleaseSourceVersions } from './release-chat-scope.mjs';
 import { initRanges, access, grant, compareRanges, readRange, readSnapshot } from './chart-ranges.mjs';
 import { randomUUID } from 'node:crypto';
 import {
@@ -642,7 +643,7 @@ export async function answer(store, user, b, env = process.env, send = fetch, jo
   let focus;
   if (!b.rangeId && b.materialIds?.length === 1) {
     if (readMaterial(db, user, b.materialIds[0], shared).plot) focus = { id: b.materialIds[0] };
-  } else if (!b.rangeId && !screenRequest(b.question) && !newTopic(b.question)) {
+  } else if (!b.decisionThrough && !b.rangeId && !screenRequest(b.question) && !newTopic(b.question)) {
     focus = resolveChartFocus(db, user, b, shared);
   }
   if (focus?.choices)
@@ -653,22 +654,29 @@ export async function answer(store, user, b, env = process.env, send = fetch, jo
         'Какой график вы имеете в виду?\n' + focus.choices.map((c, i) => i + 1 + '. ' + c.label).join('\n'),
     };
   if (focus?.id) b = { ...b, materialIds: [focus.id], screen: undefined };
-  const decisionContext = {decisionReleaseId:b.decisionReleaseId,decisionThrough:b.decisionThrough};
-  const dialogue = recentDialogue(db, b.thread, b.questionSeq);
-  const history = b.decisionThrough ? dialogue.filter(({body})=>
-    body.decisionReleaseId===decisionContext.decisionReleaseId && body.decisionThrough===decisionContext.decisionThrough) : dialogue;
-  const last = history.at(-1)?.body;
-  const previous = last && (!b.caseId || last.caseId === b.caseId) &&
-    (!b.decisionReleaseId || last.decisionReleaseId === b.decisionReleaseId && last.decisionThrough === b.decisionThrough)
-    ? last : undefined;
   const selected = focus ? undefined : screen;
   const decisionSnapshot = b.decisionReleaseId && b.releaseDecisionSnapshot?.releaseId === b.decisionReleaseId
     ? b.releaseDecisionSnapshot : undefined;
-  const from = [b.analysisPeriod?.from,selected?.requested?.from || selected?.base].filter(Boolean).sort().at(-1);
-  const through = [b.analysisPeriod?.through,selected?.cut || selected?.requested?.through,
+  const requested = b.analysisPeriod || (decisionSnapshot && investigationPeriod(b.question,Date.now()));
+  const from = [requested?.from,selected?.requested?.from || selected?.base].filter(Boolean).sort().at(-1);
+  const through = [requested?.through,selected?.cut || selected?.requested?.through,
     decisionSnapshot?.through || b.decisionThrough].filter(Boolean).sort()[0];
+  const fixedPeriod = (decisionSnapshot || b.decisionThrough) && {from,through};
+  const decisionContext = {decisionReleaseId:b.decisionReleaseId,decisionThrough:fixedPeriod ? through : b.decisionThrough,
+    decisionScope:decisionSnapshot ? digest(JSON.stringify([decisionSnapshot,from])) : undefined};
+  const dialogue = recentDialogue(db,b.thread,b.questionSeq);
+  const history = fixedPeriod ? dialogue.filter(({body})=>body.decisionReleaseId===decisionContext.decisionReleaseId &&
+    body.decisionThrough===decisionContext.decisionThrough && body.decisionScope===decisionContext.decisionScope) : dialogue;
+  const last = history.at(-1)?.body;
+  const previous = last && (!b.caseId || last.caseId===b.caseId) && (!b.decisionReleaseId || last.decisionReleaseId===b.decisionReleaseId)
+    ? last : undefined;
   const archiveScope = { product:activeCase?.product || selected?.product || decisionSnapshot?.product || b.product,
     from,through,full:selected?.full,snapshot:selected || decisionSnapshot };
+  if (fixedPeriod) {
+    for (const ref of [range,...attachments].filter(Boolean)) checkReleaseReferencePeriod(ref,fixedPeriod);
+    const screenFits = selected && selected.cut===through && (!from || (selected.requested?.from || selected.base)===from);
+    b = {...b,analysisPeriod:fixedPeriod,screen:screenFits ? b.screen : undefined};
+  }
   const sourceQuestion = !focus && !b.rangeId && !b.materialIds?.length && !last?.rangeId;
   if (sourceQuestion) {
     if (from && through && from > through)
@@ -689,7 +697,8 @@ export async function answer(store, user, b, env = process.env, send = fetch, jo
     const { releaseObservationAnswer } = await import('./release-observation-chat.mjs');
     const release = releaseObservationAnswer(store,user,b,env,shared,previous ? [history.at(-1)] : [],archiveScope);
     if (release) return {...release,...decisionContext};
-    const weekly = weeklySourceAnswer(db,b.question,previous,{...archiveScope,snapshot:selected,versions:decisionSnapshot?.salesVersions});
+    const weekly = weeklySourceAnswer(db,b.question,previous,
+      {...archiveScope,snapshot:selected,versions:decisionSnapshot?.salesVersions});
     if (weekly) return {...weekly,caseId:b.caseId,...decisionContext};
     if (!b.decisionReleaseId && !b.analysisPeriod && env.LLM_DATA_MODE==='analysis') {
       const brief = await briefConversation(store,job,b.question,activeCase,env,send,history);
@@ -707,7 +716,7 @@ export async function answer(store, user, b, env = process.env, send = fetch, jo
   }
   if (b.analysisPeriod && selected)
     b = {...b,analysisPeriod:{from,through}};
-  if (b.analysisPeriod && !selected && !b.rangeId && !b.materialIds?.length) {
+  if (b.analysisPeriod && !fixedPeriod && !selected && !b.rangeId && !b.materialIds?.length) {
     const snap = analysisView(db, { product: b.product || screen?.product, caseId: b.caseId,
       full: b.screen?.full, control: b.screen?.control, ...b.analysisPeriod });
     grant(db, snap.id, 'thread', b.thread);
@@ -758,6 +767,8 @@ async function answerTurn(store, user, b, env, send, job, history, intent) {
     c = b.caseId ? visibleCase(db, user, b.caseId) : null;
   const analyticalModel = env.LLM_DATA_MODE === 'analysis' && apiConfigured(env);
   const fixedRelease = b.decisionThrough && b.releaseDecisionSnapshot;
+  if (fixedRelease && !b.screen?.calc && !b.rangeId && !b.materialIds?.length && (intent.chart || intent.report || intent.funnel))
+    checkReleaseSourceVersions(db,fixedRelease,b.analysisPeriod.through);
   const research =
     (analyticalModel && !fixedRelease) || intent.chart || intent.report || intent.funnel
       ? store.tx(() => prepareResearch(store, user, b, history, job, intent))
@@ -884,6 +895,7 @@ async function answerTurn(store, user, b, env, send, job, history, intent) {
       plan = { product: context.product, full: context.full, cards: ['timeline', 'evidence'], query: b.question };
     if (plan.text) return { text: plan.text, mode: 'local', warning };
   }
+  if (fixedRelease) checkReleaseSourceVersions(db,fixedRelease,b.analysisPeriod.through);
   const sourceQuery = plan.cards.includes('evidence') ? plan.query.slice(0, 400) : undefined;
   const view =
     b.screen?.calc && !b.analysisPeriod && plan.product === context.product && plan.full === b.screen.full
