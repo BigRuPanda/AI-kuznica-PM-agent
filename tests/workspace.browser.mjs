@@ -306,6 +306,8 @@ test('Softline workspace, upgrade and browser journeys', async t => {
       await admin.getByRole('link',{name:'← Разборы',exact:true}).click();
       await role(admin,'Новый разбор').click();
       assert.equal(await releaseSelect.inputValue(), '', 'У самостоятельного разбора релиз изначально не выбран');
+      await role(admin,'Новый разбор').click();
+      await releaseSelect.waitFor({state:'hidden'});
     } finally { await go(admin,'material/'+fixture.report); }
   });
 
