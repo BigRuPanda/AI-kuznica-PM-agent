@@ -8,6 +8,13 @@ export function readInvestigationLimit(teamDb) {
   return setting(teamDb, 'investigation_concurrency', 10);
 }
 
+export function saveInvestigationLimit(teamDb, user, limit) {
+  if (user.space !== 'team' || user.role !== 'admin') throw Error('Требуются права администратора команды.');
+  if (!Number.isSafeInteger(limit) || limit <= 0) throw Error('Введите целое положительное число.');
+  setSetting(teamDb,'investigation_concurrency',limit);
+  return limit;
+}
+
 function readModes(db, ownerId) {
   const team = setting(db, teamKey, 'roles');
   const personal = ownerId == null ? 'inherit' : setting(db, personalKey(ownerId), 'inherit');

@@ -45,7 +45,7 @@ import { access } from './chart-ranges.mjs';
 import { resumeJob } from './workbench.mjs';
 import { metricRuleStatus, saveMetricRule } from './metric-rules.mjs';
 import { createInvestigationScheduler } from './investigation-scheduler.mjs';
-import { readInvestigationLimit, researchSettings, saveResearchSettings } from './investigation-settings.mjs';
+import { readInvestigationLimit, saveInvestigationLimit, researchSettings, saveResearchSettings } from './investigation-settings.mjs';
 import { notificationChannels } from './data-profile.mjs';
 import {
   createAlternative, publishInvestigation, readInvestigations,
@@ -366,8 +366,15 @@ export function createTeamApp({
             .run(digest(code), user.id, Date.now() + 600000);
           return reply(200, { command: '/start ' + code });
         }
-        if (op === 'research-settings') return reply(200, researchSettings(db, user));
-        if (op === 'save-research-settings') return reply(200, saveResearchSettings(db, user, b));
+        if (op === 'research-settings' || op === 'save-research-settings') {
+          const modes = op === 'research-settings' ? researchSettings(db,user) : saveResearchSettings(db,user,b);
+          return reply(200,{...modes,maxConcurrentChecks:readInvestigationLimit(space('team').db)});
+        }
+        if (op === 'save-investigation-limit') {
+          const maxConcurrentChecks = saveInvestigationLimit(space('team').db,user,b.maxConcurrentChecks);
+          if (background) investigations.wake();
+          return reply(200,{maxConcurrentChecks});
+        }
         if (op === 'metric-rule-status') return reply(200, metricRuleStatus(db));
         if (op === 'metric-rules') {
           admin(user);

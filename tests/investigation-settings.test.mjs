@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createTeamApp } from '../server/team-http.mjs';
 import { initEvidence } from '../server/evidence.mjs';
-import { effectiveResearchMode, researchSettings, saveResearchSettings } from '../server/investigation-settings.mjs';
+import { effectiveResearchMode, researchSettings, saveResearchSettings, saveInvestigationLimit, readInvestigationLimit } from '../server/investigation-settings.mjs';
 
 const admin = { id: 'team-admin', role: 'admin' };
 const member = { id: 'product-manager', role: 'member' };
@@ -30,6 +30,22 @@ test('signal research uses team settings and personal assignments inherit until 
   assert.equal(effectiveResearchMode(db, admin.id), 'roles');
   assert.equal(effectiveResearchMode(db, null), 'roles');
   assert.equal(saveResearchSettings(db, member, { scope: 'personal', mode: 'inherit' }).effective, 'roles');
+});
+
+test('limit belongs to team admin and survives restart', async t => {
+  const dir=await mkdtemp(join(tmpdir(),'research-limit-'));
+  const path=join(dir,'team.sqlite');
+  let db=new DatabaseSync(path);
+  t.after(async()=>{db.close();await rm(dir,{recursive:true,force:true,maxRetries:3});});
+  initEvidence(db);
+  const user={...admin,space:'team'};
+  assert.equal(readInvestigationLimit(db),10);
+  assert.equal(saveInvestigationLimit(db,user,3),3);
+  for(const value of [null,'10',0,-1,1.5,Number.MAX_SAFE_INTEGER+1]) assert.throws(()=>saveInvestigationLimit(db,user,value));
+  for(const other of [{...user,role:'member'},{...user,role:'judge',space:'private'},{...user,space:'private'}])
+    assert.throws(()=>saveInvestigationLimit(db,other,1));
+  db.close(); db=new DatabaseSync(path);
+  assert.equal(readInvestigationLimit(db),3);
 });
 
 test('members can save only their own preference and invalid modes do not change settings', t => {
@@ -84,9 +100,11 @@ test('settings use the signed-in account and OAuth returns to personal connectio
   assert.equal(denied.status, 400);
   assert.match((await denied.json()).error, /администратора/);
   const save = await post('save-research-settings', { scope: 'personal', mode: 'review', ownerId: owner.user.id }, peer);
-  assert.deepEqual(await save.json(), { team: 'roles', personal: 'review', effective: 'review' });
+  assert.deepEqual(await save.json(), { team: 'roles', personal: 'review', effective: 'review', maxConcurrentChecks:10 });
+  assert.equal((await post('save-investigation-limit',{maxConcurrentChecks:3},peer)).status,400);
+  assert.deepEqual(await (await post('save-investigation-limit',{maxConcurrentChecks:3},owner)).json(),{maxConcurrentChecks:3});
   const ownerSettings = await post('research-settings', { ownerId: peer.user.id }, owner);
-  assert.deepEqual(await ownerSettings.json(), { team: 'roles', personal: 'inherit', effective: 'roles' });
+  assert.deepEqual(await ownerSettings.json(), { team: 'roles', personal: 'inherit', effective: 'roles', maxConcurrentChecks:3 });
 
   const config = { service: 'confluence', url: 'https://tenant.test', scope: 'TEAM', edition: 'cloud' };
   assert.equal((await post('integration-config', config, peer)).status, 400);

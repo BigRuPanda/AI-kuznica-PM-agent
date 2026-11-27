@@ -59,3 +59,20 @@ test('round robin spans workspaces and case alternatives',async t=>{
   assert.equal(new Set(x.starts.map(([id])=>id)).size,3);
   assert.equal(x.peak(),2);
 });
+
+test('a limit change affects admissions immediately',async t=>{
+  const x=setup(t,2);
+  for(let i=0;i<5;i++) x.add('team','case'+i);
+  x.scheduler.wake();
+  await until(()=>x.held.length===2);
+  x.limit(4);
+  await until(()=>x.held.length===4);
+  x.limit(1);
+  x.held.splice(0,3).forEach(g=>g.resolve());
+  await nextTurn(); await nextTurn();
+  assert.equal(x.starts.length,4);
+  x.held.shift().resolve();
+  await until(()=>x.starts.length===5);
+  assert.equal(x.held.length,1);
+  assert.equal(x.peak(),4);
+});

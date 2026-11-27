@@ -7,7 +7,35 @@ export const researchModes = {
   roles: 'По ролям',
 };
 type Mode = keyof typeof researchModes;
-type Settings = { team: Mode; personal: Mode | 'inherit'; effective: Mode };
+type Settings = { team: Mode; personal: Mode | 'inherit'; effective: Mode; maxConcurrentChecks: number };
+
+function InvestigationLimit({ limit, admin, onSave }: { limit: number; admin: boolean; onSave: (n: number) => void }) {
+  const [busy,setBusy] = useState(false);
+  const [message,setMessage] = useState('');
+  const [error,setError] = useState('');
+  const label = 'Максимум одновременных ИИ-проверок';
+  if (!admin) return <p>{label} · {limit}</p>;
+  return <form onSubmit={async event => {
+    event.preventDefault();
+    if (busy) return;
+    const input = event.currentTarget.elements.namedItem('limit') as HTMLInputElement;
+    setBusy(true); setError(''); setMessage('');
+    try {
+      const result = await post<{maxConcurrentChecks:number}>('save-investigation-limit',{maxConcurrentChecks:input.valueAsNumber});
+      onSave(result.maxConcurrentChecks);
+      setMessage('Лимит сохранён');
+    } catch (e) { setError((e as Error).message); }
+    finally { setBusy(false); }
+  }}>
+    <label>{label}
+      <input type="number" name="limit" min={1} max={Number.MAX_SAFE_INTEGER} step={1} required defaultValue={limit}
+        disabled={busy} onChange={() => { setMessage(''); setError(''); }} />
+    </label>
+    <button disabled={busy}>Сохранить лимит</button>
+    {message && <span role="status">{message}</span>}
+    {error && <span role="alert">{error}</span>}
+  </form>;
+}
 
 export function InvestigationSettings({ scope, admin }: { scope: 'team' | 'personal'; admin: boolean }) {
   const [settings, setSettings] = useState<Settings | null>(null);
@@ -56,5 +84,7 @@ export function InvestigationSettings({ scope, admin }: { scope: 'team' | 'perso
         <button disabled={saving}>Сохранить режим</button>
         {saved && <span role="status">Режим сохранён</span>}
       </form>)}
+    {team && settings && <InvestigationLimit limit={settings.maxConcurrentChecks} admin={admin}
+      onSave={n => setSettings(current => current && {...current,maxConcurrentChecks:n})} />}
   </section>;
 }
