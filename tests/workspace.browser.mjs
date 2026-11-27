@@ -374,6 +374,7 @@ test('release decisions preserve the historical cutoff, cited cells and manual i
   await field(page, 'Пароль').press('Enter');
   await page.getByRole('link', { name: 'Решение по релизу', exact: true }).click();
   await visible(page.getByRole('heading', { name: 'Решение по релизу' }));
+  const releaseSelect = field(page.locator('.decision-filters'), 'Релиз');
   await field(page, 'Семейство или раздел').selectOption('Kaspersky');
   await visible(page.getByText('«Неясно, какую лицензию выбрать»'));
   await page.getByRole('link', { name: /Интервью!L9/ }).click();
@@ -383,7 +384,7 @@ test('release decisions preserve the historical cutoff, cited cells and manual i
   await field(page, 'Дата среза').fill('2026-11-08');
   await role(page, 'Показать на дату').click();
   await visible(page.getByText('Исторический срез · 08.11.2026', { exact: true }));
-  assert.equal(await field(page, 'Релиз').locator('option[value="DEC-2"]').count(), 0);
+  assert.equal(await releaseSelect.locator('option[value="DEC-2"]').count(), 0);
   assert.equal(await page.getByText('«Неясно, какую лицензию выбрать»').count(), 0);
   await page.getByText('16 недель и исходные строки').click();
   await page.getByRole('link', { name: /Kaspersky!A20/ }).click();
@@ -392,18 +393,18 @@ test('release decisions preserve the historical cutoff, cited cells and manual i
   await visible(page.getByText('Исторический срез · 08.11.2026', { exact: true }));
   await field(page, 'Семейство или раздел').selectOption('Astra');
   await visible(page.getByRole('heading', { name: 'Astra', exact: true }));
-  await field(page, 'Релиз').selectOption('DEC-3');
+  await releaseSelect.selectOption('DEC-3');
   await visible(page.locator('.decision-hero').getByText('DEC-3 · 02.10.2026', { exact: true }));
-  assert.equal(await field(page, 'Релиз').inputValue(), 'DEC-3');
+  assert.equal(await releaseSelect.inputValue(), 'DEC-3');
   await role(page, 'Открыть чат разбора').click();
   await visible(page.getByText('История до создания связанного разбора', { exact: true }));
 
-  await field(page, 'Релиз').selectOption('MIX-1');
+  await releaseSelect.selectOption('MIX-1');
   await role(page, 'Открыть чат разбора').click();
   await visible(page.getByText('Частные выводы Astra', { exact: true }));
   assert.equal(await page.getByText('Частные выводы Kaspersky', { exact: true }).count(), 0);
   await field(page, 'Семейство или раздел').selectOption('Kaspersky');
-  await field(page, 'Релиз').selectOption('MIX-1');
+  await releaseSelect.selectOption('MIX-1');
   await role(page, 'Открыть чат разбора').click();
   await visible(page.getByText('Частные выводы Kaspersky', { exact: true }));
   assert.equal(await page.getByText('Частные выводы Astra', { exact: true }).count(), 0);
@@ -765,8 +766,7 @@ test('Softline workspace, upgrade and browser journeys', async t => {
 
   await journey('a new case started from the case list does not inherit a previous release', async () => {
     try {
-      await admin.getByRole('navigation').getByRole('link',{name:'Разборы',exact:true}).click();
-      await admin.getByRole('link',{name:'Журнал релизов →',exact:true}).click();
+      await admin.getByRole('navigation',{name:'Основные разделы'}).getByRole('link',{name:'Релизы',exact:true}).click();
       await admin.getByRole('link',{name:/DEMO-R/}).click();
       await role(admin,'Запланировать оценку').click();
       const releaseSelect = field(admin,'Связанный релиз');
@@ -951,7 +951,7 @@ test('Softline workspace, upgrade and browser journeys', async t => {
       const rows = admin.getByRole('navigation',{name:'Переписки'});
       const row = rows.locator('.thread-row').filter({has:admin.locator('[aria-current="page"]')});
       const title = row.locator('.thread-title');
-      assert.equal(await title.evaluate(el => getComputedStyle(el).textOverflow),'ellipsis');
+      assert.equal(await title.evaluate(el => getComputedStyle(el).whiteSpace),'normal');
       const menu = row.locator('.thread-menu-trigger');
       assert.equal(await menu.evaluate(el => getComputedStyle(el).pointerEvents),'none');
       await row.hover();
@@ -967,8 +967,7 @@ test('Softline workspace, upgrade and browser journeys', async t => {
       const width = admin.getByRole('separator',{name:'Ширина списка чатов'});
       await admin.mouse.move(10,10);
       await width.press('Home');
-      assert.ok(await title.evaluate(el => el.scrollWidth > el.clientWidth && getComputedStyle(el).whiteSpace === 'nowrap'));
-      assert.equal(await title.getAttribute('title'),await title.textContent());
+      assert.ok(await title.evaluate(el => el.scrollWidth <= el.clientWidth && el.getClientRects().length > 0));
       const before = Number(await width.getAttribute('aria-valuenow'));
       const edge = await width.boundingBox();
       const panel = await admin.locator('.threads-panel').boundingBox();
@@ -984,15 +983,13 @@ test('Softline workspace, upgrade and browser journeys', async t => {
       const chatBounds = await admin.locator('.standalone-chat').boundingBox();
       await row.hover();
       await row.locator('.thread-title').evaluate(el => el.getBoundingClientRect());
-      const expanded = await row.boundingBox();
-      assert.ok(expanded.x + expanded.width > chatBounds.x);
-      assert.equal(await title.evaluate(el => getComputedStyle(el).whiteSpace),'nowrap');
-      assert.equal(await title.evaluate(el => getComputedStyle(el).overflowX),'clip');
+      const rowBounds = await row.boundingBox();
+      assert.ok(rowBounds.x + rowBounds.width <= chatBounds.x);
       assert.equal(await title.evaluate(el => getComputedStyle(el).color),await menu.evaluate(el => getComputedStyle(el).color));
       assert.deepEqual(await admin.locator('.standalone-chat').boundingBox(),chatBounds);
       await row.getByRole('link').click();
       await admin.mouse.move(chatBounds.x + 100,chatBounds.y + 100);
-      await visible(rows.locator('.thread-row[data-expanded="false"]').filter({has:admin.locator('[aria-current="page"]')}));
+      await visible(row);
       assert.equal(await menu.evaluate(el => getComputedStyle(el).pointerEvents),'none');
       await row.hover();
       await menu.click();
@@ -1001,7 +998,7 @@ test('Softline workspace, upgrade and browser journeys', async t => {
       await admin.mouse.move(10,10);
       await admin.keyboard.press('Shift+Tab');
       assert.ok(await row.getByRole('link').evaluate(el => el === document.activeElement));
-      assert.ok((await row.boundingBox()).width > before);
+      assert.ok((await row.boundingBox()).width <= before);
       await width.press('ArrowRight');
       const persisted = Number(await width.getAttribute('aria-valuenow'));
       await role(admin,'Свернуть список чатов').click();
@@ -1075,7 +1072,7 @@ test('Softline workspace, upgrade and browser journeys', async t => {
       const touchMenu = touch.getByRole('button',{name:'Действия чата «Исходная переписка»'});
       await touchMenu.tap();
       await visible(touch.getByRole('menuitem',{name:'Переименовать'}));
-      assert.equal(await touchMenu.evaluate(el => el.closest('.thread-row').dataset.expanded),'false');
+      assert.equal(await touchMenu.evaluate(el => getComputedStyle(el.closest('.thread-row')).position),'static');
       await touch.keyboard.press('Escape');
       await touch.setViewportSize({width:390,height:844});
       await role(touch,'Развернуть список чатов').tap();
@@ -2502,7 +2499,7 @@ test('Softline workspace, upgrade and browser journeys', async t => {
     const cardOrder = () => page.locator('.case-main .analysis-card').evaluateAll(elements =>
       elements.map(element => [...element.classList].find(name => name.startsWith('card-')).slice(5)));
     const full = field(page,'Только полные недели');
-    const peer = field(page,'Контроль');
+    const peer = field(page,'Сравнить с');
     const controlOption = peer.getByRole('option',{name:control,exact:true});
     const sourceQuestion = 'Покажи источники о переносе лицензии' + ' и соответствующие детали'.repeat(18);
     const query = sourceQuestion.slice(0,400);
@@ -2516,6 +2513,13 @@ test('Softline workspace, upgrade and browser journeys', async t => {
     await open(caseId,title);
     assert.equal(await controlOption.count(),1);
     assert.ok(await controlOption.isEnabled());
+    const [withoutControl] = await Promise.all([
+      viewRequest(caseId,v => v.control === false), peer.selectOption({label:'Без сравнения'}),
+    ]);
+    assert.equal((await withoutControl.json()).view.summary.length,1);
+    await page.reload();
+    await visible(peer);
+    assert.equal(await peer.inputValue(),'');
     await Promise.all([viewRequest(caseId,v => v.control === control), peer.selectOption(control)]);
     assert.equal(await peer.inputValue(),control);
     await role(card('trend'),'Закрепить').click();

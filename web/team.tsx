@@ -873,7 +873,7 @@ function Chat({
           <textarea
             ref={box}
             id={'q' + id}
-            placeholder="Спросить помощника…"
+            placeholder="Ваш вопрос…"
             value={q}
             rows={1}
             onChange={(e) => editText(e.target.value)}
@@ -884,11 +884,15 @@ function Chat({
             }}
             required
           />
+          <button type="button" role="switch" aria-checked={webSearch} className="chat-web-search"
+            disabled={sending} onClick={() => setWebSearch(value => !value)}>
+            <span className="search-switch-track" aria-hidden="true" />
+            Поиск в интернете
+          </button>
           <button ref={send} type="submit" className="primary chat-send" aria-label={isGroup ? 'Спросить помощника' : 'Отправить'} title="Отправить (Enter)" disabled={sending || !q.trim()}>
             <Icon name="arrowUp" />
           </button>
         </div>
-        <label className="chat-web-search"><input type="checkbox" checked={webSearch} disabled={sending} onChange={e=>setWebSearch(e.target.checked)} /> Поиск в интернете</label>
         {isGroup && !attached && (
           <button type="submit" className="text-action team-send" value="message" disabled={sending || !q.trim()}>
             <Icon name="people" /> Написать команде
@@ -1029,7 +1033,7 @@ function ChatWorkspace({ home, id, avatar, action, refresh, onRename, onDelete }
   const activeMenuTrigger = useRef<HTMLButtonElement>(null);
   const renamedThread = useRef<string>(null);
   const { available, observe } = usePanelSpace();
-  const listWidth = usePanelSize('pm-chat-list-width', 228, 164,
+  const listWidth = usePanelSize('pm-chat-list-width', 280, 164,
     available ? Math.max(164, Math.min(368, Math.floor(available - 314))) : 368);
   const activeId = id || 'group';
   const term = query.trim().toLocaleLowerCase('ru');
@@ -1224,7 +1228,7 @@ function Investigation({
     const previous = currentView.current;
     const before = previous.preferences || {}, after = next.preferences || {};
     if (previous.period !== next.period || previous.ratioSelections !== next.ratioSelections ||
-      (before.full ?? false) !== (after.full ?? false) || (before.control || '') !== (after.control || '') ||
+      (before.full ?? false) !== (after.full ?? false) || (before.control ?? '') !== (after.control ?? '') ||
       (before.sourceQuery || '') !== (after.sourceQuery || '')) {
       // Ignore earlier results as soon as the inputs change, before the next effect runs.
       requestVersion.current++;
@@ -1246,7 +1250,8 @@ function Investigation({
     fail('');
     try {
       const v = await post<Detail>('view', {
-        caseId: id, full: preferences?.full ?? false, control: preferences?.control || undefined,
+        caseId: id, full: preferences?.full ?? false,
+        control: preferences?.control === '' ? undefined : preferences?.control,
         sourceQuery: preferences?.sourceQuery || '', ratioSelections, from: period.from, through: period.through,
       });
       if (version !== requestVersion.current) return;
@@ -1470,7 +1475,7 @@ function Investigation({
           {withdrawn && <p role="status">Сигнал отозван после пересчёта данных. Разбор и сохранённые выводы доступны для проверки.</p>}
           {!researchAvailable && signalDetails}
         </div>
-        {!researchAvailable && caseActions}
+        {caseActions}
       </div>
       <div className={'case-layout ' + (mobileChat && tid ? 'show-chat' : '')} ref={observe} data-discussion={!!tid} style={{
         '--discussion-width': discussionWidth.size + 'px',
@@ -1484,7 +1489,6 @@ function Investigation({
             next={!withdrawn && (showEffect || scheduleEffect) ? {
               label: showEffect ? 'Посмотреть результат проверки эффекта' : 'Назначить проверку эффекта', open: openNext,
             } : undefined} />}
-          {researchAvailable && caseActions}
           {tid && (
             <button className="mobile-toggle" aria-expanded={mobileChat} onClick={() => moveView(() => chatMode(!mobileChat))}>
               <Icon name="down" /> {mobileChat ? 'К разбору' : 'Обсудить'}
@@ -1525,9 +1529,11 @@ function Investigation({
               />{' '}
               Только полные недели
             </label>
-            {needsSalesContext && <label>
-              Контроль{' '}
-              <select value={peer || v.summary[1]?.product || ''} onChange={(e) => updatePreferences({ control: e.target.value })}>
+            {needsSalesContext && <label className="case-comparison">
+              Сравнить с{' '}
+              <select value={peer === false ? '' : peer || v.summary[1]?.product || ''}
+                onChange={(e) => updatePreferences({ control: e.target.value || false })}>
+                <option value="">Без сравнения</option>
                 {home.products
                   .filter((p) => p !== c.product)
                   .map((p) => (
@@ -1727,7 +1733,7 @@ function Investigation({
               action={action}
               context={ctx}
               attachment={attachment}
-              screen={{ calc: v.id, full, control: peer || v.summary[1]?.product, cards: caseCards }}
+              screen={{ calc: v.id, full, control: v.summary[1]?.product, cards: caseCards }}
               clearContext={() => {
                 ask('');
                 attach(undefined);
@@ -2250,6 +2256,7 @@ function Workspace({ user, onLogout, onUpdate }: { user: User; onLogout: () => v
   const tabs = [
     ['overview', 'Обзор'],
     ['chats', 'Чаты'],
+    ['releases-list', 'Релизы'],
     ['cases', 'Разборы'],
     ...(bridgePages ? [['knowledge', 'База знаний']] : []),
     ['sources', 'Источники'],
@@ -2267,8 +2274,8 @@ function Workspace({ user, onLogout, onUpdate }: { user: User; onLogout: () => v
         <nav aria-label="Основные разделы">
           {tabs.map(([k, t]) => {
             const active = !settings && (route === k || (k === 'knowledge' && route === 'demo-page') ||
-              (k === 'overview' && route === 'release-decision') ||
-              (k === 'cases' && ['case','snapshot','range','material','demo-issue','releases-list','release-detail','release','releases','calc'].includes(route)));
+              (k === 'releases-list' && ['release-detail', 'release', 'releases', 'calc', 'release-decision'].includes(route)) ||
+              (k === 'cases' && ['case', 'snapshot', 'range', 'material', 'demo-issue'].includes(route)));
             return (
             <a
               className={active ? 'active' : ''}
@@ -2278,7 +2285,7 @@ function Workspace({ user, onLogout, onUpdate }: { user: User; onLogout: () => v
               key={k}
               href={'#' + k}
             >
-              <Icon name={k === 'chats' ? 'chat' : k === 'knowledge' ? 'sources' : k} />
+              <Icon name={k === 'chats' ? 'chat' : k === 'knowledge' ? 'sources' : k === 'releases-list' ? 'calendar' : k} />
               <span className="menu-label">{t}</span>
             </a>
             );
@@ -2352,10 +2359,11 @@ function Workspace({ user, onLogout, onUpdate }: { user: User; onLogout: () => v
           />
         ) : route === 'releases-list' ? (
           <>
-            <a href="#cases">← Разборы</a>
-            <h1>Журнал релизов</h1>
-            <a className="primary" href="#releases">Аналитика по событиям CSV</a>
-            <section className="paper">
+            <div className="page-head releases-head">
+              <h1>Журнал релизов</h1>
+              <a className="primary" href="#releases">Аналитика по событиям CSV</a>
+            </div>
+            <section className="paper release-calendar">
               <h2>Календарь из источников</h2>
               {!home.releases.length && <p>В загруженных источниках пока нет релизов.</p>}
               {home.releases.map((r) => (
@@ -2469,7 +2477,6 @@ function Workspace({ user, onLogout, onUpdate }: { user: User; onLogout: () => v
                   ))}
                 </select>
               </label>
-              <a href="#releases-list">Журнал релизов →</a>
             </div>
             <CaseList items={home.cases.filter((c) => !filter || c.state === filter)} />
           </>

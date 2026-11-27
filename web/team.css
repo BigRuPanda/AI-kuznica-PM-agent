@@ -373,6 +373,8 @@ p {
 .page-head {
   margin: 9px 0 26px;
 }
+.releases-head { flex-wrap: wrap; margin-block: 0 16px; }
+.release-calendar > h2 { margin-block-start: 0; }
 .page-head small {
   display: block;
   margin-bottom: 0.4rem;
@@ -463,6 +465,8 @@ p {
 .toolbar select {
   max-width: 160px;
 }
+.toolbar .case-comparison { min-width: 0; }
+.case-comparison select { max-width: min(18rem, 100%); }
 .toolbar button {
   font-size: 0.78rem;
 }
@@ -866,7 +870,7 @@ p {
   .case-layout.show-chat > .case-discussion {
     display: block;
   }
-  .case-layout.show-chat .case-main > :not(.case-investigation, .investigation-tools, .mobile-toggle, [role='alert']) {
+  .case-layout.show-chat .case-main > :not(.case-investigation, .mobile-toggle, [role='alert']) {
     display: none;
   }
   .mobile-toggle {

@@ -1,4 +1,4 @@
-.investigation-head[data-research] { margin-bottom: 14px; }
+.investigation-head[data-research] { display: grid; gap: 10px; margin-bottom: 14px; }
 .case-investigation, .investigation-snapshot { min-width: 0; overflow-wrap: anywhere; }
 .investigation-decision {
   border-block-start: 3px solid var(--accent);
@@ -18,7 +18,7 @@
 .investigation-decision[data-compact-queue='true'] :is(.investigation-visibility, .investigation-status, .investigation-actions) {
   margin: 0;
 }
-.investigation-meta, .investigation-actions, .investigation-tools {
+.investigation-meta, .investigation-actions {
   display: flex;
   flex-wrap: wrap;
   align-items: baseline;
@@ -40,7 +40,7 @@
 .investigation-recommendation h3 { margin-bottom: 0; }
 .investigation-recommendation .investigation-text { font-weight: 550; }
 .investigation-actions { margin-top: 8px; }
-.investigation-tools { margin-bottom: 14px; }
+.investigation-head[data-research] .investigation-tools { justify-content: flex-start; gap: 8px; }
 .investigation-plan { margin-top: 10px; }
 .investigation-plan > summary.primary { text-align: center; }
 .investigation-plan > summary.primary::before { content: none; }
@@ -95,6 +95,5 @@
   .investigation-decision .investigation-text { line-height: 1.42; }
   .investigation-recommendation { padding: 12px; }
   .investigation-actions > *, .investigation-plan > summary.primary { width: 100%; }
-  .investigation-tools { gap: 8px; }
   .investigation-check, .investigation-version { padding-inline: 8px; }
 }

@@ -33,6 +33,14 @@ test('profile photo, renamed case chat and ordinary chart attachments work toget
   await api('login', { login: 'fixture-admin', password: 'fixture-password' });
   await page.goto(origin + '/#profile');
   await page.locator('.workspace-page').waitFor();
+  const sections = page.getByRole('navigation', { name: 'Основные разделы' });
+  assert.deepEqual((await sections.getByRole('link').allTextContents()).slice(0, 4),
+    ['Обзор', 'Чаты', 'Релизы', 'Разборы']);
+  const releases = sections.getByRole('link', { name: 'Релизы', exact: true });
+  await releases.click();
+  await page.getByRole('heading', { name: 'Журнал релизов' }).waitFor();
+  assert.equal(await releases.getAttribute('aria-current'), 'page');
+  await page.goto(origin + '/#profile');
   const profileLink = page.getByRole('link', { name: 'Профиль', exact: true });
   assert.equal(await profileLink.count(), 1, 'the signed-in workspace exposes the profile');
   await button(page, 'Редактировать профиль').click();
@@ -64,6 +72,7 @@ test('profile photo, renamed case chat and ordinary chart attachments work toget
       if (width <= 820) await button(page, 'Обсудить').click();
       const send = button(discussion, 'Отправить');
       await send.waitFor();
+      await discussion.getByRole('switch', { name: 'Поиск в интернете' }).waitFor();
       const geometry = await send.evaluate(control => {
         const button = control.getBoundingClientRect();
         const panel = control.closest('.chat-box');
@@ -108,7 +117,15 @@ test('profile photo, renamed case chat and ordinary chart attachments work toget
 
   const { id: ordinaryThread } = await api('thread', { title: 'Отдельный вопрос о графике' });
   await page.goto(origin + '/#chats/' + ordinaryThread);
-  const ordinaryMessage = await sendChart();
+  const search = page.getByRole('switch', { name: 'Поиск в интернете' });
+  await search.press('Space');
+  assert.equal(await search.getAttribute('aria-checked'), 'true');
+  const [request, ordinaryMessage] = await Promise.all([
+    page.waitForRequest(request => request.url().endsWith('/api/team/ask')),
+    sendChart(),
+  ]);
+  assert.equal(request.postDataJSON().webSearch, true);
+  assert.equal(await search.getAttribute('aria-checked'), 'false');
   await ordinaryMessage.locator('a[href="#material/' + chart + '"]').click();
   await dialog.locator('.range-plot svg').waitFor();
   const pinButtons = area => area.getByRole('button', { name: /Добавить в разбор|Добавлено ·|Убрать с экрана/ });
