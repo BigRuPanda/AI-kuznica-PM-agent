@@ -114,6 +114,9 @@ export type Msg = {
     jobId?: string;
     canResume?: boolean;
     resuming?: boolean;
+    presentationId?: string;
+    presentationStatus?: 'queued' | 'running' | 'ready' | 'failed';
+    missingPresentation?: boolean;
     mode?: string;
     outcome?: string;
     calc?: string;

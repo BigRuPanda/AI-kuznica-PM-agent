@@ -5,11 +5,12 @@ import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {createTeamApp} from '../server/team-http.mjs';
 import {digest,importDocs} from '../server/evidence.mjs';
-import {listPresentations,readPresentation,startPresentation,workPresentations} from '../server/presentations.mjs';
+import {listPresentations,readPresentation,requestsPresentation,startPresentation,workPresentations} from '../server/presentations.mjs';
+import {createThread,enqueue,messages,resumeJob,workJobs} from '../server/workbench.mjs';
 import {composeSlide} from '../server/presentation-layout.mjs';
 import {exportPptx,presentationHtml} from '../server/presentation-export.mjs';
 
-const author={id:'pm'},peer={id:'peer'};
+const author={id:'pm',name:'Продакт'},peer={id:'peer',name:'Коллега'};
 const local={LLM_BACKEND:'api',LLM_BASE_URL:'http://127.0.0.1:8080/v1',LLM_MODEL:'qwen',LLM_DATA_MODE:'analysis'};
 async function fixture(t) {
   const dir=await mkdtemp(join(tmpdir(),'signal-presentations-'));
@@ -63,6 +64,53 @@ test('case deck freezes its evidence, checks access on every version and resumes
   await workPresentations(store,local,async()=>Response.json({choices:[{message:{content:'{"slides":[{"id":900,"heading":0}]}'}}]}));
   assert.match(readPresentation(db,author,next.id).notice,/шаблону/);
   assert.equal(readPresentation(db,author,next.id).deck.title,'Другая версия');
+});
+
+test('chat commands use the case exporter once, expose its real status and respect personal materials',async t=>{
+  const store=await fixture(t),db=store.db;
+  for(const q of ['сделай презентацию','собери по этому разбору презу','Можно подготовить слайды для руководства?','выгрузи разбор в PDF'])
+    assert.equal(requestsPresentation(q),true,q);
+  for(const q of ['не делай презентацию','как собрать презентацию?','найди презентацию в архиве','создай задачу по презентации'])
+    assert.equal(requestsPresentation(q),false,q);
+  const noModel=()=>assert.fail('general chat and web search should not run');
+  const thread=createThread(db,author,'Презентации');
+  const question='О графике «Продажи». Сделай презентацию';
+  const id=enqueue(store,author,{thread,caseId:'sample',question,typedQuestion:'Сделай презентацию',webSearch:true});
+  // Older builds sometimes recorded the model's refusal as a completed turn.
+  const legacy={mode:'analysis',outcome:'done',caseId:'sample',jobId:id,text:'Не могу создать презентацию.',actions:[]};
+  legacy.inReplyTo=JSON.parse(db.prepare('SELECT body FROM jobs WHERE id=?').get(id).body).questionSeq;
+  db.prepare("UPDATE jobs SET status='done',result=? WHERE id=?").run(JSON.stringify(legacy),id);
+  db.prepare("INSERT INTO chat_items(thread,author,role,body,created) VALUES(?,'Агент','assistant',?,?)").run(thread,JSON.stringify(legacy),Date.now());
+  assert.equal(messages(db,author,thread).items.at(-1).body.missingPresentation,true);
+  resumeJob(db,author,id);
+  await workJobs(store,{publicUser:()=>author},local,noModel);
+  let reply=messages(db,author,thread).items.at(-1).body;
+  assert.equal(reply.presentationStatus,'queued');
+  assert.match(reply.text,/Собираю/);
+  const deckId=reply.presentationId;
+  // Worker restart after committing the snapshot but before acknowledging the chat turn.
+  db.prepare("UPDATE jobs SET status='queued' WHERE id=?").run(id);
+  await workJobs(store,{publicUser:()=>author},local,noModel);
+  await workPresentations(store,{},noModel);
+  reply=messages(db,author,thread).items.at(-1).body;
+  assert.equal(reply.presentationStatus,'ready');
+  assert.equal(reply.presentationId,deckId);
+  assert.equal(listPresentations(db,author,'sample').length,1);
+  assert.equal(messages(db,author,thread).items.length,2);
+  enqueue(store,author,{thread,question:'Сделай презентацию'});
+  await workJobs(store,{publicUser:()=>author},local,noModel);
+  assert.equal(messages(db,author,thread).items.at(-1).body.outcome,'clarification');
+  assert.equal(listPresentations(db,author,'sample').length,1);
+  const caseThread=digest(author.id+'/sample');
+  db.prepare("INSERT INTO conversations VALUES(?,?,'private','Из списка чатов')").run(caseThread,author.id);
+  enqueue(store,author,{thread:caseThread,question:'Подготовь презентацию'});
+  await workJobs(store,{publicUser:()=>author},local,noModel);
+  assert.ok(messages(db,author,caseThread).items.at(-1).body.presentationId);
+  db.prepare('INSERT INTO redmine_results VALUES(?,?,?,?)').run('private-result','sample',JSON.stringify({personalOwner:author.id,issue:1,title:'Личный материал'}),Date.now());
+  enqueue(store,author,{thread:'group',caseId:'sample',question:'Собери презентацию'});
+  await workJobs(store,{publicUser:()=>author},local,noModel);
+  assert.ok(messages(db,author,'group').items.at(-1).body.presentationId);
+  assert.equal(messages(db,peer,'group').items.at(-1).body.presentationId,undefined);
 });
 
 test('empty and long cases preserve every check and export without a model',async t=>{

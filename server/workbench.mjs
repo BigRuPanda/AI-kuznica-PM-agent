@@ -18,6 +18,7 @@ import {
 } from './evidence.mjs';
 import { apiConfigured, providerCall } from './agent.mjs';
 import { briefConversation, caseBrief, caseBriefKind } from './chat-brief.mjs';
+import { chatPresentationStatus, initPresentations, requestsPresentation, startPresentation } from './presentations.mjs';
 import { webQuestion, webAnswer } from './web-search.mjs';
 import { competitorQuestion, competitorAnswer } from './competitor-chat.mjs';
 import { destination } from './notification-contacts.mjs';
@@ -80,6 +81,7 @@ export function initWorkbench(db, env = process.env) {
   migrateChatItems(db);
   initRanges(db);
   initMaterials(db);
+  initPresentations(db);
   db.prepare("INSERT OR IGNORE INTO conversations VALUES('group','','group','Команда Store')").run();
   db.prepare("UPDATE jobs SET status='queued' WHERE status='running'").run();
   db.prepare("UPDATE draft_actions SET state='uncertain' WHERE state='sending'").run();
@@ -275,22 +277,33 @@ export function enqueue(store, user, b) {
     return id;
   });
 }
+function typedQuestion(body) {
+  return typeof body.typedQuestion==='string' && body.question.endsWith(body.typedQuestion) ? body.typedQuestion : body.question;
+}
+function missingChatPresentation(request,reply) {
+  return request?.caseId && reply?.mode!=='presentation' && !reply?.presentationId &&
+    !reply?.actions?.length && requestsPresentation(typedQuestion(request));
+}
 export function messages(db, user, id) {
   thread(db, user, id);
   return {
     items: db
-      .prepare('SELECT * FROM chat_items WHERE thread=? ORDER BY seq')
-      .all(id)
-      .map((x) => {
+      .prepare(`SELECT m.*,j.user AS jobOwner,j.status AS jobStatus,
+        CASE WHEN j.user=? AND json_extract(m.body,'$.mode')='analysis' THEN j.body END AS oldRequest
+        FROM chat_items m LEFT JOIN jobs j ON j.id=json_extract(m.body,'$.jobId')
+        WHERE m.thread=? ORDER BY m.seq`)
+      .all(user.id,id)
+      .map(({jobOwner,jobStatus,oldRequest,...x}) => {
         const body = JSON.parse(x.body);
-        if (body.mode !== 'daily' && body.jobId && ['partial', 'failed'].includes(body.outcome)) {
-          const ownJob=db.prepare('SELECT status FROM jobs WHERE id=? AND user=?').get(body.jobId,user.id);
-          body.resuming=['queued','running'].includes(ownJob?.status);
-          body.canResume=!!ownJob && !body.retryExhausted && !body.resuming;
-        }
         if (x.role === 'assistant' && !body.materials) {
           body.materials = materialsFromReply(db, user, id, body);
           db.prepare('UPDATE chat_items SET body=? WHERE seq=?').run(JSON.stringify(body), x.seq);
+        }
+        const missing=oldRequest && missingChatPresentation(JSON.parse(oldRequest),body);
+        if (missing || (body.mode!=='daily' && body.jobId && ['partial','failed'].includes(body.outcome))) {
+          body.resuming=jobOwner===user.id && ['queued','running'].includes(jobStatus);
+          body.canResume=jobOwner===user.id && (!body.retryExhausted || !!missing) && !body.resuming;
+          if (missing) body.missingPresentation=true;
         }
         if (body.actions)
           body.actions = body.actions.map((a) => {
@@ -306,6 +319,13 @@ export function messages(db, user, id) {
               canConfirm: row?.owner === user.id,
             };
           });
+        if (body.presentationId) {
+          const version=chatPresentationStatus(db,user,body.presentationId);
+          if (!version) return {...x,body:{text:'Презентация недоступна в этом чате.',materials:[]}};
+          body.presentationStatus=version.status;
+          body.text=version.status==='ready'?'Презентация разбора готова.':
+            version.status==='failed'?(version.notice || 'Не удалось собрать презентацию.'):'Собираю презентацию по материалам разбора…';
+        }
         return { ...x, body };
       }),
     jobs: db
@@ -502,7 +522,18 @@ export async function answer(store, user, b, env = process.env, send = fetch, jo
   const db = store.db;
   const { scope } = thread(db, user, b.thread);
   const shared = scope === 'group';
-  const typed = typeof b.typedQuestion === 'string' && b.question.endsWith(b.typedQuestion) ? b.typedQuestion : b.question;
+  const typed = typedQuestion(b);
+  if (requestsPresentation(typed)) {
+    // Opening a case conversation from the Chats list omits caseId in the UI.
+    // The conversation itself still has the stable ID assigned by case-thread.
+    const caseId=b.caseId || (!shared && db.prepare("SELECT id FROM cases WHERE COALESCE(json_extract(body,'$.owner'),'') IN ('',?)")
+      .all(user.id).find(c=>digest(user.id+'/'+c.id)===b.thread)?.id);
+    if (!caseId) return {mode:'presentation',outcome:'clarification',text:'Откройте нужную карточку в разделе «Разборы» и попросите собрать презентацию в её чате.'};
+    const c=visibleCase(db,user,caseId);
+    if (shared && c.body.owner) throw Error('Личный разбор недоступен в группе');
+    const version=startPresentation(store,user,c.id,'chat-'+job);
+    return {mode:'presentation',caseId:c.id,presentationId:version.id,text:'Презентация добавлена в материалы разбора.',outcome:'done'};
+  }
   const query = webQuestion(typed, b.webSearch);
   if (query !== null) return webAnswer(store, job, query, env, send);
   if (competitorQuestion(b.question)) return competitorAnswer(store, user, b, env, send, shared);
@@ -757,7 +788,7 @@ function briefConclusion(text, findings) {
 }
 
 function completeMaterials(store, user, job, b, result) {
-  if (['daily', 'source-value', 'release-observation', 'web', 'competitor-check', 'archive'].includes(result.mode) ||
+  if (['daily', 'source-value', 'release-observation', 'web', 'competitor-check', 'archive','presentation'].includes(result.mode) ||
       result.mode==='conversation' && result.contextReset) return result;
   if (result.chartChoices) return { ...result, materials: [] };
   const db = store.db;
@@ -871,8 +902,10 @@ function completeMaterials(store, user, job, b, result) {
 export function resumeJob(db, user, id) {
   const j = db.prepare('SELECT * FROM jobs WHERE id=? AND user=?').get(id, user.id);
   if (!j) throw Error('Поручение недоступно');
-  if (!['failed', 'partial'].includes(j.status)) return { id };
-  if (JSON.parse(j.result || '{}')?.retryExhausted) throw Error('Для следующей попытки уточните вопрос.');
+  const previous=JSON.parse(j.result || 'null');
+  const repair=previous && missingChatPresentation(JSON.parse(j.body),previous);
+  if (!['failed','partial'].includes(j.status) && !(j.status==='done' && repair)) return { id };
+  if (previous?.retryExhausted && !repair) throw Error('Для следующей попытки уточните вопрос.');
   const row = db.prepare('SELECT body FROM agent_turns WHERE job=?').get(id);
   if (row) {
     const state = JSON.parse(row.body);

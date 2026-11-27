@@ -4,6 +4,25 @@ import { visibleCase } from './workbench.mjs';
 import { casePresentationInput } from './presentation-case.mjs';
 import { assembleDeck } from './presentation-layout.mjs';
 
+// Recognize an instruction to produce the case deliverable, including common
+// format names. An informational question or a negated action is not a request.
+export function requestsPresentation(question) {
+  const q=String(question || '').toLowerCase().replace(/ё/gu,'е').trim()
+    .replace(/^(?:(?:а|давай|тогда|пожалуйста|можешь|можно|нужно|надо|хочу|прошу|мне)\s*[,—]?\s+)+/u,'')
+    .replace(/[?!.…]+$/u,'').trim();
+  if (/^(?:презентация|презентацию|презу|слайды|pptx?|powerpoint|пдф|pdf)$/u.test(q)) return true;
+  const verb=/^(?:сделай(?:те)?|сделать|создай(?:те)?|создать|собери(?:те)?|собрать|подготовь(?:те)?|подготовить|сформируй(?:те)?|сформировать|оформи(?:те)?|оформить|выгрузи(?:те)?|выгрузить|экспортируй(?:те)?|экспортировать|пришли)\s+/u;
+  if (!verb.test(q)) return false;
+  const object=q.replace(verb,'').replace(/^(?:(?:мне|нам|пожалуйста|[а-я]+ую|этот|текущий|разбор|отчет|результаты|в|в формате|как|по (?:этому |текущему )?разбору|для (?:руководства|команды|начальства))\s+)+/u,'');
+  return /^(?:презентацию|презу|слайды|слайд[ -]?дек|pptx?|powerpoint|пдф|pdf)(?=$|[\s,—-])/u.test(object);
+}
+
+export function chatPresentationStatus(db,user,id) {
+  return db.prepare(`SELECT p.status,p.notice FROM presentations p JOIN cases c ON c.id=p.case_id
+    WHERE p.id=? AND (p.personal=0 OR p.author=?) AND COALESCE(json_extract(c.body,'$.owner'),'') IN ('',?)`)
+    .get(id,user.id,user.id);
+}
+
 export function initPresentations(db) {
   db.exec(`CREATE TABLE IF NOT EXISTS presentations(
     id TEXT PRIMARY KEY,case_id TEXT NOT NULL,author TEXT NOT NULL,personal INTEGER NOT NULL,

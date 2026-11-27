@@ -6,7 +6,7 @@ import { Knowledge, NotificationSettings } from './notifications';
 import { SourceExtract } from './knowledge-source';
 import { EffectPlan } from './effect-plan';
 import { ReleaseDecision } from './release-decision';
-import { PresentationMaterials } from './presentations';
+import { ChatPresentation, PresentationMaterials } from './presentations';
 import { rangeLabel, RangeChart, DAY } from './range-chart';
 import type { Attachment } from './range-chart';
 import { SavedChart } from './calculations';
@@ -540,6 +540,9 @@ function Chat({
             {m.body.materials?.map((item) => (
               <MaterialCard key={item.id} item={item} />
             ))}
+            {m.body.presentationId && m.body.presentationStatus==='ready' &&
+              <ChatPresentation id={m.body.presentationId} />}
+            {m.body.mode==='presentation' && m.body.outcome==='clarification' && <a href="#cases">Открыть разборы</a>}
             {!m.body.materials?.length &&
               m.body.suggestions?.map((s) =>
                 s.source === 'metric' ? (
@@ -640,7 +643,7 @@ function Chat({
                   })
                 }
               >
-                {m.body.steps?.length || m.body.materials?.length || m.body.checks?.length || m.body.actions?.length || m.body.rangeId ? 'Продолжить с сохранённого шага' : 'Повторить запрос'}
+                {m.body.missingPresentation ? 'Собрать презентацию' : m.body.steps?.length || m.body.materials?.length || m.body.checks?.length || m.body.actions?.length || m.body.rangeId ? 'Продолжить с сохранённого шага' : 'Повторить запрос'}
               </button>
             )}
             {m.body.calc && !m.body.materials?.length && (
@@ -1092,6 +1095,7 @@ function Investigation({
     [confirmation, confirm] = useState<'reset' | 'finish'>(),
     [updating, setUpdating] = useState(false);
   const [presentationAction,setPresentationAction] = useState<HTMLSpanElement|null>(null);
+  const [versionFromChat,setVersionFromChat] = useState<string>();
   const prefix = 'pm-view/' + home.user.id + '/' + id;
   const load = useCallback(
     async () =>
@@ -1150,6 +1154,7 @@ function Investigation({
   }, [id, prefix]);
   const result = useCallback(
     (m: Msg['body']) => {
+      if (m.presentationId) setVersionFromChat(m.presentationId);
       if (m.personal && m.personal.caseId === id) {
         layout([...new Set([...pinned, ...m.personal.cards])]);
         if (m.personal.full !== undefined) filter(m.personal.full);
@@ -1302,7 +1307,7 @@ function Investigation({
             </section>
           )}
           <PinnedMaterials caseId={id} />
-          <PresentationMaterials key={id} caseId={id} actionSlot={presentationAction} />
+          <PresentationMaterials key={id} caseId={id} actionSlot={presentationAction} versionFromChat={versionFromChat} />
           <Tracking
             headingRef={taskTitle}
             documentation={section?.startsWith('documentation?') ? new URLSearchParams(section.slice(14)) : undefined}

@@ -352,6 +352,28 @@ test('Softline workspace, upgrade and browser journeys', async t => {
     await role(dialog,'Закрыть').click();
   });
 
+  await journey('a presentation requested in case chat becomes downloadable in the same reply', async () => {
+    await go(admin,caseRoute);
+    await field(admin,'Вопрос агенту').fill('Сделай презентацию');
+    await submit(admin,'ask',()=>role(admin,'Отправить').click());
+    const store=app.space('team');
+    await workJobs(store,app.accounts,env,()=>assert.fail('the chat model is not needed'));
+    await visible(admin.getByText('Собираю презентацию по материалам разбора…',{exact:true}));
+    await workPresentations(store,{},model);
+    const bubble=admin.locator('.bubble.assistant').filter({hasText:'Презентация разбора готова.'}).last();
+    await visible(bubble);
+    const ppt=await bubble.getByRole('link',{name:'Скачать PPTX'}).getAttribute('href');
+    const pdf=await bubble.getByRole('link',{name:'Скачать PDF'}).getAttribute('href');
+    assert.equal(ppt.replace(/pptx$/,'pdf'),pdf);
+    await role(bubble,'Открыть презентацию').click();
+    const dialog=admin.getByRole('dialog',{name:'Презентация разбора'});
+    await visible(dialog.getByRole('link',{name:'Скачать PDF'}));
+    assert.equal(await dialog.getByRole('link',{name:'Скачать PDF'}).getAttribute('href'),pdf);
+    await role(dialog,'Закрыть').click();
+    await admin.reload();
+    await visible(bubble.getByRole('link',{name:'Скачать PPTX'}));
+  });
+
   await journey('Signal Bridge exposes the knowledge page and its documentation form', async () => {
     env.SIGNAL_BRIDGE_URL = 'http://localhost/fixture-bridge';
     try {

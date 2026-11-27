@@ -44,7 +44,7 @@ import { remoteMcp } from './team-mcp.mjs';
 import { retainMaterial, readMaterial, attachedMaterials, materialRef, materialPreview } from './materials.mjs';
 import { access } from './chart-ranges.mjs';
 import { resumeJob } from './workbench.mjs';
-import {initPresentations,listPresentations,startPresentation,readPresentation,workPresentations} from './presentations.mjs';
+import {listPresentations,startPresentation,readPresentation,workPresentations} from './presentations.mjs';
 import {presentationHtml,exportPdf,exportPptx} from './presentation-export.mjs';
 
 export function createTeamApp({
@@ -72,7 +72,6 @@ export function createTeamApp({
       initEvidence(s.db);
       initSourcePolicy(s.db);
       initWorkbench(s.db, env);
-      initPresentations(s.db);
 
       spaces.set(id, s);
     }
