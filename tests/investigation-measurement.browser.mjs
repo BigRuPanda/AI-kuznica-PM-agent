@@ -10,6 +10,7 @@ import { cases } from '../server/evidence.mjs';
 import { captureInvestigation } from '../server/investigation-engine.mjs';
 import { createTeamApp } from '../server/team-http.mjs';
 import { fixtureEnv, seedWorkspace } from './workspace-fixture.mjs';
+import { seedWatchFormats } from './watch-fixture.mjs';
 
 test('the PM agrees an automatic signal criterion before scheduling a rollout watch', async t => {
   const dir = await mkdtemp(join(tmpdir(), 'investigation-measurement-ui-'));
@@ -70,4 +71,59 @@ test('the PM agrees an automatic signal criterion before scheduling a rollout wa
   await effect.getByText('Ожидаем данные после исправления', { exact: true }).waitFor();
   await effect.getByText('Полные недели, продукт / контроль', { exact: true }).waitFor();
   assert.equal(await page.getByRole('button', { name: 'Изменить критерий' }).count(), 0);
+});
+
+test('saved percentage, KPI and archive watches reopen their own screens after a server restart', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'saved-watch-ui-'));
+  const env = { ...fixtureEnv, SOURCE_ARCHIVE_SHA256: 'fixture' };
+  let app, browser;
+  t.after(async () => {
+    await browser?.close();
+    await app?.close();
+    await rm(dir, { recursive: true, force: true, maxRetries: 3 });
+  });
+  await seedWorkspace(dir);
+  const edge = 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe';
+  browser = await chromium.launch({ headless: true, executablePath:
+    process.env.PM_BROWSER_PATH || (existsSync(edge) ? edge : undefined) });
+  const page = await browser.newPage({ locale: 'ru-RU', viewport: { width: 390, height: 844 } });
+  page.setDefaultTimeout(10000);
+  async function start() {
+    app = createTeamApp({ base: join(dir, 'releases.sqlite'), env, background: false });
+    await new Promise((resolve, reject) => app.server.once('error', reject).listen(0, '127.0.0.1', resolve));
+    const base = 'http://127.0.0.1:' + app.server.address().port;
+    const login = await page.request.post(base + '/api/team/login', {
+      data: { login: 'fixture-admin', password: 'fixture-password' },
+    });
+    assert.ok(login.ok(), await login.text());
+    return base;
+  }
+  const effect = page.locator('.effect-panel');
+  async function inspect(base, id) {
+    const archive = id === 'saved-observation';
+    await page.goto(base + '/#case/' + id + (archive ? '/effect' : ''));
+    if (archive) {
+      await effect.getByText('Изменился контроль — требуется проверка', { exact: true }).waitFor();
+      assert.equal(await effect.locator(':scope > summary').evaluate(el => el === document.activeElement), true);
+      await effect.getByText('Уточнить причину изменения контроля', { exact: true }).waitFor();
+      await effect.getByRole('button', { name: 'Рассчитать без сохранения' }).waitFor();
+      assert.equal(await effect.getByRole('button', { name: 'Назначить проверку' }).count(), 0);
+      await effect.getByText('Исходные строки', { exact: true }).last().click();
+      await effect.getByRole('link', { name: 'SavedWatches.xlsx · Control!A6' }).waitFor();
+    } else {
+      await effect.locator(':scope > summary').click();
+      await effect.getByText('Цель достигнута', { exact: true }).waitFor();
+      await effect.getByRole('button', { name: 'Назначить проверку' }).waitFor();
+      assert.equal(await effect.getByRole('button', { name: 'Рассчитать без сохранения' }).count(), 0);
+      if (id === 'saved-measurement') assert.match(await effect.innerText(), /168\s*\/\s*2\s*800/);
+      else await effect.getByText('Полные недели, продукт / контроль', { exact: true }).waitFor();
+    }
+  }
+  let base = await start();
+  seedWatchFormats(app.space('team'));
+  for (const id of ['saved-percent', 'saved-measurement', 'saved-observation']) await inspect(base, id);
+  await app.close();
+  app = undefined;
+  base = await start();
+  for (const id of ['saved-percent', 'saved-measurement', 'saved-observation']) await inspect(base, id);
 });

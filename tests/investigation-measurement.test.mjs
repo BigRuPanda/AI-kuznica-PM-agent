@@ -76,6 +76,7 @@ test('an agreed rule, control and baseline are frozen before deployment and obse
   assert.throws(() => s.watch({ agreementId: agreed.agreement.id }), /уже обновлён/);
   assert.throws(() => s.watch({ deployed: baselineThrough }), /до даты выкладки/);
   assert.throws(() => s.watch({ percent: 90, measurement }), /согласованный критерий/);
+  assert.throws(() => s.watch({ metric: 'orders_index', baselineWeeks: 1, observationWeeks: 1 }), /согласованный критерий/);
   assert.equal(s.watch({ agreementId: accepted.agreement.id }).state, 'Ожидаем данные после исправления');
   const watch = s.get().body.watch;
   assert.equal(watch.target, 98);

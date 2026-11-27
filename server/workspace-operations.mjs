@@ -30,7 +30,8 @@ import { runTool } from './analytics.mjs';
 import { prepareResearch, researchContext } from './agent-research.mjs';
 import { saveMaterial } from './materials.mjs';
 import { aggregateMetric, describeMetricSeries, observationWithin } from './metric-observations.mjs';
-import { measurementSpec, measuredSignal, legacyOrderMetric, startMeasurementWatch } from './watch-measurement.mjs';
+import { measurementSpec, measuredSignal, legacyOrderMetric, startMeasurementWatch, watchKind } from './watch-measurement.mjs';
+import { makeObservationPlan, observationOptions, observedEffect } from './effect-plan.mjs';
 
 const text = z.string().min(1).max(2400),
   id = z.string().min(1).max(150),
@@ -114,11 +115,22 @@ const publishInput = {
 };
 const watchInput = {
   caseId: id,
-  deployed: z.string(),
+  deployed: z.string().optional(),
   percent: z.coerce.number().positive().max(300).optional(),
   control: optional,
   measurement: measurement.optional(),
   agreementId: id.optional(),
+};
+const observationInput = {
+  metric: id.optional(),
+  segment: optional,
+  releaseId: optional,
+  taskId: optional,
+  baselineWeeks: z.coerce.number().int().min(1).max(12).optional(),
+  observationWeeks: z.coerce.number().int().min(1).max(12).optional(),
+  target: z.number().finite().nullable().optional(),
+  direction: z.enum(['at-least', 'at-most']).optional(),
+  condition: optional,
 };
 const agreementInput = z.strictObject({
   caseId: id,
@@ -227,7 +239,11 @@ export const operations = {
     'Сохранить явно высказанную поправку к источнику',
     { ...caseInput, source: text, comment: text },
   ],
-  watch: ['Назначить наблюдение на четыре полные недели с подтверждённой даты выкладки. Для цели из плана передай дату. Для нового критерия передай measurement. Число 5 для абсолютной цели CTR означает 5%.', watchInput],
+  watch: ['Назначить наблюдение по согласованному критерию с даты выкладки. Для нового критерия передай measurement. Для архивного плана передай metric и задачу или релиз. Число 5 для абсолютной цели CTR означает 5%.', { ...watchInput, ...observationInput }],
+  'watch-options': ['Найти архивные метрики, разрезы, релизы и задачи для наблюдения за продуктом.', caseInput],
+  'effect-preview': ['Прочитать результат наблюдения на указанную дату без изменения плана.', {
+    ...caseInput, ...observationInput, deployed: watchInput.deployed, control: optional, asOf: optional,
+  }],
   decide: [
     'Изменить статус разбора по просьбе пользователя',
     { ...caseInput, state: z.enum(['Исследуем', 'Нужно решение', 'Завершено']) },
@@ -401,6 +417,12 @@ function agreeMeasurement(store, user, input) {
     updateCase(db, c);
     return { measurement, agreement };
   });
+}
+
+function proposedObservation(db, c, input, env) {
+  if (env.SOURCE_ARCHIVE_SHA256 && input.deployed && !input.releaseId)
+    throw Error('Выберите подтверждённую выкладку из журнала релизов.');
+  return makeObservationPlan(db, c, input);
 }
 
 export function workspaceOperation(
@@ -821,17 +843,52 @@ export function workspaceOperation(
     );
     return { ok: true };
   }
+  if (op === 'watch-options') return observationOptions(db, current());
+  if (op === 'effect-preview') {
+    const c = current();
+    const result = b.metric
+      ? observedEffect(db, { ...c, body: { ...c.body, watch: proposedObservation(db, c, b, env) } }, b.asOf)
+      : effect(db, c, b.asOf);
+    return result && { caseId: c.id, ...result };
+  }
   if (op === 'watch') return store.tx(() => {
     const c = current(), precommitted = c.body.plan?.measurement, signal = c.body.signal;
     const previous = c.body.watch, agreement = c.body.plan?.measurementAgreement;
+    const previousKind = watchKind(previous);
     if (b.agreementId && b.agreementId !== agreement?.id)
       throw Error('План измерения уже обновлён. Откройте текущий критерий.');
     if (agreement && previous?.agreementId !== agreement.id &&
       (signal?.status === 'withdrawn' || agreement.signalRevision !== (signal?.revision ?? 0)))
       throw Error('Сигнал уточнён. Согласуйте критерий в актуальном исследовании перед назначением проверки.');
-    if (agreement && (b.measurement || b.percent || b.control))
+    if (agreement && (b.measurement || b.percent || b.control || b.metric))
       throw Error('Используется согласованный критерий проверки. Передайте дату выкладки.');
-    if (!b.measurement && !b.percent && previous?.version === 2 && previous.deployed === b.deployed)
+    if (precommitted && b.metric)
+      throw Error('Для этого разбора используется план проверки, заданный до выкладки. Передайте только дату.');
+    const save = (watch) => {
+      if (previous) {
+        const prior = analysisView(db, { caseId: c.id });
+        grant(db, prior.id, 'case', c.id);
+        c.body.watchHistory = [...(c.body.watchHistory || []),
+          { revision: previous.revision ?? 1, calc: prior.id, deployed: previous.deployed }];
+      }
+      watch.revision = previous ? (previous.revision ?? 1) + 1 : 1;
+      c.body.watch = watch;
+      delete c.body.watchReviewed;
+      c.state = 'Наблюдаем эффект';
+      updateCase(db, c);
+      return { caseId: c.id, ...effect(db, c) };
+    };
+    if (b.metric) {
+      if (b.measurement || b.percent)
+        throw Error('Передайте поля одного плана проверки.');
+      const plan = proposedObservation(db, c, b, env);
+      if (!plan.taskId && !plan.deployed) throw Error('Выберите задачу или укажите подтверждённую выкладку.');
+      if (previousKind === 'archive-observation' && plan.request === previous.request)
+        return { caseId: c.id, ...effect(db, c) };
+      return save(plan);
+    }
+    if (typeof b.deployed !== 'string') throw Error('Укажите дату выкладки.');
+    if (!b.measurement && !b.percent && previousKind === 'measurement' && previous.deployed === b.deployed)
       return { caseId: c.id, ...effect(db, c) };
     if (precommitted && b.measurement)
       throw Error('Для этого разбора используется план проверки, заданный до выкладки. Передайте только дату.');
@@ -844,23 +901,10 @@ export function workspaceOperation(
       .some(key => automatic[key] && b.measurement[key] && automatic[key] !== b.measurement[key]))
       throw Error('Выберите метрику, продукт, сегмент и источник сигнала.');
     const spec = precommitted || (b.measurement && { ...automatic, ...b.measurement }) ||
-      (!b.percent && previous?.version === 2 && previous.measurement) || (automatic && {
+      (!b.percent && previousKind === 'measurement' && previous.measurement) || (automatic && {
       ...automatic, comparison: 'gte', targetMode: 'baseline_percent',
       targetValue: b.percent ?? setting(db, 'rules', defaultRules).recovery,
     });
-    const save = (watch) => {
-      if (previous) {
-        const prior = analysisView(db, { caseId: c.id });
-        grant(db, prior.id, 'case', c.id);
-        c.body.watchHistory = [...(c.body.watchHistory || []),
-          { revision: previous.revision ?? 1, calc: prior.id, deployed: previous.deployed }];
-      }
-      watch.revision = previous ? (previous.revision ?? 1) + 1 : 1;
-      c.body.watch = watch;
-      c.state = 'Наблюдаем эффект';
-      updateCase(db, c);
-      return { caseId: c.id, ...effect(db, c) };
-    };
     if (agreement) return save(startMeasurementWatch({
       version: 2, measurement: precommitted, agreementId: agreement.id, control: precommitted.control,
       target: agreement.target, tolerance: agreement.tolerance, baseline: agreement.baseline,
@@ -869,7 +913,7 @@ export function workspaceOperation(
     if (spec) {
       const normalized = measurementSpec(spec, c.product);
       const request = digest(JSON.stringify([normalized, b.deployed]));
-      if (previous?.version === 2 && previous.request === request)
+      if (previousKind === 'measurement' && previous.request === request)
         return { caseId: c.id, ...effect(db, c) };
       return save({ ...createMeasurementWatch(db, normalized, b.deployed), request });
     }

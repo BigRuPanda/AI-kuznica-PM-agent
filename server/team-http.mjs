@@ -52,6 +52,7 @@ import { metricRuleStatus, saveMetricRule } from './metric-rules.mjs';
 import { createInvestigationScheduler } from './investigation-scheduler.mjs';
 import { readInvestigationLimit, saveInvestigationLimit, researchSettings, saveResearchSettings } from './investigation-settings.mjs';
 import { notificationChannels } from './data-profile.mjs';
+import { watchKind } from './watch-measurement.mjs';
 import {
   createAlternative, publishInvestigation, readInvestigations,
   syncInvestigations, onInvestigationWork, retryInvestigationStage,
@@ -72,6 +73,7 @@ export function createTeamApp({
     busy = new Set(),
     investigationSubscriptions = [],
     tracking = new Set(),
+    chatting = new Set(),
     reconciledAt = new Map(),
     authAttempts = new Map();
   initContacts(accounts.db);
@@ -201,20 +203,28 @@ export function createTeamApp({
         }
         void Promise.allSettled(operations).finally(() => tracking.delete(id));
       }
+      if (!chatting.has(id)) {
+        chatting.add(id);
+        void workJobs(s, accounts, env, send)
+          .catch(() => console.error('Не удалось обработать очередь чата'))
+          .finally(() => chatting.delete(id));
+      }
       if (busy.has(id)) continue;
       busy.add(id);
       void (async () => {
-        await workJobs(s, accounts, env, send);
         const minutes = Number(env.METRIKA_SYNC_MINUTES || 0),
           sync = setting(s.db, 'last_metrika_sync', { at: 0 });
         if (!env.SOURCE_ARCHIVE_SHA256 && id === 'team' && env.METRIKA_TOKEN && minutes >= 5 && Date.now() - sync.at >= minutes * 60000) {
           await syncMetrika(s, env, send).catch(() => {}); // The journal retains failures for each source.
         }
         for (const c of cases(s.db).filter((x) => x.state === 'Наблюдаем эффект' && x.body.watch)) {
+          const plan = c.body.watch;
+          if (c.body.watchReviewed || plan.reviewed) continue;
           const report = effect(s.db, c);
-          if (report?.actual != null && !c.body.watch.reviewed) {
+          if (Number.isFinite(report?.actual)) {
             s.tx(() => {
-              c.body.watch.reviewed = true;
+              if (watchKind(plan) === 'archive-observation') c.body.watchReviewed = true;
+              else plan.reviewed = true;
               c.state = 'Нужно решение';
               updateCase(s.db, c);
               if (id === 'team')
@@ -222,7 +232,7 @@ export function createTeamApp({
                   s.db
                     .prepare("INSERT OR IGNORE INTO deliveries(id,channel,state,body) VALUES(?,?,'queued',?)")
                     .run(
-                      digest(c.id + JSON.stringify(c.body.watch)) + channel,
+                      digest(c.id + JSON.stringify({ ...plan, reviewed: true })) + channel,
                       channel,
                       JSON.stringify({ caseId: c.id, ...notificationAudience(env, accounts.db, c.body.owner), text: report.state }),
                     );
@@ -615,7 +625,7 @@ export function createTeamApp({
     if (server.listening) await new Promise((r) => server.close(r));
     investigationSubscriptions.forEach(unsubscribe => unsubscribe());
     await investigations.close();
-    while (busy.size || tracking.size) await new Promise((r) => setTimeout(r, 50));
+    while (busy.size || chatting.size || tracking.size) await new Promise((r) => setTimeout(r, 50));
     for (const s of spaces.values()) s.close();
     accounts.db.close();
   }

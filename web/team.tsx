@@ -28,6 +28,7 @@ import { post, jump, num } from './team-data';
 import type { Home, User, Case, Detail, View, Msg, Thread, InvestigationRun, RatioSelections } from './team-data';
 import { describeMeasurement, MeasurementFields, measurementPayload, metricName, WatchSummary } from './measurement';
 import { AgreedMeasurement, InvestigationMeasurement } from './investigation-measurement';
+import { EffectPlan } from './effect-plan';
 import { Cards, initialCards, labels } from './work-cards';
 import { InterviewSearch } from './interview-search';
 import { Icon } from './icons';
@@ -1098,12 +1099,14 @@ function ChatWorkspace({ home, id, avatar, action, refresh, onRename, onDelete }
 
 function Investigation({
   id,
+  selected,
   home,
   avatar,
   action,
   refresh,
 }: {
   id: string;
+  selected?: string;
   home: Home;
   avatar: User['avatar'];
   action: Action;
@@ -1215,8 +1218,22 @@ function Investigation({
     available ? Math.max(232, Math.min(540, Math.floor(available - 300))) : 540);
   useDiscussionDock(discussion, !!d && !!tid);
   const [editingMeasurement, editMeasurement] = useState(false);
+  const [advancedEffectOpen, setAdvancedEffectOpen] = useState(false);
   const taskTitle = useRef<HTMLHeadingElement>(null);
   const effectSection = useRef<HTMLDetailsElement>(null);
+  const detailLoaded = !!d;
+  const hasWatch = !!d?.case.body.watch;
+  useEffect(() => {
+    if (selected !== 'effect' || !detailLoaded) return;
+    chatMode(false);
+    if (!hasWatch) setAdvancedEffectOpen(true);
+    const frame = requestAnimationFrame(() => {
+      if (!effectSection.current) return;
+      effectSection.current.open = true;
+      effectSection.current.querySelector('summary')?.focus();
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [selected, detailLoaded, hasWatch]);
   const research = useCaseInvestigation(id, d?.investigation);
   const viewRunId = d?.investigation?.current?.id;
   const liveRunId = research.investigation?.current?.id;
@@ -1242,12 +1259,15 @@ function Investigation({
   const specified = c.body.plan?.measurement;
   const agreement = c.body.plan?.measurementAgreement;
   const agreed = specified && agreement ? { measurement: specified, agreement } : undefined;
-  const activeMeasurement = c.body.watch?.measurement;
+  const monitoring = v.monitoring;
+  const archiveMonitoring = monitoring?.kind === 'archive-observation' ? monitoring : undefined;
+  const localMonitoring = monitoring?.kind !== 'archive-observation' ? monitoring : undefined;
+  const activeMeasurement = localMonitoring?.plan.measurement;
   const signalMetric = signal?.metric;
   const productSignal = !!signalMetric && ['lk_reco_ctr','cfg_completion_rate','cfg_reach_rate'].includes(signalMetric);
   const agreementMetric = productSignal ? signalMetric : ['','orders_index','family_orders_idx','индекс заказов']
     .includes(signalMetric?.trim().toLowerCase() || '') ? 'orders_index' : undefined;
-  const targetMetric = activeMeasurement?.metric || specified?.metric || signalMetric;
+  const targetMetric = archiveMonitoring?.plan.metric || activeMeasurement?.metric || specified?.metric || signalMetric;
   const needsSalesContext = !targetMetric || targetMetric === 'orders_index' || !!v.summary[0]?.rows.length;
   const caseCards = cards.filter(key => key !== 'watch' && (needsSalesContext || !['summary', 'trend'].includes(key)));
   const shareCards = v.monitoring ? [...caseCards, 'watch'] : caseCards;
@@ -1257,6 +1277,8 @@ function Investigation({
   const withdrawn = signal?.status === 'withdrawn';
   const needsReconfirmation = !!agreement && !c.body.watch &&
     (withdrawn || agreement.signalRevision !== (signal?.revision ?? 0));
+  const canPlanArchive = !completed && !specified && !productSignal && !activeMeasurement;
+  const useArchiveForm = Boolean(archiveMonitoring || (home.archiveOnly && !monitoring && canPlanArchive));
   const showEffect = watchNext || (completed && !!v.monitoring);
   const researchAvailable = !!research.investigation;
   const readyRuns = [research.investigation?.current, ...(research.investigation?.alternatives || [])];
@@ -1481,15 +1503,12 @@ function Investigation({
           />
           <details className="paper effect-panel" ref={effectSection}>
             <summary>Проверка эффекта</summary>
-            {v.monitoring ? <WatchSummary {...v.monitoring} /> : needsReconfirmation
+            {useArchiveForm ? <EffectPlan key={id + '/' + (archiveMonitoring?.plan.revision || 0)}
+              caseId={id} saved={archiveMonitoring?.result ?? null} archiveOnly={home.archiveOnly}
+              readOnly={completed} reload={async () => { await load(); await refresh(); }} /> : <>
+            {localMonitoring ? <WatchSummary {...localMonitoring} /> : needsReconfirmation
               ? <p role="status">Согласуйте критерий в актуальном исследовании перед назначением проверки.</p>
               : <p>{agreed ? 'Укажите дату выкладки.' : 'Укажите дату выкладки и цель.'}</p>}
-            {!!c.body.watchHistory?.length && <details>
-              <summary>Прошлые проверки</summary>
-              <ul>{c.body.watchHistory.map(item => <li key={item.revision}>
-                <a href={'#snapshot/' + item.calc + '/watch'}>Версия {item.revision} · {item.deployed}</a>
-              </li>)}</ul>
-            </details>}
             {!needsReconfirmation && <form
               key={id + '/' + (c.body.watch?.revision || 0)}
               onSubmit={(e) => {
@@ -1506,7 +1525,7 @@ function Investigation({
             >
               <label>
                 Дата выкладки
-                <input type="date" name="deployed" defaultValue={c.body.watch?.deployed} required />
+                <input type="date" name="deployed" defaultValue={localMonitoring?.plan.deployed} required />
               </label>
               {productSignal && !agreed && <p>{[metricName(signalMetric!), c.product, signal?.segment, signal?.sourceId].filter(Boolean).join(' · ')}</p>}
               {agreed ? !v.monitoring && <AgreedMeasurement {...agreed} /> : specified || (activeMeasurement && !editingMeasurement) ? (
@@ -1520,6 +1539,18 @@ function Investigation({
                 </button>}
               </div>
             </form>}
+            {canPlanArchive && <details open={advancedEffectOpen} onToggle={e => setAdvancedEffectOpen(e.currentTarget.open)}>
+              <summary>Наблюдение по архивным источникам</summary>
+              {advancedEffectOpen && <EffectPlan key={id} caseId={id} saved={null} archiveOnly={home.archiveOnly}
+                reload={async () => { await load(); await refresh(); }} />}
+            </details>}
+            </>}
+            {!!c.body.watchHistory?.length && <details>
+              <summary>Прошлые проверки</summary>
+              <ul>{c.body.watchHistory.map(item => <li key={item.revision}>
+                <a href={'#snapshot/' + item.calc + '/watch'}>Версия {item.revision}{item.deployed && ' · ' + item.deployed}</a>
+              </li>)}</ul>
+            </details>}
             <button
               onClick={() => confirm('finish')}
               disabled={completed}
@@ -2187,7 +2218,7 @@ function Workspace({ user, onLogout, onUpdate }: { user: User; onLogout: () => v
         ) : ['releases', 'release', 'calc'].includes(route) ? (
           <ReleaseAnalytics route={route} requestedId={id} user={user} />
         ) : route === 'case' ? (
-          <Investigation key={id} id={id} home={home} avatar={user.avatar} action={action} refresh={refresh} />
+          <Investigation key={id} id={id} selected={selected} home={home} avatar={user.avatar} action={action} refresh={refresh} />
         ) : route === 'range' ? (
           <RangeResult id={id} />
         ) : route === 'snapshot' ? (

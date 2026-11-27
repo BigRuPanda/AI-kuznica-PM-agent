@@ -116,6 +116,15 @@ export function prepareMeasurement(rows, spec, tolerance, requireBaseline = fals
     baseline, controlBaseline: controlBaseline || undefined };
 }
 
+export function watchKind(plan) {
+  if (!plan) return null;
+  if (plan.measurement) return 'measurement';
+  if (plan.kind === 'archive-observation' || (plan.version === 2 &&
+      typeof plan.metric === 'string' && Number.isInteger(plan.baselineWeeks) &&
+      Number.isInteger(plan.observationWeeks))) return 'archive-observation';
+  return 'legacy-percent';
+}
+
 export function measuredEffect(rows, watch, asOf) {
   const spec = watch.measurement;
   const first = ms(watch.deployed), wk = monday(first), start = date(wk === first ? wk : wk + 7 * day);

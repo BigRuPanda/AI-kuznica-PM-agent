@@ -1,3 +1,5 @@
+import type { Observation, ObservationPlan } from './effect-plan';
+
 export type User = { id: string; name: string; login: string; role: string; space: string; avatar?: string | null };
 export type SourceReference = { source: string; file?: string; loc?: string; version?: string };
 export type SignalWeekEvidence = {
@@ -58,7 +60,9 @@ export type Watch = {
   actual?: number | null; ctrl?: number | null; unit?: string; metric?: string; target?: number;
   sample?: WatchSample; peer?: WatchSample;
 };
-export type Monitoring = { plan: WatchPlan; result: Watch };
+export type LocalMonitoring = { kind?: never; plan: WatchPlan; result: Watch };
+export type Monitoring = LocalMonitoring |
+  { kind: 'archive-observation'; plan: ObservationPlan; result: Observation };
 export type Case = {
   id: string;
   product: string;
@@ -69,15 +73,15 @@ export type Case = {
     owner?: string;
     origin?: { calc: string; cards: string[]; full: boolean };
     release?: string;
-    watch?: WatchPlan;
-    watchHistory?: { revision: number; calc: string; deployed: string }[];
+    watch?: WatchPlan | ObservationPlan;
+    watchHistory?: { revision: number; calc: string; deployed: string | null }[];
     notes?: { author: string; created: number; text: string; rangeId?: string }[];
     plan?: {
       hypothesis?: string; metric?: string; baseline?: string; control?: string; success?: string;
       measurement?: Measurement; measurementAgreement?: MeasurementAgreement;
     };
   };
-  effect?: Watch;
+  effect?: Watch | Observation;
 };
 export type Thread = { id: string; title: string; scope: string; caseId: string | null; canRename: boolean; canDelete: boolean };
 export type Source = { file: string; version:string; versions: number; updated: number; total?: number; role?: string | null };
@@ -201,7 +205,7 @@ export type Detail = {
   }[];
   personal?: { revision?: string; cards: string[]; full?: boolean; control?: string; pin?: boolean };
   view: View;
-  effect: Watch | null;
+  effect: Watch | Observation | null;
   backlog: Issue[];
   published: {
     id: string;

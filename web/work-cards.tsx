@@ -295,7 +295,9 @@ export function Cards({
           {k === 'gap' && (
             <p>{view.gap || 'Для вывода о причине нужны подтверждённые данные следующего шага.'}</p>
           )}
-          {k === 'watch' && (view.monitoring ? <WatchSummary {...view.monitoring} /> :
+          {k === 'watch' && (view.monitoring?.kind === 'archive-observation'
+            ? <ObservationResult value={view.monitoring.result} />
+            : view.monitoring ? <WatchSummary {...view.monitoring} /> :
             <p>Период наблюдения и критерий успеха указаны в разделе «Проверка эффекта».</p>)}
           {k === 'signal' && view.signal && (
             <p className="big-number">{num(view.signal.value)}{view.signal.metric ? '%' : ' п.'}</p>
@@ -353,3 +355,4 @@ export function Cards({
     </>
   );
 }
+import { ObservationResult } from './effect-plan';

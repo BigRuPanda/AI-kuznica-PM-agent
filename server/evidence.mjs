@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
-import { planWatch, prepareMeasurement, measuredEffect, measuredSignal, legacyOrderMetric } from './watch-measurement.mjs';
+import { planWatch, prepareMeasurement, measuredEffect, measuredSignal, legacyOrderMetric, watchKind } from './watch-measurement.mjs';
+import { observedEffect } from './effect-plan.mjs';
 import {initResearchSearch, removeResearchIndex, indexResearchFile, searchResearch} from './research-search.mjs';
 import { initSignalHistory, reconcileSignals } from './signal-history.mjs';
 import { initInvestigations, syncInvestigations } from './case-investigations.mjs';
@@ -364,6 +365,8 @@ export function analysisView(
   const gap = definition
     ? String(definition.data.comment || '') + ' · ' + definition.file + ' · ' + definition.loc
     : 'Определение события добавления в корзину пока не загружено.';
+  const watch = c?.body.watch;
+  const archiveObservation = watchKind(watch) === 'archive-observation';
   const result = {
     product,
     calendarPeriod: true,
@@ -395,7 +398,11 @@ export function analysisView(
     ctr,
     reach,
     signal: signal ?? null,
-    ...(c?.body.watch && { monitoring: { plan: c.body.watch, result: effect(db, c, through) } }),
+    ...(watch && { monitoring: {
+      ...(archiveObservation && { kind: 'archive-observation' }),
+      plan: watch,
+      result: effect(db, c, through),
+    } }),
   };
   const id = digest(JSON.stringify(result));
   db.prepare('INSERT OR IGNORE INTO evidence_calcs VALUES(?,?)').run(id, JSON.stringify(result));
@@ -423,7 +430,9 @@ export function createMeasurementAgreement(db, spec) {
 export function effect(db, c, through) {
   const plan = c.body.watch;
   if (!plan) return null;
-  if (plan.version === 2) return measuredEffect(measurementRows(db, plan.measurement), plan, through);
+  const kind = watchKind(plan);
+  if (kind === 'measurement') return measuredEffect(measurementRows(db, plan.measurement), plan, through);
+  if (kind === 'archive-observation') return observedEffect(db, c, through);
   if (c.body.plan?.measurement || measuredSignal(c.body.signal?.metric) || !legacyOrderMetric(c.body.plan?.metric))
     return { state: 'Уточните метрику наблюдения',
       reason: 'В прошлой версии записан индекс заказов. Назначьте проверку с критерием для нужной метрики.',

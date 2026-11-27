@@ -1,5 +1,5 @@
 import React, { useEffect, useId, useState } from 'react';
-import { num, post, type Measurement, type Monitoring, type WatchSample } from './team-data';
+import { num, post, type Measurement, type LocalMonitoring, type WatchSample } from './team-data';
 
 const names: Record<string, string> = {
   orders_index: 'Индекс заказов', lk_reco_ctr: 'CTR рекомендаций',
@@ -16,7 +16,7 @@ export const valueLabel = (value: number | null | undefined) =>
 const counts = (sample?: WatchSample) =>
   sample?.n != null && sample.d != null ? num(sample.n) + ' / ' + num(sample.d) : '';
 
-export function WatchSummary({ plan, result }: Monitoring) {
+export function WatchSummary({ plan, result }: LocalMonitoring) {
   const m = plan.measurement;
   const unit = result.unit || 'п. индекса';
   const ctrl = result.ctrl == null ? '—' : valueLabel(result.ctrl) + '%';
