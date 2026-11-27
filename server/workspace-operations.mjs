@@ -23,7 +23,7 @@ import {
   digest,
   fmt,
 } from './evidence.mjs';
-import { visibleCase, dashboard, thread, cardTypes, addUserMessage } from './workbench.mjs';
+import { visibleCase, dashboard, thread, cardTypes, addUserMessage, bindReleaseThreadCase } from './workbench.mjs';
 import { access, grant, readSnapshot, readRange, compareRanges, neighboring } from './chart-ranges.mjs';
 import { targetFor } from './tracker-connections.mjs';
 import { trackerClient, prepareTracker, confirmTracker, preview, publicPage, caseLinks } from './tracker-workflow.mjs';
@@ -472,13 +472,14 @@ export function workspaceOperation(
     if (b.caseId && (!caseId || b.product && b.product !== decision.product))
       throw Error('Выберите разбор выбранного продукта, связанный с этим релизом.');
     if (op === 'release-tracker-case') {
-      if (caseId) return { caseId };
       return store.tx(() => {
         const current = releaseDecision(db, user, b);
         const linked = current.caseId && visibleCase(db, user, current.caseId);
-        if (linked?.body.release === b.releaseId) return { caseId: linked.id };
         const title = ('Оценка релиза ' + b.releaseId + ' · ' + current.product).slice(0, 240);
-        return { caseId: createPersonalCase(db, user, { title, product: current.product, release: b.releaseId }).id };
+        const caseId = linked?.body.release === b.releaseId ? linked.id :
+          createPersonalCase(db, user, { title, product: current.product, release: b.releaseId }).id;
+        if (current.scope !== 'account') bindReleaseThreadCase(db, user, b.releaseId, caseId, current.product);
+        return { caseId };
       });
     }
     const proposed = decisionDraft(decision, env.APP_BASE_URL);

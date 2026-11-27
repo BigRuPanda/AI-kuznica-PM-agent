@@ -13,6 +13,7 @@ type Trend =
   | { available: true; baseline: Period; current: Period; change: number | null }
   | { available: false; reason: string };
 type Decision = {
+  decisionContext?: string;
   scope?: 'account';
   accountEvidence?: { lines: string[]; sources: Citation[] };
   caseId: string | null;
@@ -181,7 +182,8 @@ export function ReleaseDecision({
 }: {
   action: Action;
   initialRelease?: string;
-  renderChat: (thread: string, caseId: string | undefined, releaseId: string, product: string) => React.ReactNode;
+  renderChat: (thread: string, caseId: string | undefined, releaseId: string, product: string,
+    decisionContext: string | undefined) => React.ReactNode;
 }) {
   const [criteria, setCriteria] = useState<Criteria>(() => history.state?.releaseDecision ?? { releaseId: initialRelease });
   const [data, setData] = useState<Decision>();
@@ -212,15 +214,16 @@ export function ReleaseDecision({
     history.replaceState({ ...history.state, releaseDecision: next }, '');
     setCriteria(next);
   }
-  async function openChat(caseId: string | null, releaseId: string) {
+  async function openChat(releaseId: string) {
     if (thread) {
       chatAnchor.current?.scrollIntoView({ block: 'start' });
       return;
     }
     setOpening(true);
     try {
-      const result = caseId && data?.scope !== 'account' ? await post<{ id: string }>('case-thread', { caseId })
-        : await post<{ id: string }>('release-thread', { product: data?.product, releaseId });
+      const result = await post<{ id: string }>('release-thread', {
+        product: data?.product, releaseId, decisionContext: data?.decisionContext,
+      });
       setThread(result.id);
     } finally {
       setOpening(false);
@@ -271,11 +274,11 @@ export function ReleaseDecision({
         <div className="decision-next">
           <h3>{data.recommendation.title}</h3>
           <p>{data.recommendation.next}</p>
-          {release && !data.historical && <>
-            <button type="button" className="primary" disabled={opening} onClick={() => action(() => openChat(data.caseId, release.id))}>
+          {release && <>
+            <button type="button" className="primary" disabled={opening} onClick={() => action(() => openChat(release.id))}>
               {opening ? 'Открываем чат…' : 'Открыть чат разбора'}
             </button>
-            {data.caseId && <a href={'#case/' + data.caseId + '/effect'}>Настроить проверку эффекта <Icon name="arrow" /></a>}
+            {data.caseId && !data.historical && <a href={'#case/' + data.caseId + '/effect'}>Настроить проверку эффекта <Icon name="arrow" /></a>}
           </>}
         </div>
       </section>
@@ -337,8 +340,8 @@ export function ReleaseDecision({
       {thread && release && <div className="decision-chat" ref={chatAnchor}>
         <h2>Чат разбора · {release.id}</h2>
         <div className="decision-chat-grid">
-          <TrackerActions key={data.product + '/' + release.id} product={data.product} releaseId={release.id} action={action} />
-          {renderChat(thread, data.caseId || undefined, release.id, data.product)}
+          {!data.historical && <TrackerActions key={data.product + '/' + release.id} product={data.product} releaseId={release.id} action={action} />}
+          {renderChat(thread, data.caseId || undefined, release.id, data.product, data.decisionContext)}
         </div>
       </div>}
     </>}

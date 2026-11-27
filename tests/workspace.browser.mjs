@@ -13,7 +13,7 @@ import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/
 import { createTeamApp } from '../server/team-http.mjs';
 import { digest, facts, importDocs } from '../server/evidence.mjs';
 import { saveMetricRule } from '../server/metric-rules.mjs';
-import { workJobs } from '../server/workbench.mjs';
+import { addUserMessage, enqueue, openCaseThread, openReleaseThread, saveReleaseDecisionContext, workJobs } from '../server/workbench.mjs';
 import { workspaceOperation } from '../server/workspace-operations.mjs';
 import { readMaterial, saveMaterial } from '../server/materials.mjs';
 import { seedWorkspace, fixtureEnv } from './workspace-fixture.mjs';
@@ -302,6 +302,7 @@ test('release decisions preserve the historical cutoff, cited cells and manual i
   importDocs(store, imported, { notify: false });
   const call = (op, body) => workspaceOperation(store, user, op, body, fixtureEnv, transport);
   const linked = call('create-case', { title: 'Связанный разбор Kaspersky', product: 'Kaspersky', release: 'DEC-2' });
+  const unrelated = call('create-case', { title: 'Обычный разбор Astra', product: 'Astra' });
   assert.throws(() => call('release-tracker-draft', { caseId: linked.id, releaseId: 'DEC-1' }), /другому релизу/);
   assert.equal(call('release_decision', { releaseId: 'DEC-1' }).caseId, null);
   assert.equal(call('release_decision', { releaseId: 'DEC-2' }).asOf, '2026-11-24');
@@ -314,8 +315,17 @@ test('release decisions preserve the historical cutoff, cited cells and manual i
   assert.equal(astra.caseId, null);
   assert.ok(astra.items.some(item => item.key === 'DEC-ASTRA' && item.exact));
   assert.equal(caseCount(), countBeforeSearch);
+  const releaseChat = openReleaseThread(store, user, call('release_decision', { releaseId: 'DEC-3' }));
+  addUserMessage(store.db, user, releaseChat, { text: 'История до создания связанного разбора' });
   const association = call('release-tracker-case', { releaseId: 'DEC-3' });
   assert.deepEqual(call('release-tracker-case', { releaseId: 'DEC-3' }), association);
+  assert.equal(openCaseThread(store.db, user, association.caseId), releaseChat);
+  assert.equal(openReleaseThread(store, user, call('release_decision', { releaseId: 'DEC-3' })), releaseChat);
+  const unrelatedChat = openCaseThread(store.db, user, unrelated.id);
+  assert.notEqual(unrelatedChat, releaseChat);
+  const accountContext = saveReleaseDecisionContext(store.db, user, account);
+  assert.throws(() => enqueue(store, user, { thread: unrelatedChat, question: 'Каков эффект?', decisionContext: accountContext }),
+    /другой переписке/);
   await assert.rejects(call('release-tracker-draft', { ...association, releaseId: 'DEC-3' }), /Найдена подходящая задача/);
   const astraDraft = await call('release-tracker-draft', { ...association, releaseId: 'DEC-3', key: 'DEC-ASTRA' });
   assert.equal(astraDraft.caseId, association.caseId);
@@ -353,6 +363,8 @@ test('release decisions preserve the historical cutoff, cited cells and manual i
   await field(page, 'Семейство или раздел').selectOption('Astra');
   await visible(page.getByRole('heading', { name: 'Astra', exact: true }));
   assert.equal(await field(page, 'Релиз').inputValue(), 'DEC-3');
+  await role(page, 'Открыть чат разбора').click();
+  await visible(page.getByText('История до создания связанного разбора', { exact: true }));
 
   await page.goto(base + '/#release-detail/DEC-2');
   await page.getByRole('link', { name: 'Решение по релизу', exact: true }).click();
@@ -410,6 +422,17 @@ test('release decisions preserve the historical cutoff, cited cells and manual i
   await role(page, 'Открыть чат разбора').click();
   await visible(page.getByText(question, { exact: true }));
   assert.deepEqual(store.db.prepare("SELECT id FROM conversations WHERE title='ЛК · R-50'").all().map(r => r.id), [thread]);
+  await field(page, 'Дата среза').fill('2026-10-10');
+  await role(page, 'Показать на дату').click();
+  await visible(page.getByText('Исторический срез · 10.10.2026', { exact: true }));
+  await role(page, 'Открыть чат разбора').click();
+  await page.locator('textarea').fill(question);
+  await submit(page, 'ask', () => role(page, 'Отправить').click());
+  const scopedJob = JSON.parse(store.db.prepare('SELECT body FROM jobs WHERE thread=? ORDER BY rowid DESC LIMIT 1').get(thread).body);
+  assert.equal(scopedJob.decisionThrough, '2026-10-10');
+  assert.equal(scopedJob.releaseDecisionSnapshot.through, '2026-10-10');
+  await workJobs(store, app.accounts, fixtureEnv, transport);
+  await visible(conversation.getByText(/14\/14 и 6\/14/));
   assert.equal(store.db.prepare("SELECT count(*) AS n FROM local_issues WHERE key='DEC-ASTRA'").get().n, 0);
   assert.equal((await call('confirm', { id: astraDraft.id })).key, 'DEC-ASTRA');
   assert.equal(store.db.prepare("SELECT count(*) AS n FROM local_issues WHERE key='DEC-ASTRA'").get().n, 1);

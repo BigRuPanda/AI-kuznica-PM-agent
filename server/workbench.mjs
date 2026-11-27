@@ -67,7 +67,8 @@ function migrateChatItems(db) {
 export function initWorkbench(db, env = process.env) {
   db.exec(
     'CREATE TABLE IF NOT EXISTS conversations(id TEXT PRIMARY KEY,owner TEXT,scope TEXT,title TEXT);' +
-      'CREATE TABLE IF NOT EXISTS release_threads(thread TEXT PRIMARY KEY,release_id TEXT NOT NULL);' +
+      'CREATE TABLE IF NOT EXISTS release_threads(thread TEXT PRIMARY KEY,release_id TEXT NOT NULL,case_id TEXT,product TEXT);' +
+      'CREATE TABLE IF NOT EXISTS release_decision_context(id TEXT PRIMARY KEY,owner TEXT NOT NULL,body TEXT NOT NULL);' +
       'CREATE TABLE IF NOT EXISTS chat_items' + chatItemColumns +
       'CREATE TABLE IF NOT EXISTS jobs(id TEXT PRIMARY KEY,thread TEXT,user TEXT,body TEXT,status TEXT,result TEXT,created INTEGER);' +
       'CREATE TABLE IF NOT EXISTS telegram_job_routes(job_id TEXT PRIMARY KEY REFERENCES jobs(id) ON DELETE CASCADE,chat TEXT NOT NULL,is_group INTEGER NOT NULL);' +
@@ -86,6 +87,9 @@ export function initWorkbench(db, env = process.env) {
   initRanges(db);
   initMaterials(db);
   db.prepare("INSERT OR IGNORE INTO conversations VALUES('group','','group','Команда Store')").run();
+  const releaseColumns = db.prepare('PRAGMA table_info(release_threads)').all();
+  if (!releaseColumns.some(column => column.name === 'case_id')) db.exec('ALTER TABLE release_threads ADD COLUMN case_id TEXT');
+  if (!releaseColumns.some(column => column.name === 'product')) db.exec('ALTER TABLE release_threads ADD COLUMN product TEXT');
   db.prepare("UPDATE jobs SET status='queued' WHERE status='running'").run();
   db.prepare("UPDATE draft_actions SET state='uncertain' WHERE state='sending'").run();
   db.prepare("UPDATE deliveries SET state='uncertain' WHERE state='sending'").run();
@@ -155,6 +159,9 @@ export function thread(db, user, id) {
 }
 export function openCaseThread(db, user, caseId) {
   const c = visibleCase(db, user, caseId);
+  const linked = c.body.release && db.prepare(`SELECT c.id FROM release_threads r JOIN conversations c ON c.id=r.thread
+    WHERE r.case_id=? AND r.release_id=? AND c.owner=? AND c.scope='private'`).get(c.id, c.body.release, user.id);
+  if (linked) return linked.id;
   const id = caseThreadId(user.id, c.id);
   db.prepare("INSERT OR IGNORE INTO conversations VALUES(?,?,'private',?)").run(id, user.id, c.title);
   return id;
@@ -162,15 +169,47 @@ export function openCaseThread(db, user, caseId) {
 const releaseThreadId = (user, releaseId) => digest(user.id + '/release/' + releaseId);
 export function openReleaseThread(store, user, decision) {
   const { db } = store;
-  if (decision.caseId && decision.scope !== 'account') return openCaseThread(db, user, decision.caseId);
   const releaseId = decision.release.id;
-  const id = releaseThreadId(user, releaseId);
+  const dedicated = releaseThreadId(user, releaseId);
+  const linkedCase = decision.caseId && decision.scope !== 'account' && visibleCase(db, user, decision.caseId);
+  const caseId = linkedCase?.body?.release === releaseId ? linkedCase.id : null;
   return store.tx(() => {
+    const existing = db.prepare(`SELECT c.id FROM conversations c LEFT JOIN release_threads r ON r.thread=c.id
+      WHERE c.owner=? AND c.scope='private' AND (r.release_id=? OR c.id=?)
+      ORDER BY (c.id=?) DESC, c.rowid LIMIT 1`).get(user.id, releaseId, dedicated, dedicated);
+    const id = existing?.id ?? (caseId ? openCaseThread(db, user, caseId) : dedicated);
     db.prepare("INSERT OR IGNORE INTO conversations VALUES(?,?,'private',?)")
       .run(id, user.id, decision.product + ' · ' + releaseId);
-    db.prepare('INSERT OR IGNORE INTO release_threads VALUES(?,?)').run(id, releaseId);
+    db.prepare(`INSERT INTO release_threads(thread,release_id,case_id,product) VALUES(?,?,?,?)
+      ON CONFLICT(thread) DO UPDATE SET case_id=COALESCE(case_id,excluded.case_id),product=COALESCE(product,excluded.product)`)
+      .run(id, releaseId, caseId, decision.product);
     return id;
   });
+}
+export function bindReleaseThreadCase(db, user, releaseId, caseId, product) {
+  db.prepare(`UPDATE release_threads SET case_id=? WHERE release_id=? AND case_id IS NULL AND (product IS NULL OR product=?)
+    AND thread IN (SELECT id FROM conversations WHERE owner=? AND scope='private')`).run(caseId, releaseId, product, user.id);
+}
+
+function freezeReleaseDecision(db, decision) {
+  const versions = kind => db.prepare('SELECT DISTINCT version FROM facts WHERE kind=? ORDER BY version').all(kind).map(row => row.version);
+  return { releaseId: decision.release.id, through: decision.asOf, product: decision.product, decision,
+    metricVersions: versions('metrics'), releaseVersions: versions('releases'), salesVersions: versions('sales'),
+    dictionaryVersions: versions('dictionary'), backlogVersions: versions('backlog') };
+}
+export function saveReleaseDecisionContext(db, user, decision) {
+  if (!decision.release) return undefined;
+  const body = JSON.stringify(freezeReleaseDecision(db, decision));
+  const id = digest(user.id + '/' + body);
+  db.prepare('INSERT OR IGNORE INTO release_decision_context VALUES(?,?,?)').run(id, user.id, body);
+  return id;
+}
+export function readReleaseDecisionContext(db, user, id) {
+  const row = typeof id === 'string' && db.prepare('SELECT body FROM release_decision_context WHERE id=? AND owner=?').get(id, user.id);
+  if (!row) throw Error('Срез релиза недоступен. Откройте решение по релизу снова.');
+  const context = JSON.parse(row.body);
+  if (context.decision.caseId) visibleCase(db, user, context.decision.caseId);
+  return context;
 }
 export function createThread(db, user, title, group = false) {
   const id = randomUUID();
@@ -233,15 +272,26 @@ export function enqueue(store, user, b, { telegramReply } = {}) {
   if (b.caseId) visibleCase(store.db, user, b.caseId);
   return store.tx(() => {
     const t = thread(store.db, user, b.thread);
-    const release = store.db.prepare('SELECT release_id FROM release_threads WHERE thread=?').get(t.id);
-    const legacyRelease = !release && t.scope === 'private' && /^[a-f0-9]{64}$/.test(t.id) && facts(store.db, 'releases')
-      .find(row => releaseThreadId(user, row.data.release_id) === t.id)?.data.release_id;
-    if (legacyRelease) store.db.prepare('INSERT OR IGNORE INTO release_threads VALUES(?,?)').run(t.id, legacyRelease);
-    if (release || legacyRelease) b = { ...b, decisionReleaseId: release?.release_id || legacyRelease };
-    if (b.caseId && t.scope === 'group' && getCase(store.db, b.caseId).body.owner)
-      throw Error('Сначала опубликуйте личный разбор');
     const id = digest([user.id, t.id, b.requestId || randomUUID()].join('/'));
     if (store.db.prepare('SELECT id FROM jobs WHERE id=?').get(id)) return id;
+    const { decisionContext, decisionReleaseId: _release, decisionThrough: _through, releaseDecisionSnapshot: _snapshot, ...input } = b;
+    b = input;
+    const release = store.db.prepare('SELECT release_id,product FROM release_threads WHERE thread=?').get(t.id);
+    const legacyRelease = !release && t.scope === 'private' && /^[a-f0-9]{64}$/.test(t.id) && facts(store.db, 'releases')
+      .find(row => releaseThreadId(user, row.data.release_id) === t.id)?.data.release_id;
+    if (legacyRelease) store.db.prepare('INSERT OR IGNORE INTO release_threads(thread,release_id) VALUES(?,?)').run(t.id, legacyRelease);
+    const releaseId = release?.release_id || legacyRelease;
+    if (decisionContext) {
+      const snapshot = readReleaseDecisionContext(store.db, user, decisionContext);
+      if (snapshot.releaseId !== releaseId)
+        throw Error('Срез относится к другой переписке.');
+      b = { ...b, caseId: snapshot.decision.caseId || undefined, decisionReleaseId: releaseId,
+        decisionThrough: snapshot.through, product: snapshot.product, releaseDecisionSnapshot: snapshot };
+    } else if (releaseId) {
+      b = { ...b, decisionReleaseId: releaseId, product: release?.product || b.product };
+    }
+    if (b.caseId && t.scope === 'group' && getCase(store.db, b.caseId).body.owner)
+      throw Error('Сначала опубликуйте личный разбор');
     const materials = attachedMaterials(
       store.db,
       user,

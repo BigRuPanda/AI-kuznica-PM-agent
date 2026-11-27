@@ -35,6 +35,8 @@ import {
   thread,
   openReleaseThread,
   openCaseThread,
+  saveReleaseDecisionContext,
+  readReleaseDecisionContext,
   workJobs,
   deliver,
 } from './workbench.mjs';
@@ -444,9 +446,15 @@ export function createTeamApp({
           return reply(200, { threshold });
         }
         if (op === 'case-thread') return reply(200, { id: openCaseThread(db, user, b.caseId) });
+        if (op === 'release_decision') {
+          const decision = workspaceOperation(store, user, op, b, env, send);
+          return reply(200, { ...decision, decisionContext: saveReleaseDecisionContext(db, user, decision) });
+        }
         if (op === 'release-thread') {
           if (typeof b.releaseId !== 'string' || !b.releaseId) throw Error('Выберите выпущенную функцию.');
-          const decision = workspaceOperation(store, user, 'release_decision', { releaseId: b.releaseId, product: b.product }, env, send);
+          const decision = b.decisionContext ? readReleaseDecisionContext(db, user, b.decisionContext).decision :
+            workspaceOperation(store, user, 'release_decision', { releaseId: b.releaseId, product: b.product }, env, send);
+          if (decision.release.id !== b.releaseId) throw Error('Срез относится к другому релизу.');
           return reply(200, { id: openReleaseThread(store, user, decision) });
         }
         if (op === 'thread') return reply(200, { id: createThread(db, user, b.title, !!b.group) });

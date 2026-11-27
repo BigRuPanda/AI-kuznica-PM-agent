@@ -261,8 +261,8 @@ export async function runAssistant(
     }
     const archive = c && archiveInquiry(b.question) && !smallTalk && !b.screen?.calc && !range && !b.analysisPeriod
       ? archiveEvidence(db,b.question+' '+c.product,{product:c.product}).slice(0,4) : [];
-    const decision = b.decisionReleaseId && !smallTalk &&
-      workspaceOperation(store, user, 'release_decision', { releaseId: b.decisionReleaseId, caseId: b.caseId }, env, send, shared);
+    const decision = b.decisionReleaseId && !smallTalk && (b.releaseDecisionSnapshot?.decision ||
+      workspaceOperation(store, user, 'release_decision', { releaseId: b.decisionReleaseId, caseId: b.caseId }, env, send, shared));
     const context = {
       archive:archive.length?archive.map(r=>r.text):undefined,
       releaseDecision: decision ? {

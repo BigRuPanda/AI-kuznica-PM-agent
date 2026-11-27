@@ -288,6 +288,7 @@ function Chat({
   onThreadAction,
   threadMenuTrigger,
   decisionReleaseId,
+  decisionContext,
   product,
   action,
   onResult,
@@ -305,6 +306,7 @@ function Chat({
   onThreadAction?: (thread: Thread, action: ChatAction) => void;
   threadMenuTrigger?: RefObject<HTMLButtonElement | null>;
   decisionReleaseId?: string;
+  decisionContext?: string;
   product?: string;
   action: Action;
   onResult?: (b: Msg['body']) => void;
@@ -753,6 +755,7 @@ function Chat({
               question: (context && !webSearch ? 'О графике «' + context + '». ' : '') + q,
               caseId,
               decisionReleaseId,
+              decisionContext,
               product,
               screen,
               materialIds: [...new Set([material?.id, pasted].filter(Boolean))],
@@ -2288,8 +2291,8 @@ function Workspace({ user, onLogout, onUpdate }: { user: User; onLogout: () => v
         ) : ['releases', 'release', 'calc'].includes(route) ? (
           <ReleaseAnalytics route={route} requestedId={id} user={user} />
         ) : route === 'release-decision' ? (
-          <ReleaseDecision key={id} action={action} initialRelease={id || undefined} renderChat={(thread, caseId, releaseId, product) => (
-            <Chat key={thread} id={thread} caseId={caseId} decisionReleaseId={releaseId} product={product}
+          <ReleaseDecision key={id} action={action} initialRelease={id || undefined} renderChat={(thread, caseId, releaseId, product, decisionContext) => (
+            <Chat key={thread} id={thread} caseId={caseId} decisionReleaseId={releaseId} decisionContext={decisionContext} product={product}
               userId={user.id} avatar={user.avatar} threads={home.threads} action={action} />
           )} />
         ) : route === 'case' ? (
