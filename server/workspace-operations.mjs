@@ -1,4 +1,4 @@
-import { excelSources, sourceRows, sourceValues, cellSource, issuePages, issueClosure, pageByIssue } from './knowledge.mjs';
+import { excelSources, sourceRows, sourceValues, cellSource, issuePages, issueClosure, pagesByIssue } from './knowledge.mjs';
 import { readPublicPage } from './public-page.mjs';
 import { marketOffers } from './market-offers.mjs';
 import { checkOffer, savedOfferCheck } from './competitor-check.mjs';
@@ -757,9 +757,18 @@ export function workspaceOperation(
     const service = op.startsWith('page_') ? 'confluence' : 'redmine';
     if (op === 'page_read' && b.issueKey) {
       return Promise.resolve().then(async () => {
-        const linked = pageByIssue(db, user, b.issueKey, sharedOnly);
-        const api = await trackerClient(store, user, linked.target, env, send, undefined, sharedOnly);
-        return publicPage(await api.read(linked.key));
+        const candidates = pagesByIssue(db, user, b.issueKey, { sharedOnly, localOnly: b.local });
+        let providerError;
+        for (const { key, target } of candidates) {
+          try {
+            const api = await trackerClient(store, user, target, env, send, undefined, sharedOnly);
+            return publicPage(await api.read(key));
+          } catch (error) {
+            if (target.local) throw error;
+            providerError ??= error;
+          }
+        }
+        throw providerError || Error('Страница по задаче недоступна.');
       });
     }
     const target = b.local || (op === 'page_draft' && b.pageTarget === 'local')

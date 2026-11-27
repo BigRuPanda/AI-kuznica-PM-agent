@@ -59,7 +59,7 @@ export function issueClosure(db, user, issueUrl, sharedOnly = false) {
   return { closingNote: result.closing_note ?? null, originalReport: result.report ?? null };
 }
 
-export function pageByIssue(db, user, issueKey, sharedOnly = false) {
+export function pagesByIssue(db, user, issueKey, { sharedOnly = false, localOnly = false } = {}) {
   const number = String(issueKey).trim().replace(/^(?:Redmine\s*)?[#№]?\s*/i, '');
   const keys = [issueKey, number, 'Redmine #' + number, '#' + number];
   const urls = db.prepare(`
@@ -71,7 +71,7 @@ export function pageByIssue(db, user, issueKey, sharedOnly = false) {
   `).all(number, ...keys);
   const pages = new Map(urls.filter(row => row.url)
     .map(({ url }) => [url, issuePages(db, user, url, sharedOnly)]).filter(([, pages]) => pages.length));
-  const external = sharedOnly ? [] : db.prepare(`
+  const external = sharedOnly || localOnly ? [] : db.prepare(`
     SELECT d.body FROM draft_actions d JOIN cases c ON c.id=d.case_id
     WHERE d.state='done' AND json_extract(d.body,'$.kind')='page'
       AND json_extract(d.body,'$.target.service')='confluence'
@@ -91,13 +91,19 @@ export function pageByIssue(db, user, issueKey, sharedOnly = false) {
     if (issueUrls.size > 1) throw Error('Найдено несколько задач с таким номером. Укажите ключ страницы из поиска.');
     throw Error('Страница по задаче недоступна.');
   }
-  if (external.length) return { key: external[0].receipt.key, target: external[0].target };
-  const [url, linked] = pages.entries().next().value;
+  const candidates = new Map();
+  for (const draft of external) {
+    const candidate = { key: draft.receipt.key, target: draft.target };
+    candidates.set(JSON.stringify([candidate.target, candidate.key]), candidate);
+  }
+  const [url] = issueUrls;
+  const linked = pages.get(url) || [];
   const preferred = db.prepare(`
     SELECT rp.page FROM redmine_results r JOIN redmine_result_pages rp ON rp.result=r.id
     WHERE json_extract(r.body,'$.url')=? ORDER BY r.created DESC,r.id DESC
   `).all(url).find(row => linked.some(page => page.key === row.page));
-  return { key: preferred?.page || linked[0].key, target: { service:'confluence', local:true } };
+  const key = preferred?.page || linked[0]?.key;
+  return [...candidates.values(), ...(key ? [{ key, target: { service:'confluence', local:true } }] : [])];
 }
 
 export function knowledge(db, user) {

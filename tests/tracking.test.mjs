@@ -32,22 +32,32 @@ const config = {
 const macro =
   '<ac:structured-macro ac:name="code"><ac:plain-text-body><![CDATA[<macro>]]></ac:plain-text-body></ac:structured-macro>';
 
-test('publication pins the selected Excel version and makes the linked page readable by issue number', async () => {
+test('personal Redmine closes into a private wiki page, preserves the Excel version and can publish to Data Center', async () => {
   const store = dbAt();
   try {
+    const { syncWatches } = await import('../server/redmine-watch.mjs');
     const mock = siteMock();
     const s = scenario(store, mock);
+    const report = { id:'report-at-creation', start:'2026-08-17', end:'2026-08-30', status:'снижение',
+      web:'https://report.test/original', periods:[[70,27],[62,15]] };
+    const closingNote = { text:'Проверено: дословный комментарий', author:'Автор' };
+    mock.report = report;
+    s.env.SIGNAL_BRIDGE_URL = 'http://localhost:8732';
+    s.env.NOTIFICATION_CHANNELS = '';
     store.db.prepare("UPDATE cases SET body=json_remove(body,'$.owner') WHERE id=?").run(s.caseId);
     await s.connect('redmine');
-    const issue = await s.confirm(await s.draft('draft', { title: 'Закрытый результат', description: 'Исходная постановка' }));
-    const closure = { episode: 1, reference: 'fixture', issue: Number(issue.key), url: issue.url, title: 'Закрытый результат',
-      description: 'Исходная постановка', status: 'Закрыта', observed: '2026-09-02', personalOwner: owner.id,
-      closing_note: { text: 'Проверено: дословный комментарий', author: 'Автор' },
-      report: { start: '2026-08-17', end: '2026-08-30', status: 'снижение', web: 'https://report.test/original', periods: [[70, 27], [62, 15]] } };
-    store.db.prepare('INSERT INTO redmine_results VALUES(?,?,?,?)').run('fixture/1', s.caseId, JSON.stringify(closure), Date.parse(closure.observed));
-    recordResultPage(store.db, 'fixture/1', s.caseId, closure);
+    const issue = await s.confirm(await s.draft('draft', { title:'Закрытый результат', description:'Исходная постановка',
+      includeReport:true }));
+    mock.report = { ...report, id:'later-report' };
+    mock.issues[0].status = { id:6, name:'Закрыта', is_closed:true };
+    mock.issues[0].journals.push({ details:[{name:'status_id',new_value:'6'}], notes:closingNote.text,
+      user:{name:closingNote.author} });
+    const accounts = { publicUser: id => id === owner.id ? owner : null };
+    await syncWatches(store, accounts, s.env, mock.send);
+    assert.equal(store.db.prepare('SELECT error FROM redmine_watches').get()?.error, null);
     const [record] = knowledge(store.db, owner).results;
-    assert.deepEqual(record.report, closure.report);
+    assert.deepEqual(record.report, report);
+    assert.equal(mock.calls.filter(call => call.p === '/reports/latest').length, 1);
     assert.equal(knowledge(store.db, peer).results.length, 0);
     assert.equal(knowledge(store.db, peer).pages.length, 0);
     const book = text => ({ file: 'Аналитика.xlsx', facts: [{ kind: 'competitor', loc: 'Сводка!C4', text }] });
@@ -70,8 +80,9 @@ test('publication pins the selected Excel version and makes the linked page read
     await assert.rejects(s.run('page_read', { issueKey: issue.key }, owner, true), /недоступна/i);
     assert.deepEqual((await s.run('page_search', { query: 'Закрытый результат' }, peer)).items, []);
     const task = await s.run('issue_read', { key: issue.key });
-    assert.deepEqual(task.closingNote, closure.closing_note);
-    assert.deepEqual(task.originalReport, closure.report);
+    assert.equal(task.closingNote.text, closingNote.text);
+    assert.equal(task.closingNote.author, closingNote.author);
+    assert.deepEqual(task.originalReport, report);
     assert.equal(task.pages[0].key, page.key);
     const cell = '#knowledge-source/' + version + '/' + encodeURIComponent('Сводка!C4');
     store.db.prepare('UPDATE demo_pages SET storage=storage||? WHERE key=?')
@@ -83,7 +94,7 @@ test('publication pins the selected Excel version and makes the linked page read
     assert.ok(knowledge(store.db, owner).pages.some(row => row.key === derived.key));
     const derivedPage = await s.run('page_read', {key:derived.key,local:true});
     assert.ok(derivedPage.links.some(link => link.url === cell));
-    assert.ok(derivedPage.links.some(link => link.url === closure.report.web));
+    assert.ok(derivedPage.links.some(link => link.url === report.web));
     assert.ok(!knowledge(store.db, peer).pages.some(row => row.key === derived.key));
     await assert.rejects(s.run('page_read', { key: derived.key, local: true }, peer), /недоступна/i);
     await assert.rejects(s.run('page_read', { key: derived.key, local: true }, owner, true), /недоступна/i);
@@ -105,11 +116,51 @@ test('publication pins the selected Excel version and makes the linked page read
     assert.match(mock.pages[0].body.storage.value, /bugs\.test\/pm\/issues\/1/);
     assert.ok(mock.pages[0].body.storage.value.includes('https://pm.test/#knowledge-source/' + version));
     assert.ok(mock.pages[0].body.storage.value.includes('https://pm.test/' + cell));
-    assert.ok(mock.pages[0].body.storage.value.includes(closure.report.web));
-    assert.equal(mock.issues[0].journals.length, 4);
+    assert.ok(mock.pages[0].body.storage.value.includes(report.web));
+    assert.equal(mock.issues[0].journals.length, 5);
     mock.pages[0].version.number = 2;
     assert.equal((await s.run('page_read', { issueKey: issue.key })).version, 2);
     await assert.rejects(s.run('page_read', { issueKey: issue.key }, peer), /недоступна/i);
+  } finally {
+    store.close();
+  }
+});
+
+test('team members can read the built-in page when a newer Confluence copy is unavailable', async () => {
+  const store = dbAt();
+  try {
+    const mock = siteMock(), s = scenario(store, mock);
+    store.db.prepare("UPDATE cases SET body=json_remove(body,'$.owner') WHERE id=?").run(s.caseId);
+    await s.connect('redmine');
+    const issue = await s.confirm(await s.draft('draft', { title:'Общий результат', description:'Исходная постановка' }));
+    const closure = { episode:1, reference:'team-fixture', issue:Number(issue.key), url:issue.url,
+      title:'Общий результат', status:'Закрыта', observed:'2026-09-02', report:null };
+    store.db.prepare('INSERT INTO redmine_results VALUES(?,?,?,?)')
+      .run('team-fixture/1', s.caseId, JSON.stringify(closure), Date.parse(closure.observed));
+    recordResultPage(store.db, 'team-fixture/1', s.caseId, closure);
+    const [{ pageKey: builtIn }] = knowledge(store.db, owner).results;
+    assert.equal((await s.run('page_read', {issueKey:issue.key}, peer)).key, builtIn);
+
+    await s.connect('confluence');
+    const publish = title => s.draft('page_draft', {
+      title, content:'Опубликованный вывод', resultPage:builtIn, issueKey:issue.key, pageTarget:'external',
+    }).then(s.confirm);
+    const first = await publish('Первый вывод в Confluence');
+    const latest = await publish('Свежий вывод в Confluence');
+    assert.equal((await s.run('page_read', {issueKey:issue.key})).key, latest.key);
+    assert.equal((await s.run('page_read', {issueKey:issue.key}, peer)).key, builtIn);
+    assert.equal((await s.run('page_read', {issueKey:issue.key, local:true})).key, builtIn);
+
+    await personalConnection(store.db, peer, { service:'confluence', token:'peer-key', action:'connect' }, s.env, mock.send);
+    mock.deniedPages = new Set([latest.key]);
+    assert.equal((await s.run('page_read', {issueKey:issue.key}, peer)).key, first.key);
+    mock.deniedPages.add(first.key);
+    assert.equal((await s.run('page_read', {issueKey:issue.key}, peer)).key, builtIn);
+
+    configure(store.db, owner, { ...config.confluence, scope:'another-team' });
+    const requestsBefore = mock.calls.length;
+    assert.equal((await s.run('page_read', {issueKey:issue.key}, peer)).key, builtIn);
+    assert.equal(mock.calls.length, requestsBefore);
   } finally {
     store.close();
   }
@@ -176,7 +227,7 @@ function siteMock() {
       p = u.pathname,
       method = init.method || 'GET',
       b = init.body && JSON.parse(init.body);
-    const auth = init.headers.Authorization || init.headers['X-Redmine-API-Key'];
+    const auth = init.headers?.Authorization || init.headers?.['X-Redmine-API-Key'];
     remote.calls.push({ p, q: u.searchParams, method, auth, b });
     const json = (value) => Response.json(value),
       status = (v) => new Response(null, { status: v });
@@ -187,6 +238,7 @@ function siteMock() {
       }
       return value;
     }
+    if (u.hostname === 'localhost' && u.port === '8732' && p === '/reports/latest') return json(remote.report);
     if (!auth || auth.includes('revoked')) return status(401);
     if (p === '/pm/users/current.json') return json({ user: { id: 5 } });
     if (p.endsWith('/rest/api/user/current')) return json({ type: 'known', userKey: 'fixture' });
@@ -238,7 +290,10 @@ function siteMock() {
     if (p.includes('/rest/api/content') || cloud) {
       const id = p.match(/\/(\d+)$/)?.[1],
         old = remote.pages.find((x) => x.id === id);
-      if (method === 'GET') return old ? json(old) : status(404);
+      if (method === 'GET') {
+        if (remote.deniedPages?.has(id)) return status(403);
+        return old ? json(old) : status(404);
+      }
       if (method === 'PUT' && old.version.number + 1 !== b.version.number) return status(409);
       if (cloud) assert.equal(b.spaceId, '9');
       else assert.equal(b.space.key, 'TEAM');
