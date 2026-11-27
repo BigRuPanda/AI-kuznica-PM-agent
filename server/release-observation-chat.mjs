@@ -59,11 +59,62 @@ const launchFacts = /(?:когда|дата).{0,40}(?:вышел|выпущ|вы
 const separateRequest = /(?:построй|нарисуй|визуализируй|график|диаграмм|создай|заведи|оформи|подготовь|составь|сохрани|запиши|закрепи|опубликуй|отправь|экспортируй|закрой|назначь|поставь|обнови|прокомментируй|отслеживай|добавь|(?:нужно|надо|прошу)\s+(?:создать|завести|оформить|добавить)|(?:найди|покажи|перечисли|расскажи).{0,30}(?:комментари|интервью|конкурент|confluence)|(?:объясни(?![\p{L}])|почему|причина).{0,25}(?:упал|рос|сниз|выро[сш]|измен)|redmine)/gu;
 const metrikaRequested = /метрик[\p{L}]* магазина|яндекс\s*\.?\s*метрик|reports api|сч[её]тчик|(?:жив|реальн)[\p{L}]*.{0,18}данн[\p{L}]*.{0,20}метрик/u;
 const ordersAttribution = /(?:можно ли|может ли).{0,60}(?:объяснить|связать|установить).{0,45}(?:заказ|bi[\s-]*индекс)/u;
+const controlCue = /(?<![\p{L}\p{N}_])(?:(?<off>без|отключи|убери|выключи|не\s+(?:используй|учитывай|бери|включай|показывай|добавляй))\s+контрол[ья]|(?:покажи|включи|добавь|возьми|используй|укажи|сравни\s+с)\s+контроль|с\s+контролем|контроль(?=\s*[:=—–]))(?![\p{L}\p{N}_])/iu;
 const ref = (row, detail) => ({
   url: '#knowledge-source/' + row.version + '/' + encodeURIComponent(row.loc),
   label: row.file + ' · ' + row.loc,
   ...(detail && { detail }),
 });
+
+function splitControl(question) {
+  const cue = question.match(controlCue);
+  if (!cue) return { subject: question };
+  const end = cue.index + cue[0].length;
+  const tail = question.slice(end);
+  const boundary = tail.search(/[!?;,\n]|\.(?!\d)|\s+(?=(?:для|у|по состоянию на|на дату|на\s+\d|в процентах|отдельно|и\s+(?:покажи|укажи|дай))(?=$|[^\p{L}]))/iu);
+  const length = boundary < 0 ? tail.length : boundary;
+  const name = tail.slice(0,length).trim().replace(/^(?:[:=—–-]\s*)?(?:семейство\s+|продукт\s+|по\s+)?[«"]?/iu,'')
+    .replace(/[»"]$/u,'').trim();
+  return {
+    subject: question.slice(0,cue.index) + ' ' + tail.slice(length),
+    cue: { from:cue.index, through:end },
+    requested: { off:!!cue.groups.off, name },
+  };
+}
+
+function namedProducts(text, catalog) {
+  const plain = normalize(text);
+  const matches = catalog.filter(product => mentions(plain,product));
+  const exact = matches.filter(product => !matches.some(other => normalize(other).length > normalize(product).length &&
+    productFamily(other) === productFamily(product) && mentions(normalize(other),product)));
+  const families = new Set(exact.map(productFamily));
+  return [...exact, ...catalog.filter(product => {
+    const family = productFamily(product);
+    return !families.has(family) && (mentions(plain,family) ||
+      family === 'astra' && /(?:^| )астр[аыеуой]*(?: |$)/u.test(plain) ||
+      family === 'kaspersky' && /(?:^| )каспер[\p{L}]*(?: |$)/u.test(plain));
+  })];
+}
+
+function chooseControl(request, choices, metric, saved) {
+  if (request?.off) return { product:'', note:'Контроль отключён по запросу.' };
+  if (metric !== 'orders_index') return { note:request && 'Контрольное семейство доступно для недельного индекса заказов.' };
+  const alternatives = choices.length ? ' Доступные семейства: ' + choices.join(', ') + '.' : '';
+  if (request?.name) {
+    const named = namedProducts(request.name,choices);
+    if (named.length === 1) return { product:named[0] };
+    return {
+      product:'',
+      pending: choices.length ? 'control' : false,
+      note: (named.length ? 'Укажите одно семейство для контроля.' :
+        'В доступных рядах нет отдельного контрольного семейства «' + request.name + '».') + alternatives,
+    };
+  }
+  if (saved) return { product:saved };
+  if (request && choices.length !== 1) return { product:'', pending:choices.length ? 'control' : false,
+    note:choices.length ? 'Укажите контрольное семейство.' + alternatives : 'В загруженных данных нет другого семейства для контроля.' };
+  return {};
+}
 
 const titleWords = title => normalize(title).split(' ').filter(word => word.length >= 4 || word === 'ctr');
 function similarWord(a, b) {
@@ -133,8 +184,10 @@ function metrikaStatus(db, env, result) {
 export function releaseObservationAnswer(store, user, b, env, shared, history) {
   const question = b.question.toLowerCase().replace(/ё/gu, 'е');
   const plain = normalize(question);
+  const { subject, cue, requested: explicitControl } = splitControl(b.question);
   if (b.rangeId || b.materialIds?.length || /^(?:что (?:такое|значит|означает)|как (?:посчитать|рассчитать)) /u.test(question) ||
-      [...question.matchAll(separateRequest)].some(m => !/(?<![\p{L}])(?:не|без)\s*$/u.test(question.slice(0, m.index)))) return;
+      [...question.matchAll(separateRequest)].some(m => !(cue && m.index >= cue.from && m.index < cue.through) &&
+        !/(?<![\p{L}])(?:не|без)\s*$/u.test(question.slice(0, m.index)))) return;
   const [baselineWeeks, observationWeeks] = windows(question);
   const releaseIds = identifiers(question, 'R');
   const taskIds = identifiers(question, 'T');
@@ -143,6 +196,11 @@ export function releaseObservationAnswer(store, user, b, env, shared, history) {
   const metricIds = [...new Set(plain.match(/(?<![\p{L}\p{N}_])[a-z][a-z0-9]*(?:_[a-z0-9]+)+(?![\p{L}\p{N}_])/gu) || [])];
   const previous = history.at(-1)?.body.releaseObservation;
   const db = store.db;
+  const controlName = previous?.pending === 'control' && !explicitControl &&
+    plain.replace(/^(?:тогда )?(?:возьми|выбираю|давай) /u,'');
+  const followupControlName = controlName && listSales(db).some(({product}) =>
+    controlName === normalize(product) || controlName === normalize(productFamily(product)));
+  const requested = explicitControl || (followupControlName ? {name:controlName} : undefined);
   const carousel = /карусел/u.test(plain);
   const selected = releaseIds[0] || b.decisionReleaseId;
   const transitionQuestion = /переход|перешл|клик|нажима|ctr|частот/u.test(plain);
@@ -176,9 +234,10 @@ export function releaseObservationAnswer(store, user, b, env, shared, history) {
   const followsPending = previous?.pending && !releaseIds.length && !taskIds.length && question.length <= 180;
   const followupMetric = followsPending && previous.pending === 'metric' && namedMetrics(question,
     facts(db, 'dictionary').map(({ data }) => ({ id: data.metric_id, title: data.metric_name }))).length > 0;
-  const followup = followsPending && (followupMetric || shortReply.test(question.trim()) &&
+  const controlFollowup = requested && previous?.effect && previous.releaseId && !releaseIds.length && !taskIds.length;
+  const followup = controlFollowup || followsPending && (followupMetric || shortReply.test(question.trim()) &&
     (asOf !== undefined || metricIds.length || segmentIds.length || baselineWeeks !== undefined || observationWeeks !== undefined));
-  if (!followup && (!(releaseIds.length || b.decisionReleaseId) || !observation.test(question) && !launchFacts.test(question))) return;
+  if (!followup && (!(releaseIds.length || b.decisionReleaseId) || !requested && !observation.test(question) && !launchFacts.test(question))) return;
   const params = {
     ...(followup ? previous : {}),
     releaseId: releaseIds[0] || (followup && previous.releaseId) || b.decisionReleaseId,
@@ -188,7 +247,8 @@ export function releaseObservationAnswer(store, user, b, env, shared, history) {
     baselineWeeks: baselineWeeks ?? (followup ? previous.baselineWeeks : undefined),
     observationWeeks: observationWeeks ?? (followup ? previous.observationWeeks : undefined),
     asOf: asOf ?? (followup ? previous.asOf : undefined),
-    effect: !!(followup && previous.effect || observation.test(question) || metricIds.length),
+    controlRequest: requested || (followup ? previous.controlRequest : undefined),
+    effect: !!(followup && previous.effect || requested || observation.test(question) || metricIds.length),
     metrika: !!(followup && previous.metrika || metrikaRequested.test(question) ||
       /(?<![\p{L}])Метрик[аиуе](?![\p{L}])/u.test(b.question)),
     ordersAttribution: !!(followup && previous.ordersAttribution || ordersAttribution.test(question)),
@@ -201,7 +261,7 @@ export function releaseObservationAnswer(store, user, b, env, shared, history) {
   if (!params.releaseId) return ask('Какой релиз проверить? Укажите его идентификатор из журнала.');
   const accessible = cases(db).filter(c => !c.body.owner || (!shared && c.body.owner === user.id));
   const catalog = [...new Set([...listSales(db).map(r => r.product), ...accessible.map(c => c.product)])];
-  const named = catalog.filter(name => mentions(plain, name) || mentions(plain, productFamily(name)));
+  const named = followupControlName ? [] : namedProducts(subject,catalog);
   if (named.length > 1) return ask('Для какого семейства проверить релиз? Укажите один продукт.');
   let current = accessible.find(c => c.id === (b.caseId || (followup ? previous.caseId : undefined)));
   if (b.caseId && !current) throw Error('Разбор недоступен в этом пространстве.');
@@ -212,8 +272,7 @@ export function releaseObservationAnswer(store, user, b, env, shared, history) {
     current = accessible.find(c => c.body.release === params.releaseId);
     if (!current) {
       const release = facts(db, 'releases').find(r => r.data.release_id === params.releaseId);
-      const title = normalize(release?.data.description);
-      const matching = catalog.filter(name => mentions(title, name) || mentions(title, productFamily(name)));
+      const matching = namedProducts(release?.data.description,catalog);
       if (matching.length === 1) current = accessible.find(c => c.product === matching[0]);
     }
   }
@@ -267,12 +326,16 @@ export function releaseObservationAnswer(store, user, b, env, shared, history) {
     return clarify('Сколько недель взять до релиза и сколько после? Укажите для каждого окна от 1 до 12 недель.');
 
   const { metric: metricId, releaseId, segment } = params;
+  const savedControl = [current.id === b.caseId && b.screen?.control, current.body.watch?.control]
+    .find(product => options.controls.includes(product));
+  const controlChoice = chooseControl(params.controlRequest,options.controls,metricId,savedControl);
   const effect = call('effect-preview', {
     metric: metricId, releaseId, segment, taskId: task?.id,
     baselineWeeks: params.baselineWeeks, observationWeeks: params.observationWeeks, asOf: params.asOf,
+    ...(controlChoice.product !== undefined && { control:controlChoice.product }),
   });
   result.steps.push('effect-preview');
-  const { baseline, observed } = effect;
+  const { baseline, observed, control } = effect;
   lines.push('Срез на ' + effect.asOf + ' · ' + effect.plan.title + ' (' + metricId + ') · ' + segment + '.');
   const step = metricStepDays(metricId);
   if (baseline) lines.push(periodText('До релиза', baseline, step));
@@ -282,6 +345,20 @@ export function releaseObservationAnswer(store, user, b, env, shared, history) {
       ? 'Окно наблюдения заканчивается ' + effect.checkAfter + '.' : effect.state + '.')
     : 'Наблюдаемое изменение · ' + (effect.change > 0 ? '+' : '') + fmt(effect.change) + ' ' +
       (effect.unit === '%' ? 'п. п.' : effect.unit) + '. Для вывода о влиянии релиза нужна отдельная проверка.');
+  if (control) {
+    lines.push('Контроль · ' + control.product + '.',
+      periodText('Контроль до релиза',control.baseline,step),
+      periodText('Контроль после релиза',control.observed,step));
+    if (control.relativeChange != null) {
+      lines.push('Изменение контроля · ' + (control.relativeChange > 0 ? '+' : '') + fmt(control.relativeChange) +
+        ' %. Допуск · ' + fmt(control.tolerance) + ' %.');
+      if (Math.abs(control.relativeChange) > control.tolerance) lines.push('Изменился контроль — требуется проверка.');
+    } else {
+      lines.push(control.change == null ? 'Недостаточно сопоставимых наблюдений по контролю.' :
+        'Относительное изменение контроля нельзя вычислить при нулевой базе.');
+    }
+  }
+  if (controlChoice.note) lines.push(controlChoice.note);
   if (effect.breaks?.length)
     lines.push('На сопоставимость повлияли изменения учёта · ' + effect.breaks.map(r => r.id + ' ' + r.date + ' — ' + r.title).join(', ') + '.');
   if (params.ordersAttribution)
@@ -290,10 +367,11 @@ export function releaseObservationAnswer(store, user, b, env, shared, history) {
   const representative = p => p?.sources.length > 5 ? [p.sources[0], p.sources.at(-1)] : p?.sources || [];
   const unique = new Map(result.readSources.map(item => [item.url, item]));
   if (metric.source) unique.set(ref(metric.source).url, ref(metric.source));
-  for (const row of [...representative(baseline), ...representative(observed), ...(effect.breaks || [])]) {
+  for (const row of [...representative(baseline), ...representative(observed),
+    ...representative(control?.baseline), ...representative(control?.observed), ...(effect.breaks || [])]) {
     const citation = ref(row, row.date + (Number.isFinite(row.value) ? ' · ' + fmt(row.value) : ''));
     unique.set(citation.url, citation);
   }
   result.readSources = [...unique.values()];
-  return respond(lines.join('\n\n'));
+  return respond(lines.join('\n\n'),controlChoice.pending);
 }

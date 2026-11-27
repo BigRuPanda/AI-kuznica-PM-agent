@@ -36,7 +36,7 @@ import {
 import { bindTelegram, contactAction, initContacts } from './notification-contacts.mjs';
 import { collectClosures, knowledge } from './redmine-bridge.mjs';
 import { syncWatches } from './redmine-watch.mjs';
-import { python, metrika, probeMetrika, mail, telegram } from './connectors.mjs';
+import { python, metrika, probeMetrika, mail, smtpConfigured, telegram } from './connectors.mjs';
 import { initSourcePolicy, approveSource, sourcePermission, importApproved, sourceHistory, protectedSources } from './source-policy.mjs';
 import { preview, revisePage } from './tracker-workflow.mjs';
 import { configure, connectionInfo, personalConnection, finishOAuth } from './tracker-connections.mjs';
@@ -589,7 +589,7 @@ export function createTeamApp({
               .prepare('SELECT count(*) n FROM redmine_watches WHERE error IS NOT NULL')
               .get().n,
             telegram: !!env.TELEGRAM_BOT_TOKEN,
-            smtp: !!env.SMTP_HOST,
+            smtp: smtpConfigured(env),
             llm: env.LLM_MODEL || '',
             notifications: env.NOTIFICATIONS_ENABLED === 'true',
           });

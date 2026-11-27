@@ -164,7 +164,8 @@ function aggregateChart(db, user, ref, sharedOnly) {
       value = null,
       reason;
     const pair = pairs[v.metric];
-    if (ratio && pair && group.every((r) => pair.every((k) => Number.isFinite(r.details?.[k])))) {
+    if (!group.length) reason = 'В выбранном периоде нет числовых наблюдений.';
+    else if (ratio && pair && group.every((r) => pair.every((k) => Number.isFinite(r.details?.[k])))) {
       n = group.reduce((s, r) => s + r.details[pair[0]], 0);
       d = group.reduce((s, r) => s + r.details[pair[1]], 0);
       value = d ? (100 * n) / d : null;

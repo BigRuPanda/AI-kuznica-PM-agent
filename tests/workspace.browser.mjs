@@ -273,7 +273,11 @@ test('Softline workspace, upgrade and browser journeys', async t => {
     await role(dlg,'Создать релиз').click();
     await visible(admin.getByRole('heading',{name:'Релиз приёмки',exact:true}));
     await field(admin,'Спросить агента').fill('Сколько дней до оплаты? Построй график.');
-    await role(admin,'Отправить вопрос').click();
+    const [reply] = await Promise.all([
+      admin.waitForResponse(r => new URL(r.url()).pathname === '/api/chat'),
+      role(admin,'Отправить вопрос').click(),
+    ]);
+    assert.ok(reply.ok(), await reply.text());
     await admin.getByRole('button',{name:/Раскрыть график/}).first().click();
     dlg=admin.getByRole('dialog');
     await field(dlg,'Дашборд релиза').fill('Проверенные расчёты');
@@ -413,6 +417,50 @@ test('Softline workspace, upgrade and browser journeys', async t => {
       await demo.reload();
       assert.ok(demo.url().endsWith('#R-002'));
     } finally { await demo.close(); }
+  });
+
+  await journey('a source workbook links back to Sources when the knowledge base is disabled', async () => {
+    await admin.getByRole('navigation').getByRole('link', {name: 'Источники'}).click();
+    await admin.getByRole('link', {name: 'Synthetic evaluation.xlsx', exact: true}).click();
+    await visible(admin.getByRole('heading', {name: 'Synthetic evaluation.xlsx'}));
+    const back = admin.locator('.workspace-page[data-route="knowledge-source"] .paper > a').first();
+    await back.click();
+    await visible(admin.getByRole('heading', {name: 'Источники', exact:true}));
+  });
+
+  await journey('a new case started from the case list does not inherit a previous release', async () => {
+    await admin.getByRole('navigation').getByRole('link', {name: 'Разборы'}).click();
+    await admin.getByRole('link', {name: 'Журнал релизов →'}).click();
+    await admin.getByRole('link', {name: /DEMO-R/}).click();
+    await role(admin, 'Запланировать оценку').click();
+    const linkedRelease = field(admin,'Связанный релиз');
+    assert.equal(await linkedRelease.inputValue(), 'DEMO-R');
+    await field(admin, 'Вопрос или гипотеза').fill('Оценить новый релиз');
+    await field(admin, 'Продукт').fill('Kaspersky');
+    await submit(admin, 'create-case', () => role(admin, 'Создать личный разбор').click());
+    await visible(admin.getByRole('heading', {name: 'Оценить новый релиз'}));
+    await admin.getByRole('link', {name: '← Разборы'}).click();
+    await role(admin,'Новый разбор').click();
+    assert.equal(await linkedRelease.inputValue(), '', 'У самостоятельного разбора релиз изначально не выбран');
+  });
+
+  await journey('an invitation opens registration in an existing signed-out tab', async () => {
+    const guest = await browser.newPage();
+    guest.setDefaultTimeout(4000);
+    try {
+      await guest.goto(base);
+      await visible(guest.getByRole('heading', {name:'Вход', exact:true}));
+      const code = app.accounts.invite('team');
+      await guest.goto(base + '/#join/' + code);
+      await visible(guest.getByRole('heading', {name:'Создать аккаунт', exact:true}));
+      assert.equal(await field(guest,'Код приглашения').inputValue(), code);
+      await field(guest,'Имя').fill('Участник по приглашению');
+      await field(guest,'Логин').fill('invited-user');
+      await field(guest,'Пароль').fill('fixture-password');
+      await submit(guest,'register',()=>role(guest,'Создать аккаунт').click());
+      await visible(guest.locator('.session-role').getByText('Участник',{exact:true}));
+      assert.equal(new URL(guest.url()).hash, '#overview');
+    } finally { await guest.close(); }
   });
   assert.deepEqual(errors,[]);
 });

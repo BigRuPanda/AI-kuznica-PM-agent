@@ -1,8 +1,9 @@
 import { marketOffers, releaseDecision } from './release-decision.mjs';
 import { checkOffer } from './competitor-check.mjs';
+import { requestsOffline } from './web-search.mjs';
 
 export function competitorQuestion(question) {
-  if (/(?:без интернета|не проверяй|на дату|на момент|по состоянию на\s+(?!сегодня)|\d{4}-\d{2}-\d{2}|\d{1,2}[./]\d{1,2}[./]\d{2,4})/iu.test(question)) return false;
+  if (requestsOffline(question) || /(?:не проверяй|на дату|на момент|по состоянию на\s+(?!сегодня)|\d{4}-\d{2}-\d{2}|\d{1,2}[./]\d{1,2}[./]\d{2,4})/iu.test(question)) return false;
   return /(?:проверь|проверить|сверь|сверить|обнови|актуальн|сейчас|сегодня)/iu.test(question) &&
     /(?:цен[ауые]|предложени|карточк[ауи]|лицензи|артикул)/iu.test(question) &&
     /конкурент|продавц|allsoft|аллсофт|[a-z0-9-]+\.(?:ru|com)\b|артикул/iu.test(question);

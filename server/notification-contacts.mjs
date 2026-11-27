@@ -1,5 +1,6 @@
 import { randomInt } from 'node:crypto';
 import { secret } from './accounts.mjs';
+import { smtpConfigured } from './connectors.mjs';
 import { digest } from './evidence.mjs';
 
 export function initContacts(db) {
@@ -49,7 +50,7 @@ export async function contactAction(op, data, user, db, env, sendMail, botName) 
         .prepare('SELECT address FROM email_checks WHERE user=? AND issued>? AND attempts<5')
         .get(id, time - 600000)?.address || null,
     telegram: !!destination(db, id, 'telegram'),
-    smtpReady: !!(env.SMTP_HOST && env.SMTP_FROM),
+    smtpReady: smtpConfigured(env),
     testMailbox: env.SMTP_TLS === 'local-test',
     testInboxPort: Number(env.MAILPIT_WEB_PORT || 18882),
     telegramReady: enabledBot,
@@ -75,7 +76,7 @@ export async function contactAction(op, data, user, db, env, sendMail, botName) 
     return { command: '/start ' + code, url: 'https://t.me/' + name + '?start=' + code };
   }
   if (op === 'email-request') {
-    if (!env.SMTP_HOST || !env.SMTP_FROM) throw Error('Администратору нужно настроить SMTP');
+    if (!smtpConfigured(env)) throw Error('Администратору нужно настроить SMTP');
     const address = String(data.address || '')
       .trim()
       .toLowerCase();

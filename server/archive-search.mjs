@@ -9,7 +9,7 @@ const stems = text => {
     .replace(/компьютер[а-я]*|десктоп[а-я]*/gu,'desktop').replace(/мобильн[а-я]*|телефон[а-я]*/gu,'mobile')
     .match(/[\p{L}\d_]+/gu) || [];
   return [...new Set(words.filter(w => !stop.has(w) && w.length > 1).map(w =>
-    /^[а-я]+$/u.test(w) ? w.replace(/(?:иями|ями|ами|ого|ему|ому|ями|ах|ях|ов|ев|ей|ой|ую|ых|ым|ом|ами|ия|ие|ии|ы|и|а|я|у|е|ю)$/u,'').slice(0,7) : w))];
+    /^[а-я]+$/u.test(w) ? w.replace(/(?:иями|ями|ами|ого|ему|ому|ией|ах|ях|ов|ев|ей|ой|ую|ых|ым|ом|ия|ие|ии|ию|ы|и|а|я|у|е|ю)$/u,'').slice(0,7) : w))];
 };
 const translit = w => [...w].map(c => ({а:'a',б:'b',в:'v',г:'g',д:'d',е:'e',ж:'zh',з:'z',и:'i',й:'y',к:'k',
   л:'l',м:'m',н:'n',о:'o',п:'p',р:'r',с:'s',т:'t',у:'u',ф:'f',х:'kh',ц:'ts',ч:'ch',ш:'sh',щ:'shch',ъ:'',ы:'y',ь:'',э:'e',ю:'yu',я:'ya'}[c] ?? c)).join('');
@@ -28,7 +28,7 @@ function archiveIndex(db) {
   const versions=db.prepare('SELECT DISTINCT version FROM facts ORDER BY version').all().map(r=>r.version);
   const stamp=versions.join('/');
   if (indexes.get(db)?.stamp===stamp) return indexes.get(db);
-  const records=[], metrics=[], sales=[], freq=new Map();
+  const records=[], metrics=[], sales=[];
   const byVersion=Map.groupBy(db.prepare('SELECT version,loc FROM facts').all(),r=>r.version);
   const doc=db.prepare('SELECT file,body FROM documents WHERE version=?');
   for(const version of versions) {
@@ -60,16 +60,23 @@ function archiveIndex(db) {
       records.push(group);
     }
   }
-  let totalTerms=0;
   for(const r of records) {
     r.words=new Set(stems(r.text));
-    totalTerms+=r.words.size;
     r.titleWords=new Set(stems(r.data?.metric_name || r.data?.title || r.prices?.Продукт || ''));
-    for(const w of r.words) freq.set(w,1+(freq.get(w)||0));
   }
-  const averageTerms=totalTerms/records.length || 1;
-  const result={stamp,records,metrics,sales,freq,averageTerms};
+  const result={stamp,...termStatistics(records),metrics,sales,
+    interviewCorpus:termStatistics(records.filter(r=>r.fields))};
   indexes.set(db,result);return result;
+}
+
+function termStatistics(records) {
+  let total=0;
+  const freq=new Map();
+  for (const r of records) {
+    total+=r.words.size;
+    for (const word of r.words) freq.set(word,1+(freq.get(word)||0));
+  }
+  return {records,freq,averageTerms:total/records.length || 1};
 }
 
 function ranked(rows, words, idx) {
@@ -88,7 +95,7 @@ function ranked(rows, words, idx) {
 
 const sourceText = r => {
   const d=r.data;
-  if(r.kind==='dictionary') return [d.metric_name,d.formula_or_logic,d.bad_signal,d.comment].filter(Boolean).join('. ');
+  if(r.kind==='dictionary') return [d.metric_name,d.what_it_means,d.formula_or_logic,d.bad_signal,d.comment].filter(Boolean).join('. ');
   if(r.kind==='releases') return [d.release_id,d.release_date,d.description].filter(Boolean).join(' · ');
   if(r.kind==='backlog') return [d.task_id,d.title,d.description_short].filter(Boolean).join(' · ');
   return r.text;
@@ -113,6 +120,17 @@ function excerpt(r, words) {
   return {text:retained.map(f=>f.field.slice(0,130)+' — '+passage(f.answer,words,size)).join('\n'),refs:retained.map(f=>f.ref)};
 }
 
+export function archiveIdStatus(db, question) {
+  const ids=question.match(/(?<![\p{L}\d_-])[a-z][a-z\d]*-\d+(?![\p{L}\d_-])/giu);
+  if (!ids || !/релиз|задач|тикет|б[еэ]клог/iu.test(question)) return;
+  const entries=archiveIndex(db).records.flatMap(r=>r.kind==='releases' ? [r.data.release_id,...taskIdsOf(r)] :
+    r.kind==='backlog' ? [r.data.task_id,...list(r.data.release_id)] : []);
+  const known=new Set(entries.filter(Boolean).map(id=>id.toUpperCase()));
+  const prefixes=new Set([...known].map(id=>id.split('-')[0]));
+  const requested=[...new Set(ids.map(id=>id.toUpperCase()))].filter(id=>/^[RT]-/u.test(id) || prefixes.has(id.split('-')[0]));
+  return {found:requested.filter(id=>known.has(id)),missing:requested.filter(id=>!known.has(id))};
+}
+
 export function archiveEvidence(db, question, {releaseId}={}) {
   const idx=archiveIndex(db), words=stems(question);
   const q=question.toLowerCase(), dates=explicitDates(q,String(new Date().getFullYear()));
@@ -127,13 +145,28 @@ export function archiveEvidence(db, question, {releaseId}={}) {
   const exactId=id=>mentionedIds.has(String(id).toLowerCase());
   const backlog=idx.records.filter(r=>r.kind==='backlog');
   const calendar=idx.records.filter(r=>r.kind==='releases');
-  const namedReleases=calendar.filter(r=>exactId(r.data.release_id) || (!mentionedIds.size && r.data.release_id===releaseId));
   const namedTasks=backlog.filter(r=>exactId(r.data.task_id));
+  const namedReleases=calendar.filter(r=>exactId(r.data.release_id) || (!mentionedIds.size && r.data.release_id===releaseId));
+  if(!namedReleases.length && !namedTasks.length && taskQuery)
+    namedReleases.push(...calendar.filter(r=>taskIdsOf(r).some(exactId)));
   const taskLookup=taskQuery || namedTasks.length>0;
-  const priceQuery=/цен|дешев|дороже|стоимост|артикул/iu.test(q);
+  const priceQuery=/(?<![\p{L}])цен|дешев|дороже|стоимост|артикул/iu.test(q);
   const price=candidates.filter(h=>h.r.prices);
   const relevantPrice=priceQuery && price[0]?.score>=topScore*.70;
   const interview=candidates.find(h=>h.r.kind==='interview' && h.r.fields);
+  const asksRespondent=/интервью|респондент|со слов (?:покупателя|клиента)/iu.test(q);
+  if (!mentionedIds.size && !releaseId && !dates.length && asksRespondent &&
+      (!taskQuery || !/номер|тикет|б[еэ]клог/iu.test(q))) {
+    // Catalog rows are shorter than full interviews. Use the requested corpus
+    // for both document frequencies and length normalization.
+    const corpus=idx.interviewCorpus;
+    addRow(ranked(corpus.records,words,corpus)[0]?.r);
+    return evidence;
+  }
+  if (!mentionedIds.size && !dates.length && !taskQuery && /справочник/iu.test(q) && metricRank.length) {
+    for (const {r} of metricRank.filter(h=>h.score>=metricRank[0].score*.91).slice(0,3)) addRow(r);
+    return evidence;
+  }
   const relevantInterview=interview && interview.score>=topScore*.85 &&
     !(dates.length && /просмотр|визит|заказ|индекс|показател/iu.test(q));
   if(relevantPrice && !namedReleases.length && !taskLookup) {
@@ -230,6 +263,7 @@ export async function archiveAnswer(store, question, evidence, env, send, job) {
   const fallback=()=>evidence.map(x=>x.text).join('\n\n');
   const result={mode:'archive',outcome:'done',steps:['search'],readSources};
   if(evidence.every(x=>x.kind==='interview')) return {...result,text:'Из записей интервью:\n\n'+fallback()};
+  if(evidence.every(x=>x.kind==='dictionary')) return {...result,text:fallback()};
   // Measured values, computed differences and their calendar context are already readable.
   if(evidence.some(x=>x.kind==='measurement' || x.kind==='task-link')) return {...result,text:fallback()};
   if(env.LLM_DATA_MODE !== 'analysis' || !apiConfigured(env)) return {...result,text:fallback()};

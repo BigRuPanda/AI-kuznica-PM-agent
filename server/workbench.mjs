@@ -11,19 +11,19 @@ import {
   fmt,
   facts,
   listSales,
-  sourceValues,
   setting,
   defaultRules,
   digest,
 } from './evidence.mjs';
 import { apiConfigured, providerCall } from './agent.mjs';
 import { briefConversation, caseBrief, caseBriefKind } from './chat-brief.mjs';
+import { weeklySourceAnswer } from './weekly-source-chat.mjs';
 import { chatPresentationStatus, initPresentations, requestsPresentation, startPresentation } from './presentations.mjs';
 import { webQuestion, webAnswer } from './web-search.mjs';
 import { competitorQuestion, competitorAnswer } from './competitor-chat.mjs';
 import { destination } from './notification-contacts.mjs';
 import { initTracking } from './tracker-workflow.mjs';
-import { mail, telegram } from './connectors.mjs';
+import { mail, smtpConfigured, telegram } from './connectors.mjs';
 import {
   initMaterials,
   attachedMaterials,
@@ -42,7 +42,7 @@ import {
 } from './agent-research.mjs';
 import { asksToDraw, chartFindings, chartObservations, resolveChartFocus } from './chart-focus.mjs';
 import { dayComparison, explicitDayWindow } from './day-comparison.mjs';
-import { archiveAnswer, archiveEvidence, archiveInquiry, asksArchiveTask } from './archive-search.mjs';
+import { archiveAnswer, archiveEvidence, archiveIdStatus, archiveInquiry, asksArchiveTask } from './archive-search.mjs';
 
 const chatItemColumns = '(seq INTEGER PRIMARY KEY AUTOINCREMENT,thread TEXT,author TEXT,role TEXT,body TEXT,created INTEGER);';
 
@@ -132,7 +132,9 @@ export function dashboard(db, user) {
     rules: setting(db, 'rules', defaultRules),
     alerts: db.prepare('SELECT id,week,case_id FROM alerts ORDER BY week DESC').all(),
     releases: facts(db, 'releases').map((f) => f.data),
-    deliveries: db.prepare('SELECT channel,state,count(*) n FROM deliveries GROUP BY channel,state').all(),
+    deliveries: user.role === 'admin'
+      ? db.prepare('SELECT channel,state,count(*) n FROM deliveries GROUP BY channel,state').all()
+      : [],
   };
 }
 export function thread(db, user, id) {
@@ -498,26 +500,6 @@ function factsForCards(view, cards, backlog) {
     lines.push(...view.corrections.map((x) => 'Поправка PM к ' + x.source + ': ' + x.comment));
   return lines;
 }
-function weeklySourceAnswer(db, question) {
-  const [request, ...followups] = question.toLowerCase().trim().split(/[?!.]+/u).map(s => s.trim()).filter(Boolean);
-  const lookup = request?.match(/^(?:какой|каков|чему равен|покажи|назови|скажи)\s+(?:был\s+)?индекс\s+(?:самостоятельных\s+)?заказов\s+(.+?)\s+за неделю с\s+(\d{4}-\d{2}-\d{2})$/u);
-  const citation = /^(?:укажи|покажи|назови|дай) (?:значение и )?(?:ссылку на )?(?:источник|строку|ячейку)(?: данных| в источнике| исходной книги| в книге)?$/u;
-  const checkRow = /^проверь,? есть ли (?:в (?:источнике|книге) )?строка(?: (?:за эту|на эту) дату)?$/u;
-  if (!lookup || followups.some(s => !citation.test(s) && !checkRow.test(s))) return;
-  const [, requestedProduct, date] = lookup;
-  const weeks = listSales(db).filter(r => r.product.toLowerCase() === requestedProduct);
-  if (!weeks.length) return;
-  const product = weeks[0].product;
-  const rows = sourceValues(db, { product, metric: 'orders_index', date });
-  const readSources = rows.map(r => ({
-    label: r.file + ' · ' + r.loc, url: '#knowledge-source/' + r.version + '/' + encodeURIComponent(r.loc),
-    detail: r.metric + ' = ' + r.value + ' · ' + date,
-  }));
-  const text = rows.length
-    ? rows.map(r => 'Индекс самостоятельных заказов ' + product + ' за неделю с ' + date + ' — ' + fmt(r.value) + '. ' + r.file + ' · ' + r.loc + (r.comment ? '. ' + r.comment : '')).join('\n')
-    : 'В загруженных продажах ' + product + ' нет строки за неделю с ' + date + '. Первая неделя в данных — ' + weeks[0].week + ', последняя — ' + weeks.at(-1).week + '.';
-  return { text, product, readSources, steps: ['source_value'], mode: 'source-value', outcome: 'done' };
-}
 export async function answer(store, user, b, env = process.env, send = fetch, job = randomUUID()) {
   const db = store.db;
   const { scope } = thread(db, user, b.thread);
@@ -555,6 +537,19 @@ export async function answer(store, user, b, env = process.env, send = fetch, jo
     }
   }
   if (!b.rangeId && !b.materialIds?.length) {
+    if (archiveInquiry(b.question)) {
+      const ids=archiveIdStatus(db,b.question);
+      if (ids?.missing.length) {
+        const absent='В загруженном архиве не найдены '+ids.missing.join(', ')+'.';
+        if (ids.found.length) {
+          const rows=archiveEvidence(db,b.question).filter(r=>['releases','backlog','task-link','measurement'].includes(r.kind));
+          const known=await archiveAnswer(store,b.question,rows,{},send,job);
+          if (known) return {...known,text:known.text+'\n\n'+absent,archiveQuestion:b.question,caseId:b.caseId};
+        }
+        return {mode:'archive',outcome:'clarification',steps:['search'],readSources:[],
+          text:absent+' Проверьте идентификатор в календаре релизов или бэклоге.'};
+      }
+    }
     const { releaseObservationAnswer } = await import('./release-observation-chat.mjs');
     const release = releaseObservationAnswer(store, user, b, env, shared, history);
     if (release) return release;
@@ -574,7 +569,7 @@ export async function answer(store, user, b, env = process.env, send = fetch, jo
     };
   if (focus?.id) b = { ...b, materialIds: [focus.id], screen: undefined };
   if (!b.rangeId && !b.materialIds?.length) {
-    const value = weeklySourceAnswer(db, b.question);
+    const value = weeklySourceAnswer(db, b.question, history.at(-1)?.body);
     if (value) return { ...value, caseId: b.caseId };
   }
   const daily = store.tx(() => dayComparison(db, user, b, history, shared));
@@ -582,15 +577,19 @@ export async function answer(store, user, b, env = process.env, send = fetch, jo
   const intent = researchIntent(b.question);
   const taskQuery = asksArchiveTask(b.question);
   const contextualTask = taskQuery && /(?:эт[а-яё]*|текущ[а-яё]*|выбранн[а-яё]*)\s+(?:релиз|выкладк)|(?:за ним|за ней|у него|к нему)|^(?:а\s+)?(?:какая задача|(?:назови|укажи) номер задачи)[?!.\s]*$/iu.test(b.question);
-  if (!focus && !b.rangeId && !b.materialIds?.length && !b.screen?.calc &&
-      ((!b.decisionReleaseId && !b.caseId) || (taskQuery && !(shared && activeCase?.body.owner))) &&
+  const explicitArchive=/интервью|респондент|справочник|в архиве|по архиву/iu.test(b.question);
+  const caseSourceRequest=explicitArchive || taskQuery && (contextualTask || /релиз|тикет|[a-z]-\d/iu.test(b.question));
+  if (!focus && !b.rangeId && !b.materialIds?.length && (!b.screen?.calc || caseSourceRequest) &&
+      ((!b.decisionReleaseId && !b.caseId) || taskQuery || explicitArchive) &&
       !intent.chart && archiveInquiry(b.question) && !history.at(-1)?.body.rangeId) {
     const previous = history.at(-1)?.body;
-    const query = previous?.archiveQuestion && (contextualTask || /^(?:а |тогда |уточни|а если|и что)/iu.test(b.question))
+    const archiveFollowUp=contextualTask || !explicitArchive && !/[a-z][a-z\d]*-\d+/iu.test(b.question) &&
+      /^(?:(?:а|и|тогда) )?(?:почему(?: так)?[?!. ]*$|что это значит|уточни|а если|как насч[её]т|у (?:него|неё|них)|в (?:ней|нём|нем)|по (?:нему|ней|ним)|за (?:эт[уои]|ту же)|какая из них)/iu.test(b.question);
+    const query = previous?.archiveQuestion && archiveFollowUp
       ? previous.archiveQuestion + '\n' + b.question : b.question;
     const releaseId = b.decisionReleaseId || (contextualTask ? activeCase?.body.release : undefined);
     const evidence = archiveEvidence(db, query, {releaseId});
-    if (evidence.length && (!activeCase && !b.decisionReleaseId || evidence.some(row=>row.kind==='task-link'))) {
+    if (evidence.length && (!activeCase && !b.decisionReleaseId || explicitArchive || evidence.some(row=>row.kind==='task-link'))) {
       return { ...await archiveAnswer(store, query, evidence, env, send, job), archiveQuestion: b.question,
         ...(activeCase ? {caseId:activeCase.id,product:activeCase.product} : {}) };
     }
@@ -638,6 +637,11 @@ async function answerTurn(store, user, b, env, send, job, history, intent) {
       product: v.product,
       mode: 'calculation',
     };
+  }
+  const orderChartOnly = /^(?:пожалуйста[, ]+)?(?:построй|покажи|нарисуй|создай|сделай)\s+(?:мне\s+)?(?:график|диаграмму)\s+(?:динамики\s+)?индекса\s+(?:самостоятельных\s+)?заказов(?:\s+(?:по|для|в)\s+(?:(?:этому|этого|этом|текущему|текущего|текущем)\s+)?разбор[а-я]*)?[.!?\s]*$/iu.test(b.question);
+  if (research?.requestedChart && orderChartOnly && !b.materialIds?.length && !b.rangeId) {
+    return {mode:'calculation',outcome:'done',product:research.product,caseId:b.caseId,
+      text:research.findings.join('\n') || research.requestedChart.title,chartMaterial:research.requestedChart};
   }
   if (analyticalModel) {
     const { runAssistant } = await import('./workspace-agent.mjs');
@@ -1039,7 +1043,7 @@ export async function deliver(store, env, send, mailSend = mail, accounts) {
   const addr = personal || b.chat || destinations[0];
   if (
     (d.channel === 'telegram' && (!env.TELEGRAM_BOT_TOKEN || !addr)) ||
-    (d.channel === 'smtp' && (!env.SMTP_HOST || !(personal || env.SMTP_TO)))
+    (d.channel === 'smtp' && (!smtpConfigured(env) || !(personal || env.SMTP_TO)))
   ) {
     db.prepare('UPDATE deliveries SET next=? WHERE id=?').run(Date.now() + 60000, d.id);
     return;
@@ -1050,19 +1054,28 @@ export async function deliver(store, env, send, mailSend = mail, accounts) {
       .run(d.id).changes
   )
     return;
-  const appUrl = env.APP_BASE_URL || 'http://127.0.0.1:8090';
-  const links = [b.issueUrl, b.caseId && appUrl + '/#case/' + b.caseId].filter(Boolean);
-  const accessibleLinks = d.channel === 'telegram' && recipient
-    ? links.filter(link => !['localhost','127.0.0.1','[::1]'].includes(new URL(link).hostname)) : links;
-  const text = [b.text, ...accessibleLinks].join('\n');
   try {
-    if (d.channel === 'telegram') await telegram('sendMessage', { chat_id: addr, text }, env, send);
-    else await mailSend(text, env, personal || env.SMTP_TO);
+    const appUrl = env.APP_BASE_URL || 'http://127.0.0.1:8090';
+    const links = [b.issueUrl, b.caseId && appUrl + '/#case/' + b.caseId].filter(Boolean);
+    if (d.channel === 'telegram') {
+      const accessibleLinks = links.filter((link) => {
+        const url = URL.parse(link);
+        return url && ['http:', 'https:'].includes(url.protocol) &&
+          !['localhost', '127.0.0.1', '[::1]'].includes(url.hostname);
+      });
+      const text = [b.text, ...accessibleLinks].join('\n');
+      const receipt = await telegram('sendMessage', { chat_id: addr, text }, env, send);
+      if (!Number.isSafeInteger(receipt?.message_id)) throw Error('Telegram не подтвердил доставку');
+    } else {
+      await mailSend([b.text, ...links].join('\n'), env, personal || env.SMTP_TO);
+    }
     db.prepare("UPDATE deliveries SET state='delivered' WHERE id=?").run(d.id);
   } catch (e) {
+    const retry = d.channel === 'telegram' ? e.status === 429 : e.smtpDisposition === 'retry';
+    const rejected = d.channel === 'telegram' ? [400, 401, 403, 404].includes(e.status) : e.smtpDisposition === 'failed';
     db.prepare('UPDATE deliveries SET state=?,next=? WHERE id=?').run(
-      e.status === 429 ? 'queued' : 'uncertain',
-      Date.now() + 60000,
+      retry ? 'queued' : rejected ? 'failed' : 'uncertain',
+      retry ? Date.now() + (e.retryAfter ?? 60) * 1000 : 0,
       d.id,
     );
   }

@@ -5,7 +5,7 @@ import { homedir, tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import test from 'node:test';
-import { digest, initEvidence } from '../server/evidence.mjs';
+import { analysisView, digest, initEvidence } from '../server/evidence.mjs';
 import { createTeamApp } from '../server/team-http.mjs';
 import { workspaceOperation } from '../server/workspace-operations.mjs';
 import { releaseDecision } from '../server/release-decision.mjs';
@@ -62,6 +62,38 @@ test('release decision validates dates and rejects private cases before loading 
     assert.throws(() => releaseDecision(db, { id: 'guest' }, { caseId: 'private-case' }), /Разбор недоступен/);
     assert.throws(() => releaseDecision(db, { id: 'account' }, { caseId: 'private-case' }, true), /Разбор недоступен/);
     assert.throws(() => releaseDecision(db, { id: 'account' }, {}), /нет недельных продаж/);
+  } finally {
+    db.close();
+  }
+});
+
+test('historical calculation derives its pivot from available weeks and clips dated evidence', () => {
+  const db = new DatabaseSync(':memory:');
+  try {
+    initEvidence(db);
+    const add = (kind, key, data) => db.prepare('INSERT INTO facts VALUES(?,?,?,?,?,?)')
+      .run(kind, key, 'v1', 'source.xlsx', 'Sheet!' + key, JSON.stringify(data));
+    for (const week of ['2026-03-30', '2026-04-06', '2026-04-13'])
+      add('sales', week, { product_family:'Product', week_start:week, orders_index:100 });
+    add('releases','R-01',{ release_id:'R-01',release_date:'2026-04-07',description:'Previous Product change',
+      release_type:'analytics',status:'выпущен' });
+    add('releases','R-02',{ release_id:'R-02',release_date:'2026-04-10',description:'New Product release',
+      release_type:'major',status:'выпущен' });
+    for (const [date, n, d] of [['2026-04-08',4,13],['2026-04-09',7,17]])
+      add('metrics', date, { metric_id:'cfg_reach_rate',product:'Product',date,
+        detail_json:JSON.stringify({configurator_visits:n,family_visits:d}) });
+    const result = analysisView(db,{ product:'Product', through:'2026-04-08' });
+    assert.equal(result.pivot,'2026-03-30');
+    assert.deepEqual(result.timeline.map(row=>row.data.release_id),['R-01']);
+    assert.deepEqual(result.summary[0].rows.map(row=>row.week),['2026-03-30']);
+    assert.deepEqual([result.reach.n,result.reach.d],[4,13]);
+
+    add('releases','Z',{release_id:'R-00',release_date:'2026-03-20',description:'Earlier Product release',
+      release_type:'major',status:'выпущен'});
+    for (let i=0;i<13;i++)
+      add('releases','A'+i,{release_id:'Future-'+i,release_date:'2026-04-11',description:'Future Product release',
+        release_type:'major',status:'выпущен'});
+    assert.equal(analysisView(db,{product:'Product',through:'2026-04-08'}).pivot,'2026-03-16');
   } finally {
     db.close();
   }
@@ -177,6 +209,78 @@ test('organizer archive supplies both families, verifiable evidence, and histori
   assert.throws(() => workspaceOperation(store, owner.user, 'release_decision', { caseId: privateCase.id },
     env, fetch, true), /Разбор недоступен/);
   assert.equal((await post('ask', { thread: 'group', caseId: privateCase.id, question: 'Что в разборе?' })).status, 400);
+
+  await t.test('historical views use only closed weeks and exact sales lookups accept the dictionary ID', async () => {
+    const input = { product, control: astra.product, from: '2026-06-29', releaseWeek: '2026-09-28', full: true };
+    const midweek = (await call('view', { ...input, through: '2026-10-21' })).view;
+    assert.equal(midweek.summary[0].rows.at(-1).week, '2026-10-12');
+    assert.equal(midweek.summary[0].after, (123 + 103) / 2);
+    const onSunday = (await call('view', { ...input, through: '2026-10-25' })).view;
+    assert.equal(onSunday.summary[0].rows.at(-1).week, '2026-10-19');
+    const beforePivot = (await call('view', { ...input, through: '2026-07-09' })).view;
+    assert.deepEqual(beforePivot.summary[0].rows.map(row => row.week), ['2026-06-29']);
+    const ctrCut = (await call('view', { ...input, through: '2026-10-29' })).view;
+    assert.equal(ctrCut.ctr.sources.length, 0);
+    assert.equal((await post('view', { ...input, through: '2026-02-30' })).status, 400);
+    const query = { product, date: '2026-06-01', segment: 'all' };
+    assert.deepEqual(
+      (await call('source_value', { ...query, metric: 'family_orders_idx' })).map(row => [row.value, row.loc]),
+      [[144, 'Продажи!A6']],
+    );
+  });
+
+  await t.test('the organizer historical snapshot excludes future releases and future signal weeks', async () => {
+    const before = (await call('view', { caseId:current.caseId, through:'2026-09-30', full:true })).view;
+    assert.equal(before.pivot,'2026-09-21');
+    assert.deepEqual(before.timeline.map(row=>row.data.release_id),['R-07','R-08']);
+    assert.equal(before.signal,null);
+    const first = (await call('view', { caseId:current.caseId, through:'2026-11-04', full:true })).view;
+    assert.deepEqual([first.signal.week,first.signal.count],['2026-10-26',1]);
+    assert.deepEqual(first.signal.history.map(row=>row.week),['2026-10-26']);
+    assert.match(first.signal.source,/Продажи!A27$/);
+  });
+
+  await t.test('missing ratio observation has no counts, and measured zero retains its denominator', async () => {
+    const product = 'Конфигуратор Астра', metric = 'cfg_add_to_cart_rate';
+    const compare = async (segment, from, to) => {
+      const chart = await call('chart', { metric, product, segment });
+      const r = await call('range_compare', { selection: { source:'metric', calcId:chart.id, metric,
+        series:[segment], ranges:[{ from:Date.parse(from), to:Date.parse(to) }] } });
+      return r.periods[0].series[0];
+    };
+    const absent = await compare('tablet', '2026-09-02', '2026-09-03');
+    assert.equal(absent.available, 0);
+    assert.equal(absent.value, null);
+    assert.equal(absent.n, undefined);
+    assert.equal(absent.d, undefined);
+    const zero = await compare('mobile', '2026-10-05', '2026-10-12');
+    assert.deepEqual([zero.available, zero.value, zero.n, zero.d], [7, 0, 0, 26]);
+  });
+
+  await t.test('sales effect applies the chosen control to the same complete windows', async () => {
+    const input = { caseId: current.caseId, releaseId: 'R-09', metric: 'orders_index', segment: 'all',
+      asOf: '2026-11-22', control: astra.product, target: 110 };
+    const evaluated = await call('effect-preview', input);
+    assert.equal(evaluated.plan.control, astra.product);
+    assert.deepEqual([evaluated.baseline.value, evaluated.observed.value], [169.5, 113]);
+    assert.deepEqual([evaluated.control.baseline.value, evaluated.control.observed.value], [115.5, 115.5]);
+    assert.equal(evaluated.control.relativeChange, 0);
+    assert.deepEqual(evaluated.control.observed.sources.map(row => row.loc),
+      ['Продажи!A53', 'Продажи!A54', 'Продажи!A55', 'Продажи!A56']);
+    assert.equal(evaluated.state, 'Цель достигнута');
+    const early = await call('effect-preview', { ...input, asOf: '2026-10-30' });
+    assert.equal(early.control.observed.count, 3);
+    assert.equal(early.control.observed.value, null);
+    assert.equal(early.actual, undefined);
+    const oneWeek = { ...input, baselineWeeks: 1, observationWeeks: 1 };
+    const shifted = await call('effect-preview', oneWeek);
+    assert.equal(shifted.control.relativeChange, -12.5);
+    assert.equal(shifted.state, 'Изменился контроль — требуется проверка');
+    const withoutControl = await call('effect-preview', { ...oneWeek, control: '' });
+    assert.equal(withoutControl.control, undefined);
+    assert.equal(withoutControl.state, 'Цель достигнута');
+    assert.equal((await post('effect-preview', { ...input, control: product })).status, 400);
+  });
 });
 
 test('decision chat leads to manual confirmation, using the same case and actual workbook', {

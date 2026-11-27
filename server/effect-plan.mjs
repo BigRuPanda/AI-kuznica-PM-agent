@@ -1,4 +1,4 @@
-import { facts, metricStepDays, productFamily } from './evidence.mjs';
+import { defaultRules, facts, metricStepDays, productFamily, setting } from './evidence.mjs';
 
 const day = 86400000;
 const pairs = {
@@ -22,6 +22,8 @@ const cartBaseline = 'Четыре недели до выкладки прове
 
 export function observationOptions(db, c) {
   const definitions = facts(db, 'dictionary');
+  const controls = [...new Set(facts(db, 'sales').map(row => row.data.product_family))]
+    .filter(product => !sameFamily(product, c.product)).sort();
   const backlog = facts(db, 'backlog').filter(({data}) =>
     sameFamily([data.product, data.title, data.description_short].join(' '), c.product));
   const releases = facts(db, 'releases').filter(({data}) =>
@@ -76,7 +78,7 @@ export function observationOptions(db, c) {
     };
   }
   return {
-    metrics, tasks, examples,
+    metrics, tasks, examples, controls,
     releases: releases.map(row => {
       const r = row.data;
       return { id: r.release_id, date: r.release_date, title: r.description, source: ref(row), metrics: ids(r.affected_metrics) };
@@ -102,13 +104,23 @@ export function makeObservationPlan(db, c, input) {
     throw Error('Проверьте дату выкладки.');
   const segment = input.segment || metric.segments[0] || 'all';
   if (metric.segments.length && !metric.segments.includes(segment)) throw Error('Выберите разрез из исходного ряда.');
+  const control = metric.id === 'orders_index'
+    ? input.control?.trim() ?? (choices.controls.length === 1 ? choices.controls[0] : '')
+    : '';
+  if (input.control && metric.id !== 'orders_index')
+    throw Error('Контрольное семейство доступно для недельного индекса заказов.');
+  if (control && !choices.controls.includes(control))
+    throw Error('Выберите другое семейство из исходного ряда для контроля.');
+  const comparison = control ? {
+    control, controlTolerance: setting(db, 'rules', defaultRules).controlTolerance ?? defaultRules.controlTolerance,
+  } : {};
   const cartRepair = task?.id === 'T-08' && metric.id === cartMetric;
   const scheduling = task && !deployed ? {
     scheduledOn: today(),
     sourceCursor: db.prepare('SELECT coalesce(max(rowid),0) AS cursor FROM documents').get().cursor,
   } : {};
   return { version:2, metric:metric.id, title:metric.title, segment, deployed, releaseId:release?.id || null,
-    ...scheduling,
+    ...scheduling, ...comparison,
     sources:[task?.source,release?.source,metric.source].filter(Boolean),
     taskId:task?.id || null, baselineWeeks:input.baselineWeeks || 4, observationWeeks:input.observationWeeks || 4,
     target:input.target ?? null, direction:input.direction || 'at-least',
@@ -222,6 +234,21 @@ export function observedEffect(db, c, cutoff = today()) {
   const start = beforeEnd-plan.baselineWeeks*7*day, end = afterStart+plan.observationWeeks*7*day;
   const baseline = period(db,c.product,plan,start,beforeEnd,asOf,step);
   const observed = period(db,c.product,plan,afterStart,end,asOf,step);
+  let control;
+  if (plan.control) {
+    const controlBaseline = period(db,plan.control,plan,start,beforeEnd,asOf,step);
+    const controlObserved = period(db,plan.control,plan,afterStart,end,asOf,step);
+    const complete = Number.isFinite(controlBaseline.value) && Number.isFinite(controlObserved.value);
+    control = {
+      product: plan.control,
+      baseline: controlBaseline,
+      observed: controlObserved,
+      change: complete ? controlObserved.value - controlBaseline.value : null,
+      relativeChange: complete && controlBaseline.value > 0
+        ? (controlObserved.value / controlBaseline.value - 1) * 100 : null,
+      tolerance: plan.controlTolerance ?? defaultRules.controlTolerance,
+    };
+  }
   const accounting = facts(db,'releases').filter(({data:r}) => {
     const t = time(r.release_date);
     return t >= start && t < end && t <= asOf && r.status === 'выпущен' &&
@@ -232,13 +259,21 @@ export function observedEffect(db, c, cutoff = today()) {
   const releaseRef = r => ({...ref(r), id:r.data.release_id, date:r.data.release_date, title:r.data.description});
   const breaks = accounting.filter(affected).map(releaseRef);
   const context = accounting.filter(r => !affected(r)).map(releaseRef);
-  const result = {...base, ...resolved, baseline, observed, breaks, context, checkAfter:date(end-day), unit:observed.unit || baseline.unit};
+  const result = {...base, ...resolved, baseline, observed, ...(control && {control}), breaks, context,
+    checkAfter:date(end-day), unit:observed.unit || baseline.unit};
   if (breaks.length) return {...result, state:'Сравнение ограничено изменением учёта'};
   if (end-day > asOf) return {...result, state:'Ожидаем окончание окна наблюдения'};
   if (!Number.isFinite(baseline.value) || !Number.isFinite(observed.value) || baseline.unit !== observed.unit)
     return {...result, state:'Недостаточно сопоставимых наблюдений'};
+  if (control && control.change == null)
+    return {...result, state:'Недостаточно сопоставимых наблюдений по контролю'};
+  const measured = {...result, actual:observed.value, change:observed.value-baseline.value};
+  if (control && control.relativeChange == null)
+    return {...measured, state:'Контроль требует проверки: нулевая база'};
+  if (control && Math.abs(control.relativeChange) > control.tolerance)
+    return {...measured, state:'Изменился контроль — требуется проверка'};
   const target = plan.target;
   const passed = target != null && (plan.direction === 'at-most' ? observed.value <= target : observed.value >= target);
-  return {...result, actual:observed.value, change:observed.value-baseline.value,
+  return {...measured,
     state:target == null ? 'Изменение измерено. Цель не задана' : passed ? 'Цель достигнута' : 'Цель не достигнута'};
 }

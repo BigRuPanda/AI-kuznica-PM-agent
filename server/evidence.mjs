@@ -104,7 +104,7 @@ export function facts(db, kind) {
     .map(({ body, ...meta }) => ({ ...meta, data: JSON.parse(body) }));
 }
 export function sourceValues(db, { product, metric, date, segment }) {
-  const weekly = metric === 'orders_index';
+  const weekly = metric === 'orders_index' || metric === 'family_orders_idx';
   return facts(db, weekly ? 'sales' : 'metrics').filter(({ data }) => {
     const family = weekly ? data.product_family : data.product;
     return family?.toLowerCase() === product.toLowerCase() &&
@@ -277,33 +277,49 @@ export function analysisView(
   db,
   { caseId, product, full = false, control, from, releaseWeek, through, sourceQuery = '' } = {},
 ) {
+  const cutoff = through && dateMs(through);
+  if (through && (!Number.isFinite(cutoff) || iso(cutoff) !== through))
+    throw Error('Укажите корректную дату среза.');
+  const endsByCutoff = (start, step) => !through || dateMs(start) + (step - 1) * 86400000 <= cutoff;
   const c = caseId ? getCase(db, caseId) : null,
     all = listSales(db);
-  product = c?.product || product || all.at(-1)?.product || '';
-  const related = search(db, product, ['releases'], 12);
-  const latest = all.filter((x) => x.product === product).at(-1)?.week;
-  const anchor = c?.body.signal?.start || latest;
+  const salesAtCutoff = through ? all.filter(r => endsByCutoff(r.week, 7)) : all;
+  product = c?.product || product || salesAtCutoff.at(-1)?.product || '';
+  const productRows = salesAtCutoff.filter(r => r.product === product);
+  let signal = c?.body.signal ?? null;
+  if (signal && !endsByCutoff(signal.week, 7)) {
+    const history = (signal.history || []).filter(r => endsByCutoff(r.week, 7));
+    const last = history.at(-1);
+    signal = history.length >= (signal.rule === 'absolute' ? 2 : 1)
+      ? { ...signal, ...last, history, count: history.length, source: productRows.find(r => r.week === last.week)?.source ?? null }
+      : null;
+  }
+  const related = search(db, product, ['releases'], Infinity);
+  const latest = productRows.filter(r => !through || !full || !r.partial).at(-1)?.week;
+  const anchor = signal?.start || latest;
   const release = related
-    .filter((x) => String(x.data.release_date) <= String(anchor) && x.data.release_type === 'major')
+    .filter(x => anchor && x.data.release_date <= anchor && x.data.release_type === 'major' &&
+      endsByCutoff(x.data.release_date, 1))
     .sort((a, b) => b.data.release_date.localeCompare(a.data.release_date))[0];
   const pivot =
     releaseWeek ||
-    (release && c?.body.signal?.rule !== 'absolute' ? monday(release.data.release_date) : anchor);
+    (release && signal?.rule !== 'absolute' ? monday(release.data.release_date) : anchor);
   const base = from || (pivot ? iso(dateMs(pivot) - 13 * WEEK) : '');
   const cut = through || latest;
-  const peers = [...new Set(all.map((x) => x.product))].filter((x) => x !== product);
+  const peers = [...new Set(salesAtCutoff.map((x) => x.product))].filter((x) => x !== product);
   const compare = control === false ? [] : [control || peers[0]].filter(Boolean);
-  const summary = pivot ? [product, ...compare].map((p) => salesSummary(all, p, base, pivot, cut, full)) : [];
+  const summary = pivot ? [product, ...compare].map((p) => salesSummary(salesAtCutoff, p, base, pivot, cut, full)) : [];
   const timeline = pivot
     ? facts(db, 'releases').filter(
-        (f) => Math.abs(dateMs(f.data.release_date) - dateMs(pivot)) <= 14 * 86400000,
+        f => endsByCutoff(f.data.release_date, 1) &&
+          Math.abs(dateMs(f.data.release_date) - dateMs(pivot)) <= 14 * 86400000,
       )
     : [];
   const ctr = facts(db, 'metrics').filter(
     (f) =>
       f.data.metric_id === 'lk_reco_ctr' &&
       !/неполн/i.test(f.data.comment || '') &&
-      (!through || f.data.date <= through),
+      endsByCutoff(f.data.date, metricStepDays(f.data.metric_id)),
   );
   const ctrCounts = ctr.reduce(
     (v, f) => {
@@ -325,7 +341,7 @@ export function analysisView(
     (f) =>
       f.data.metric_id === 'cfg_reach_rate' &&
       tokens(product).some((t) => tokens(f.data.product).includes(t)) &&
-      (!through || f.data.date <= through),
+      endsByCutoff(f.data.date, metricStepDays(f.data.metric_id)),
   );
   const reachCounts = reach.reduce(
     (v, f) => {
@@ -358,7 +374,7 @@ export function analysisView(
     backlog: rankBacklog(db, product),
     ctr: { n: ctrCounts[0], d: ctrCounts[1], sources: ctr.map((f) => f.file + ' · ' + f.loc) },
     reach: { n: reachCounts[0], d: reachCounts[1], sources: reach.map((f) => f.file + ' · ' + f.loc) },
-    signal: c?.body.signal ?? null,
+    signal,
   };
   const id = digest(JSON.stringify(result));
   db.prepare('INSERT OR IGNORE INTO evidence_calcs VALUES(?,?)').run(id, JSON.stringify(result));

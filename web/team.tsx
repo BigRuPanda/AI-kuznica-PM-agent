@@ -60,9 +60,8 @@ function useRoute() {
   }, []);
   return route.split('/');
 }
-function Login({ onLogin }: { onLogin: (user: User) => void }) {
-  const [route, code] = useRoute(),
-    [register, mode] = useState(route === 'join'),
+function Login({ onLogin, joinCode }: { onLogin: (user: User) => void; joinCode?: string }) {
+  const [register, mode] = useState(joinCode !== undefined),
     [error, fail] = useState(''),
     [pending, wait] = useState(false);
   return (
@@ -83,7 +82,7 @@ function Login({ onLogin }: { onLogin: (user: User) => void }) {
             const data = Object.fromEntries(new FormData(e.currentTarget));
             try {
               onLogin(await post<User>(register ? 'register' : 'login', data));
-              if (route === 'join') jump('overview');
+              if (joinCode !== undefined) jump('overview');
             } catch (err) {
               fail(String((err as Error).message));
             } finally {
@@ -114,7 +113,7 @@ function Login({ onLogin }: { onLogin: (user: User) => void }) {
           {register && (
             <label>
               Код приглашения
-              <input name="code" defaultValue={code || ''} required />
+              <input name="code" defaultValue={joinCode || ''} required />
             </label>
           )}
           {error && <p role="alert">{error}</p>}
@@ -1875,8 +1874,7 @@ function Workspace({ user, onLogout }: { user: User; onLogout: () => void }) {
     [home, setHome] = useState<Home | null>(null),
     [err, fail] = useState(''),
     [filter, setFilter] = useState(''),
-    [create, newCase] = useState(false),
-    [releaseRef, selectRelease] = useState(''),
+    [newCaseRelease, showCaseForm] = useState<string | null>(null),
     [menu, setMenu] = useState(readMenuLayout);
   const bridgePages = !!home?.bridgeEnabled;
   const pageHidden = ['demo-page', 'knowledge'].includes(requestedRoute) && !bridgePages;
@@ -2055,8 +2053,7 @@ function Workspace({ user, onLogout }: { user: User; onLogout: () => void }) {
                     <a href={'#release-decision/' + r.release_id}>Решение по релизу</a>}
                   <button
                     onClick={() => {
-                      selectRelease(id);
-                      newCase(true);
+                      showCaseForm(id);
                       jump('cases');
                     }}
                   >
@@ -2071,19 +2068,21 @@ function Workspace({ user, onLogout }: { user: User; onLogout: () => void }) {
           <>
             <div className="page-head">
               <h1>Разборы</h1>
-              <button className="primary" aria-expanded={create} onClick={() => moveView(() => newCase(!create))}>
+              <button className="primary" aria-expanded={newCaseRelease !== null}
+                onClick={() => moveView(() => showCaseForm(newCaseRelease === null ? '' : null))}>
                 Новый разбор
               </button>
             </div>
-            {create && (
+            {newCaseRelease !== null && (
               <form
+                key={newCaseRelease}
                 className="paper"
                 onSubmit={(e) => {
                   e.preventDefault();
                   const b = Object.fromEntries(new FormData(e.currentTarget));
                   action(async () => {
                     const r = await post<{ id: string }>('create-case', b);
-                    newCase(false);
+                    showCaseForm(null);
                     await refresh();
                     jump('case/' + r.id);
                   });
@@ -2107,7 +2106,7 @@ function Workspace({ user, onLogout }: { user: User; onLogout: () => void }) {
                 </label>
                 <label>
                   Связанный релиз
-                  <select name="release" defaultValue={releaseRef}>
+                  <select name="release" defaultValue={newCaseRelease}>
                     <option value="">Без релиза</option>
                     {home.releases.map((r) => (
                       <option key={r.release_id}>{r.release_id}</option>
@@ -2180,6 +2179,8 @@ function Workspace({ user, onLogout }: { user: User; onLogout: () => void }) {
 function Root() {
   const [user, set] = useState<User | null | undefined>(undefined),
     [error, fail] = useState('');
+  const [route, code] = useRoute();
+  const joinCode = route === 'join' ? code || '' : undefined;
   useEffect(() => {
     fetch('/api/team/session')
       .then((r) => r.json())
@@ -2197,7 +2198,7 @@ function Root() {
       }}
     />
   ) : (
-    <Login onLogin={set} />
+    <Login key={joinCode === undefined ? 'login' : 'join/' + joinCode} onLogin={set} joinCode={joinCode} />
   );
 }
 styleFormValidation();

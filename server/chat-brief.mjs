@@ -3,11 +3,11 @@ import { fmt, productFamily } from './evidence.mjs';
 
 const normalize = q => q.trim().replace(/[?!.…]+$/u, '').trim();
 const identity = /^(?:ты кто|кто (?:ты|вы)(?: такой| такая)?|ты (?:бот|агент)|что (?:ты|вы) умеешь?|чем (?:ты )?можешь помочь)$/iu;
-const definition = /^(?:а\s+)?(?:кто (?:такой|такая|такие)|что (?:такое|означает)|объясни (?:термин|понятие))\s+([\p{L}\p{N}][\p{L}\p{N} .«»"()\-]{0,78})$/iu;
+const definition = /^(?:а\s+)?(?:кто (?:такой|такая|такие)|что (?:такое|означает)|как (?:называется|называют)|объясни (?:термин|понятие))\s+([\p{L}\p{N}][\p{L}\p{N} .«»"()\-]{0,78})$/iu;
 const needsRecords = /(?:\sи\s|\s(?:котор|почему|зачем|како|сколько|наш|этот|эт[иа]|мо[йя]|их\s)|архив|источник|интервью|задач|тикет|релиз|таблиц|справочник|сигнал|показател|метрик|индекс заказ|воронк|\bctr\b|(?:^|\s)[TR]-\d|(?:cfg|lk)_)/iu;
 
 export async function briefConversation(store, job, question, activeCase, env, send, history) {
-  let q = normalize(question);
+  let q = normalize(question.replace(/[,!.?\s]+(?:ответь |пожалуйста,? )?(?:без интернета|без веб[- ]?поиска|не ищи в интернете)[.!?\s]*$/iu,''));
   const previous=history.at(-1)?.body;
   if (activeCase && previous?.referenceSubject && previous.caseId===activeCase.id) {
     if (/^(?:(?:я )?(?:про|о|об) )?(?:человек[ае]?|основател[яе]|компани[яюи]|разработчик[ае]?)$/iu.test(q)) {
@@ -17,8 +17,11 @@ export async function briefConversation(store, job, question, activeCase, env, s
     if (/^(?:(?:я )?(?:про|о) )?(?:сам )?продукт[е]?$/iu.test(q)) q='Что такое '+activeCase.product;
   }
   if (identity.test(q)) return {mode:'conversation',contextReset:true,text:'Я Signal, помощник продакта. Могу проверить показатели, найти источники в архиве и собрать разбор.'};
-  const subject = definition.exec(q)?.[1];
-  if (!subject || needsRecords.test(' '+subject)) return null;
+  if (/^(?:привет(?:ствую)?|здравствуйте|доброе утро|добрый (?:день|вечер))$/iu.test(q))
+    return {mode:'conversation',steps:[],text:/^привет$/iu.test(q) ? 'Привет!' : 'Здравствуйте! Чем могу помочь?'};
+  const general = /^(?:объясни|расскажи)(?: простыми словами| кратко| в двух словах)?[, ]+(?:зачем|как работает|почему важно|для чего)\s+(.{3,120})$/iu.exec(q);
+  const subject = definition.exec(q)?.[1] || general?.[1];
+  if (!subject || needsRecords.test(' '+subject) || general && /разбор|график|период|у нас|карточк|цифр|продаж|сравни (?:с|за)|наши|по нашим|сейчас|\d/iu.test(subject)) return null;
   const product = activeCase?.product;
   const related = product && (productFamily(subject)===productFamily(product) ||
     product.toLowerCase().split(/\s+/u).includes(subject.toLowerCase()));
@@ -36,9 +39,9 @@ export async function briefConversation(store, job, question, activeCase, env, s
   let reason='Модель вернула незавершённый ответ.';
   try {
     const reply = await providerCall(env,[
-      {role:'system',content:'Ответь по-русски одной-двумя короткими фразами. Название продукта дано только для контекста. При неоднозначном вопросе попроси уточнить. Если не знаешь имени или должности, не угадывай их. Не добавляй даты и статистику.'},
+      {role:'system',content:'Ответь по-русски двумя короткими предложениями. Для вопроса о методе объясни простыми словами, как он работает и какой вывод позволяет сделать. Не утверждай, что гипотеза уже подтверждена. Название продукта дано только для контекста. При неоднозначном вопросе попроси уточнить. Если не знаешь имени или должности, не угадывай. Не добавляй даты и статистику.'},
       {role:'user',content:JSON.stringify({question:q,product:context})},
-    ],[],'auto',send,{timeout:32000,maxTokens:retry?56:90});
+    ],[],'auto',send,{timeout:32000,maxTokens:retry?56:90,temperature:0});
     store.db.prepare('INSERT INTO costs(job,model,elapsed,input,output) VALUES(?,?,?,?,?)')
       .run(job,env.LLM_MODEL || 'configured',Date.now()-started,reply.usage?.input??null,reply.usage?.output??null);
     const text=reply.content?.trim();

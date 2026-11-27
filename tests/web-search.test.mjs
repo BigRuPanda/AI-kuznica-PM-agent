@@ -6,7 +6,7 @@ import { initWorkbench, createThread, enqueue, workJobs, messages, answer } from
 import { marketOffers } from '../server/release-decision.mjs';
 import { checkOffer, sellerUrl } from '../server/competitor-check.mjs';
 import { workspaceOperation } from '../server/workspace-operations.mjs';
-import { webQuestion } from '../server/web-search.mjs';
+import { webAnswer, webQuestion } from '../server/web-search.mjs';
 
 const env = { YANDEX_SEARCH_API_KEY: 'fixture', YANDEX_SEARCH_FOLDER_ID: 'folder', PYTHON_BIN: process.env.PYTHON_BIN };
 const user = { id: 'reviewer', name: 'Продакт' };
@@ -42,6 +42,7 @@ test('any topic in queued chat uses Yandex, then the configured model, and cites
       return yandex(result);
     }
     assert.equal(data.model, 'qwen');
+    assert.ok(data.max_tokens > 0 && data.max_tokens <= 160);
     assert.match(data.messages.at(-1).content, /Открыта новая выставка/);
     assert.doesNotMatch(JSON.stringify(data), /Research.xlsx|KL4863/);
     return Response.json({ choices: [{ message: { content: 'Открыта новая выставка [1].' } }] });
@@ -58,6 +59,17 @@ test('any topic in queued chat uses Yandex, then the configured model, and cites
   assert.equal(webQuestion('Не ищи в интернете'), null);
 });
 
+test('requests for a website link return the first search result without waiting for model narration', async t => {
+  const store=workspace(t);
+  let calls=0;
+  const response=await webAnswer(store,'lookup','Официальный сайт музея',{...env,LLM_MODEL:'qwen',LLM_BASE_URL:'http://localhost:9123/v1'},async()=>{
+    calls++;
+    return yandex(result);
+  });
+  assert.equal(calls,1);
+  assert.match(response.text,/museum\.example/u);
+  assert.equal(response.readSources[0].url,'https://museum.example/exhibition');
+});
 test('natural language search handles no key, empty results, server error and retry without rebilling', async t => {
   const store = workspace(t), thread = createThread(store.db, user, 'Интернет');
   const b = { thread, question: 'Найди в интернете статьи о дизайне' };

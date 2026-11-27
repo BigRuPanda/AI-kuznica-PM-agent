@@ -4,7 +4,7 @@ import { num, post } from './team-data';
 type Option = {id:string; title:string; segments:string[]; note?:string; prospective?:boolean};
 type Example = {taskId:string; releaseId?:string; metric:string; segment:string; condition?:string; asOf?:string};
 type Options = {metrics:Option[]; tasks:{id:string; title:string; metrics:string[]; releaseIds:string[]}[];
-  releases:{id:string; title:string; date:string; metrics:string[]}[]; examples:{cart?:Example; retro?:Example}};
+  releases:{id:string; title:string; date:string; metrics:string[]}[]; examples:{cart?:Example; retro?:Example}; controls:string[]};
 type Source = {file:string; loc:string; version:string};
 type MetricRow = Source & {date:string; value:number};
 type Release = Source & {id:string; date:string; title:string};
@@ -12,13 +12,23 @@ type Period = {from:string; through:string; value:number|null; count:number; exp
   unit:string|null; total?:number; numerator?:number; denominator?:number};
 type Plan = {version:number; metric:string; title:string; segment:string; deployed:string|null; releaseId:string|null; sources?:Source[];
   taskId:string|null; baselineWeeks:number; observationWeeks:number; direction:string; condition:string|null; target:number|null;
-  metricNote?:string; baselineNote?:string};
+  metricNote?:string; baselineNote?:string; control?:string};
 export type Observation = {state:string; plan?:Plan; asOf?:string; baseline?:Period; observed?:Period; unit?:string;
   breaks?:Release[]; context?:Release[]; checkAfter?:string; change?:number;
+  control?:{product:string; baseline:Period; observed:Period; relativeChange:number|null; tolerance:number};
   rollout?:{id:string; date:string; title?:string; sources:Source[]}; rolloutSources?:Source[]};
 
 function SourceLink({item}:{item:Source}) {
   return <a href={'#knowledge-source/'+item.version+'/'+encodeURIComponent(item.loc)}>{item.file} · {item.loc}</a>;
+}
+function Periods({rows}:{rows:readonly (readonly [string, Period|undefined])[]}) {
+  return <>{rows.map(([title,r]) => r && <div key={title}>
+    <p><b>{title}</b> · {r.from} — {r.through} · {num(r.value)} {r.unit} · наблюдений {r.count} из {r.expected}
+      {r.total != null && ' · всего ' + num(r.total)}
+      {r.numerator != null && ' · числитель / знаменатель ' + num(r.numerator) + ' / ' + num(r.denominator)}</p>
+    {r.sources.length > 0 && <details><summary>Исходные строки</summary><ul>{r.sources.map(s =>
+      <li key={s.version+s.loc}>{s.date} · {num(s.value)} · <SourceLink item={s}/></li>)}</ul></details>}
+  </div>)}</>;
 }
 function Summary({value}:{value:Observation}) {
   const plan = value.plan;
@@ -32,6 +42,7 @@ function Summary({value}:{value:Observation}) {
         <div><dt>Выкладка</dt><dd>{plan.deployed || value.rollout?.date || 'Дата не подтверждена'}</dd></div>
         <div><dt>База</dt><dd>{plan.baselineWeeks} нед. до выкладки</dd></div>
         <div><dt>Наблюдение</dt><dd>{plan.observationWeeks} нед. после выкладки</dd></div>
+        {plan.control && <div><dt>Контроль</dt><dd>{plan.control}</dd></div>}
         <div><dt>Цель</dt><dd>{plan.target == null ? 'Числовая цель не задана' :
           (plan.direction === 'at-most' ? '≤ ' : '≥ ') + num(plan.target) + (value.unit ? ' ' + value.unit : '')}</dd></div>
       </dl>
@@ -40,13 +51,12 @@ function Summary({value}:{value:Observation}) {
       {plan.condition && <p>{plan.condition}</p>}
       {sources.map(s=><p key={s.version+s.loc}><SourceLink item={s}/></p>)}
     </>}
-    {([['База',value.baseline],['После выкладки',value.observed]] as const).map(([title,r]) => r && <div key={title}>
-      <p><b>{title}</b> · {r.from} — {r.through} · {num(r.value)} {r.unit} · наблюдений {r.count} из {r.expected}
-        {r.total != null && ' · всего ' + num(r.total)}
-        {r.numerator != null && ' · числитель / знаменатель ' + num(r.numerator) + ' / ' + num(r.denominator)}</p>
-      {r.sources.length > 0 && <details><summary>Исходные строки</summary><ul>{r.sources.map(s =>
-        <li key={s.version+s.loc}>{s.date} · {num(s.value)} · <SourceLink item={s}/></li>)}</ul></details>}
-    </div>)}
+    <Periods rows={ [['База',value.baseline],['После выкладки',value.observed]] }/>
+    {value.control && <>
+      <Periods rows={ [['База контроля',value.control.baseline],['Контроль после выкладки',value.control.observed]] }/>
+      {value.control.relativeChange != null && <p>Изменение контроля · {num(value.control.relativeChange)}%.
+        Допустимое отклонение · {num(value.control.tolerance)}%.</p>}
+    </>}
     {value.breaks?.map(s => <p key={s.version+s.loc}>{s.id} · {s.date} · {s.title} · <SourceLink item={s}/></p>)}
     {value.context?.map(s => <p key={s.version+s.loc}>{s.id} · {s.date} · {s.title}.
       В журнале изменений указаны другие метрики. <SourceLink item={s}/></p>)}
@@ -62,6 +72,7 @@ export function EffectPlan({caseId, saved, reload, archiveOnly}:{
   const [choices,setChoices] = useState<Options>();
   const [taskId,task] = useState(plan?.taskId || ''), [releaseId,release] = useState(plan?.releaseId || '');
   const [metric,setMetric] = useState(plan?.metric || 'orders_index'), [segment,setSegment] = useState(plan?.segment || '');
+  const [control,setControl] = useState<string|undefined>(plan?.metric === 'orders_index' ? plan.control || '' : undefined);
   const [baselineWeeks,setBaselineWeeks] = useState(String(plan?.baselineWeeks || 4));
   const [observationWeeks,setObservationWeeks] = useState(String(plan?.observationWeeks || 4));
   const [target,setTarget] = useState(plan?.target == null ? '' : String(plan.target));
@@ -74,6 +85,7 @@ export function EffectPlan({caseId, saved, reload, archiveOnly}:{
   const releases = choices?.releases.filter(r => !taskRow || taskRow.releaseIds.includes(r.id)) || [];
   const metricRow = choices?.metrics.find(m => m.id===metric);
   const segments = metricRow?.segments || [];
+  const defaultControl = choices?.controls.length === 1 ? choices.controls[0] : '';
   function chooseMetric(id:string) {setMetric(id); setSegment('');}
   function chooseTask(id:string) {
     const t=choices?.tasks.find(t=>t.id===id);
@@ -104,6 +116,7 @@ export function EffectPlan({caseId, saved, reload, archiveOnly}:{
     const form = new FormData(e.currentTarget);
     const check = ((e.nativeEvent as SubmitEvent).submitter as HTMLButtonElement)?.value === 'preview';
     const input = {taskId:taskId||undefined,releaseId:releaseId||undefined,metric,segment:segments.includes(segment)?segment:segments[0],
+      control:metric === 'orders_index' ? control ?? defaultControl : undefined,
       deployed: (!taskId && !releaseId && form.get('deployed')) || undefined,
       baselineWeeks:Number(baselineWeeks),observationWeeks:Number(observationWeeks),
       target:target ? Number(target) : null,direction,condition,asOf:check ? asOf || undefined : undefined };
@@ -127,6 +140,11 @@ export function EffectPlan({caseId, saved, reload, archiveOnly}:{
       {metricRow?.note && <p>{metricRow.note}</p>}
       {segments.length ? <label>Разрез<select value={segments.includes(segment)?segment:segments[0]} onChange={e=>setSegment(e.target.value)}>
         {segments.map(s=><option key={s}>{s}</option>)}</select></label> : <p>Для выбранного продукта пока нет наблюдений по этому показателю.</p>}
+      {metric === 'orders_index' && choices.controls.length > 0 && <label>Контрольное семейство
+        <select value={control ?? defaultControl} onChange={e=>setControl(e.target.value)}>
+          <option value="">Без контроля</option>{choices.controls.map(product=><option key={product}>{product}</option>)}
+        </select>
+      </label>}
       {metricRow?.prospective && <p>Разрезы взяты из визитов на страницу семейства. Ряд метрики появится после проверки события.</p>}
       <label>Недель до выкладки<input type="number" min="1" max="12" required value={baselineWeeks} onChange={e=>setBaselineWeeks(e.target.value)}/></label>
       <label>Недель после выкладки<input type="number" min="1" max="12" required value={observationWeeks} onChange={e=>setObservationWeeks(e.target.value)}/></label>

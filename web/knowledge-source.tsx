@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { post } from './team-data';
+import { useTrackingVisibility } from './tracking-visibility';
 
 export type Workbook = { file: string; version: string; created: number; total: number };
 type Extract = Workbook & {
@@ -8,6 +9,7 @@ type Extract = Workbook & {
 };
 
 export function SourceExtract({ version, loc }: { version: string; loc?: string }) {
+  const { showConfluence } = useTrackingVisibility();
   const [offset, setOffset] = useState<number | undefined>(),
     [data, set] = useState<Extract>(),
     [error, fail] = useState('');
@@ -28,7 +30,7 @@ export function SourceExtract({ version, loc }: { version: string; loc?: string 
   }, [version, offset, loc]);
   return (
     <section className="paper">
-      <a href="#knowledge">База знаний</a>
+      {showConfluence ? <a href="#knowledge">База знаний</a> : <a href="#sources">Источники</a>}
       {error && <p role="alert">{error}</p>}
       {data && (
         <>

@@ -26,14 +26,18 @@ export async function python(script, args, input, env = process.env) {
     });
     child.on('close', (code) => {
       clearTimeout(timer);
-      if (code !== 0)
-        return reject(
-          Error(
-            script === 'office_import.py'
-              ? 'Ошибка чтения документа. ' + err
-              : 'Не удалось выполнить операцию SMTP.',
-          ),
+      if (code !== 0) {
+        const error = Error(
+          script === 'office_import.py'
+            ? 'Ошибка чтения документа. ' + err
+            : 'Не удалось выполнить операцию SMTP.',
         );
+        if (script === 'mail_delivery.py') {
+          if (code === 75) error.smtpDisposition = 'retry';
+          if (code === 69) error.smtpDisposition = 'failed';
+        }
+        return reject(error);
+      }
       resolve(Buffer.concat(chunks).toString('utf8'));
     });
     child.stdin.on('error', () => {});
@@ -127,12 +131,26 @@ export async function metrika(env = process.env, send = fetch) {
   return { docs: [{ file: 'Яндекс Метрика API', facts }], samples };
 }
 export async function telegram(method, data, env = process.env, send = fetch) {
-  const r = await request(
-    send,
+  const response = await send(
     'https://api.telegram.org/bot' + required(env, 'TELEGRAM_BOT_TOKEN') + '/' + method,
-    { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) },
+    {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data),
+      redirect: 'error', signal: AbortSignal.timeout(25000),
+    },
   );
-  return r.result;
+  const payload = await response.json().catch(() => null);
+  if (!response.ok || payload?.ok !== true || !Object.hasOwn(payload, 'result')) {
+    const status = response.ok ? payload?.error_code : response.status;
+    const delay = payload?.parameters?.retry_after ?? Number(response.headers.get('Retry-After'));
+    throw Object.assign(Error(status ? 'Telegram вернул ошибку ' + status : 'Telegram не подтвердил запрос'), {
+      status,
+      retryAfter: Number.isSafeInteger(delay) && delay > 0 ? delay : undefined,
+    });
+  }
+  return payload.result;
+}
+export function smtpConfigured(env) {
+  return !!(env.SMTP_HOST?.trim() && env.SMTP_FROM?.trim());
 }
 export async function mail(text, env = process.env, recipient = env.SMTP_TO) {
   const config = Object.fromEntries(
@@ -143,6 +161,7 @@ export async function mail(text, env = process.env, recipient = env.SMTP_TO) {
   );
   config.SMTP_TO = recipient || '';
   required(config, 'SMTP_HOST');
+  required(config, 'SMTP_FROM');
   required(config, 'SMTP_TO');
   await python('mail_delivery.py', [], JSON.stringify({ ...config, text }), env);
 }

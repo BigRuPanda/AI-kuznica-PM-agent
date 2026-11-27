@@ -12,11 +12,21 @@ message["Subject"]="Softline · сигнал продакту"
 message.set_content(c.get("text",""))
 tls=ssl.create_default_context()
 port=int(c["SMTP_PORT"] or 587)
-if c["SMTP_TLS"]=="implicit":
-    client=smtplib.SMTP_SSL(c["SMTP_HOST"],port,timeout=20,context=tls)
-else:
-    client=smtplib.SMTP(c["SMTP_HOST"],port,timeout=20)
-with client:
+client = None
+
+
+def rejected(codes):
+    if codes and all(400 <= code < 500 for code in codes):
+        sys.exit(75)  # EX_TEMPFAIL: the queue may retry.
+    if codes and all(400 <= code < 600 for code in codes):
+        sys.exit(69)  # EX_UNAVAILABLE: the server definitively refused delivery.
+
+
+try:
+    if c["SMTP_TLS"] == "implicit":
+        client = smtplib.SMTP_SSL(c["SMTP_HOST"], port, timeout=20, context=tls)
+    else:
+        client = smtplib.SMTP(c["SMTP_HOST"], port, timeout=20)
     plain_test = c["SMTP_TLS"]=="local-test" and c["SMTP_HOST"] in ("localhost","127.0.0.1","::1")
     if c["SMTP_TLS"]!="implicit" and not plain_test:
         client.starttls(context=tls)
@@ -25,4 +35,18 @@ with client:
     if "--check" in sys.argv:
         client.noop()
     else:
-        client.send_message(message)
+        refused = client.send_message(message)
+        if refused:
+            raise smtplib.SMTPException('SMTP accepted only some recipients')
+except smtplib.SMTPRecipientsRefused as error:
+    rejected([code for code, _ in error.recipients.values()])
+    raise
+except smtplib.SMTPResponseException as error:
+    rejected([error.smtp_code])
+    raise
+finally:
+    if client is not None:
+        try:
+            client.quit()
+        except (OSError, smtplib.SMTPException):
+            client.close()

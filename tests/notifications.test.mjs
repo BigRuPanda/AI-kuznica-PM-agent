@@ -1,6 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, rm } from 'node:fs/promises';
+import { createServer } from 'node:http';
+import { createServer as createSocketServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createTeamApp } from '../server/team-http.mjs';
@@ -157,6 +159,9 @@ test('verified contacts, private results, Redmine confirmation and one delivery 
     await dispatch();
     await dispatch();
     await dispatch();
+    assert.deepEqual((await call('overview')).deliveries.map((row) => row.state), ['delivered', 'delivered']);
+    assert.deepEqual((await call('overview', {}, other.cookie)).deliveries, []);
+    assert.deepEqual((await call('overview', {}, guest.cookie)).deliveries, []);
     assert.equal((await call('knowledge')).results.length, 1);
     assert.equal((await call('knowledge', {}, other.cookie)).results.length, 0);
     assert.equal((await call('knowledge', {}, guest.cookie)).results.length, 0);
@@ -220,8 +225,229 @@ test('verified contacts, private results, Redmine confirmation and one delivery 
     assert.equal((await call('contacts')).telegram, false);
   } finally {
     await app.close();
-    await rm(dir, { recursive: true, force: true });
+    await rm(dir, { recursive: true, force: true, maxRetries: 3 });
   }
+});
+
+async function telegramQueue(t, replies) {
+  const requests = [];
+  const sink = createServer(async (req, res) => {
+    const chunks = [];
+    for await (const chunk of req) chunks.push(chunk);
+    requests.push({ path: req.url, body: JSON.parse(Buffer.concat(chunks)) });
+    const reply = replies.shift() ?? { status: 500, body: {} };
+    if (reply.disconnect) return res.destroy();
+    res.writeHead(reply.status, { 'content-type': 'application/json', ...reply.headers });
+    res.end(JSON.stringify(reply.body));
+  });
+  await new Promise((resolve, reject) => sink.once('error', reject).listen(0, '127.0.0.1', resolve));
+  t.after(() => new Promise((resolve) => sink.close(resolve)));
+  const send = (url, options) => {
+    const upstream = new URL(url);
+    assert.equal(upstream.host, 'api.telegram.org');
+    return fetch('http://127.0.0.1:' + sink.address().port + upstream.pathname, options);
+  };
+  const store = openStore(':memory:', { seedDemo: false });
+  t.after(() => store.close());
+  initEvidence(store.db);
+  const env = { TELEGRAM_BOT_TOKEN: 'test-only' };
+  const enqueue = (body = {}) => store.db.prepare(
+    "INSERT INTO deliveries(id,channel,state,body) VALUES('tg','telegram','queued',?)",
+  ).run(JSON.stringify({ chat: '31', text: 'Проверка доставки', ...body }));
+  return {
+    requests, enqueue, run: () => deliver(store, env, send),
+    state: () => store.one("SELECT state,attempts,next FROM deliveries WHERE id='tg'"),
+    makeDue: () => store.db.exec("UPDATE deliveries SET next=0 WHERE id='tg'"),
+  };
+}
+
+test('Telegram envelope rejection is recorded as failed and skipped on repeat ticks', async (t) => {
+  const queue = await telegramQueue(t, [{ status: 200, body: { ok: false, error_code: 403 } }]);
+  queue.enqueue();
+  await queue.run();
+  await queue.run();
+  assert.equal(queue.state().state, 'failed');
+  assert.equal(queue.state().attempts, 1);
+  assert.equal(queue.requests.length, 1);
+});
+
+test('Telegram limits postpone delivery by the API retry delay before trying once again', async (t) => {
+  const queue = await telegramQueue(t, [
+    { status: 429, body: { ok: false, error_code: 429, parameters: { retry_after: 90 } } },
+    { status: 429, headers: { 'Retry-After': '140' }, body: {} },
+    { status: 200, body: { ok: true, result: { message_id: 1 } } },
+  ]);
+  queue.enqueue();
+  let before = Date.now();
+  await queue.run();
+  assert.equal(queue.state().state, 'queued');
+  assert.ok(queue.state().next >= before + 90_000, 'respect Bot API response parameters');
+  await queue.run();
+  assert.equal(queue.requests.length, 1);
+  queue.makeDue();
+  before = Date.now();
+  await queue.run();
+  assert.equal(queue.state().state, 'queued');
+  assert.ok(queue.state().next >= before + 140_000, 'respect fallback Retry-After header');
+  queue.makeDue();
+  await queue.run();
+  await queue.run();
+  assert.equal(queue.state().state, 'delivered');
+  assert.equal(queue.state().attempts, 3);
+  assert.equal(queue.requests.length, 3);
+});
+
+test('Telegram responses without a provider receipt stay uncertain', async (t) => {
+  const queue = await telegramQueue(t, [{ status: 200, body: { ok: true, result: {} } }]);
+  queue.enqueue();
+  await queue.run();
+  await queue.run();
+  assert.equal(queue.state().state, 'uncertain');
+  assert.equal(queue.requests.length, 1);
+});
+
+test('Telegram drops an invalid issue URL and a loopback application link before delivery', async (t) => {
+  const queue = await telegramQueue(t, [{ status: 200, body: { ok: true, result: { message_id: 1 } } }]);
+  queue.enqueue({ issueUrl: '/issues/17', caseId: 'sample' });
+  await queue.run();
+  assert.equal(queue.state().state, 'delivered');
+  assert.deepEqual(queue.requests, [{
+    path: '/bottest-only/sendMessage', body: { chat_id: '31', text: 'Проверка доставки' },
+  }]);
+});
+
+test('SMTP readiness and delivery both wait for a configured sender', async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), 'signal-smtp-config-'));
+  const env = {
+    ADMIN_INVITE_KEY: 'admin-invite', NOTIFICATIONS_ENABLED: 'true',
+    SMTP_HOST: 'mail.invalid', SMTP_TO: 'qa@example.invalid',
+  };
+  let sent = 0;
+  const sendMail = async () => { sent++; };
+  const app = createTeamApp({ base: join(dir, 'data.sqlite'), env, sendMail, background: false });
+  t.after(async () => {
+    await app.close();
+    await rm(dir, { recursive: true, force: true, maxRetries: 3 });
+  });
+  await new Promise((resolve, reject) => app.server.once('error', reject).listen(0, '127.0.0.1', resolve));
+  const base = 'http://127.0.0.1:' + app.server.address().port + '/api/team/';
+  const post = (op, body, cookie = '') => fetch(base + op, {
+    method: 'POST', headers: { 'content-type': 'application/json', cookie }, body: JSON.stringify(body),
+  });
+  const registered = await post('register', { login: 'owner', code: 'admin-invite', name: 'Owner', password: 'test-only-password' });
+  assert.equal(registered.status, 200);
+  const cookie = registered.headers.get('set-cookie').split(';')[0];
+  const settings = async (op) => (await post(op, {}, cookie)).json();
+  const store = app.space('team');
+  store.db.exec("INSERT INTO deliveries(id,channel,state,body) VALUES('mail','smtp','queued','{\"text\":\"Тест\"}')");
+  await deliver(store, env, fetch, sendMail, app.accounts.db);
+  assert.equal((await settings('contacts')).smtpReady, false);
+  assert.equal((await settings('status')).smtp, false);
+  assert.equal(store.one("SELECT attempts FROM deliveries WHERE id='mail'").attempts, 0);
+  assert.equal(sent, 0);
+  env.SMTP_FROM = 'sender@example.invalid';
+  store.db.exec("UPDATE deliveries SET next=0 WHERE id='mail'");
+  await deliver(store, env, fetch, sendMail, app.accounts.db);
+  assert.equal((await settings('status')).smtp, true);
+  assert.equal(store.one("SELECT state FROM deliveries WHERE id='mail'").state, 'delivered');
+  assert.equal(sent, 1);
+});
+
+async function smtpQueue(t, outcomes) {
+  let accepted = 0;
+  const sink = createSocketServer((socket) => {
+    const outcome = outcomes.shift();
+    const send = (line) => socket.write(line + '\r\n');
+    let text = '', data = false;
+    socket.setEncoding('utf8');
+    socket.on('error', () => {});
+    socket.on('data', (chunk) => {
+      text += chunk;
+      let end;
+      while ((end = text.indexOf('\r\n')) >= 0) {
+        const line = text.slice(0, end).toUpperCase();
+        text = text.slice(end + 2);
+        if (data) {
+          if (line !== '.') continue;
+          data = false;
+          accepted++;
+          if (outcome === 'disconnect') return socket.destroy();
+          send('250 Accepted');
+        } else if (line.startsWith('EHLO ') || line.startsWith('MAIL FROM:') || line === 'RSET') send('250 OK');
+        else if (line.startsWith('RCPT TO:')) {
+          send(outcome === 'temporary' ? '451 Try later' : outcome === 'rejected' ? '550 Unknown user' : '250 OK');
+        } else if (line === 'DATA') {
+          data = true;
+          send('354 Send Message');
+        } else if (line === 'QUIT') {
+          socket.end(outcome === 'quit-error' ? '500 Unexpected command\r\n' : '221 Bye\r\n');
+        } else send('500 Unexpected command');
+      }
+    });
+    send('220 Local SMTP fixture');
+  });
+  await new Promise((resolve, reject) => sink.once('error', reject).listen(0, '127.0.0.1', resolve));
+  t.after(() => new Promise((resolve) => sink.close(resolve)));
+  const env = {
+    NOTIFICATIONS_ENABLED: 'true', SMTP_HOST: '127.0.0.1', SMTP_PORT: String(sink.address().port),
+    SMTP_TLS: 'local-test', SMTP_FROM: 'sender@example.invalid', SMTP_TO: 'recipient@example.invalid',
+    PYTHON_BIN: process.env.PYTHON_BIN || (process.platform === 'win32' ? 'py' : 'python3'),
+  };
+  const store = openStore(':memory:', { seedDemo: false });
+  t.after(() => store.close());
+  initEvidence(store.db);
+  store.db.prepare("INSERT INTO deliveries(id,channel,state,body) VALUES('mail','smtp','queued',?)").run(
+    JSON.stringify({ text: 'Проверка SMTP' }),
+  );
+  return {
+    accepted: () => accepted, run: () => deliver(store, env, fetch),
+    state: () => store.one("SELECT state,attempts,next FROM deliveries WHERE id='mail'"),
+    makeDue: () => store.db.exec("UPDATE deliveries SET next=0 WHERE id='mail'"),
+  };
+}
+
+test('SMTP retries a known temporary rejection without duplicating an accepted mail', async (t) => {
+  const queue = await smtpQueue(t, ['temporary', 'accepted']);
+  const started = Date.now();
+  await queue.run();
+  assert.equal(queue.state().state, 'queued');
+  assert.ok(queue.state().next >= started + 60_000);
+  assert.equal(queue.accepted(), 0);
+  await queue.run();
+  assert.equal(queue.state().attempts, 1);
+  queue.makeDue();
+  await queue.run();
+  await queue.run();
+  assert.equal(queue.state().state, 'delivered');
+  assert.equal(queue.state().attempts, 2);
+  assert.equal(queue.accepted(), 1);
+});
+
+test('SMTP preserves the final DATA acknowledgement if QUIT fails', async (t) => {
+  const queue = await smtpQueue(t, ['quit-error']);
+  await queue.run();
+  await queue.run();
+  assert.equal(queue.state().state, 'delivered');
+  assert.equal(queue.state().attempts, 1);
+  assert.equal(queue.accepted(), 1);
+});
+
+test('SMTP marks definite permanent rejections as failed', async (t) => {
+  const queue = await smtpQueue(t, ['rejected']);
+  await queue.run();
+  await queue.run();
+  assert.equal(queue.state().state, 'failed');
+  assert.equal(queue.state().attempts, 1);
+  assert.equal(queue.accepted(), 0);
+});
+
+test('SMTP never retries automatically after losing the final acknowledgement', async (t) => {
+  const queue = await smtpQueue(t, ['disconnect']);
+  await queue.run();
+  await queue.run();
+  assert.equal(queue.state().state, 'uncertain');
+  assert.equal(queue.state().attempts, 1);
+  assert.equal(queue.accepted(), 1);
 });
 
 test('a named signal waits for the verified recipient and cannot use broad destinations', async () => {
@@ -242,7 +468,7 @@ test('a named signal waits for the verified recipient and cannot use broad desti
     enqueue.run('chat', 'telegram', JSON.stringify(payload));
     const env = {
       NOTIFICATIONS_ENABLED: 'true', SIGNAL_OWNER_LOGIN: 'product',
-      SMTP_HOST: 'mail.invalid', SMTP_TO: 'global@example.invalid',
+      SMTP_HOST: 'mail.invalid', SMTP_FROM: 'sender@example.invalid', SMTP_TO: 'global@example.invalid',
       TELEGRAM_BOT_TOKEN: 'fixture', TELEGRAM_CHAT_IDS: 'global,another-global',
     };
     const sent = [];
@@ -358,7 +584,7 @@ test('late approved rollout resolves a saved watch and notifies the product owne
   const archive = Buffer.from('Observation source fixture');
   const env = {
     SOURCE_ARCHIVE_SHA256: digest(archive), SIGNAL_OWNER_LOGIN: 'prod',
-    NOTIFICATIONS_ENABLED: 'true', SMTP_HOST: 'mail.invalid', SMTP_TO: 'global@example.invalid',
+    NOTIFICATIONS_ENABLED: 'true', SMTP_HOST: 'mail.invalid', SMTP_FROM: 'sender@example.invalid', SMTP_TO: 'global@example.invalid',
     TELEGRAM_BOT_TOKEN: 'fixture', TELEGRAM_CHAT_IDS: 'global',
   };
   const sent = [];
@@ -493,7 +719,7 @@ test('background tick delivers a due observation while a chat job waits for the 
   const dir = await mkdtemp(join(tmpdir(), 'signal-effect-queue-'));
   const env = {
     LLM_BASE_URL:'https://model.invalid/v1', LLM_MODEL:'fixture', LLM_DATA_MODE:'analysis',
-    SIGNAL_OWNER_LOGIN:'prod', NOTIFICATIONS_ENABLED:'true', SMTP_HOST:'mail.invalid',
+    SIGNAL_OWNER_LOGIN:'prod', NOTIFICATIONS_ENABLED:'true', SMTP_HOST:'mail.invalid', SMTP_FROM:'sender@example.invalid',
   };
   const started = Promise.withResolvers(), modelReply = Promise.withResolvers();
   let calls = 0;

@@ -120,6 +120,37 @@ test('case advice uses the selected figures, a requested report is saved, and an
     assert.match((await ask('Про человека')).text,/Поиск в интернете/);
   } finally {s.close();}
 });
+test('a general definition with an offline instruction is answered without archive citations or paid tools', async () => {
+  const s=open();
+  try {
+    const {thread}=sample(s);
+    enqueue(s,user,{thread,webSearch:true,question:'Что такое урбанистика? Ответь без интернета.'});
+    const send=async(url,opts)=>{
+      assert.equal(new URL(url).hostname,'localhost');
+      assert.equal(JSON.parse(opts.body).tools,undefined);
+      assert.equal(JSON.parse(opts.body).temperature,0);
+      return say('Урбанистика изучает развитие городов.');
+    };
+    await workJobs(s,{publicUser:()=>user},api,send);
+    const reply=messages(s.db,user,thread).items.at(-1).body;
+    assert.equal(reply.mode,'conversation');
+    assert.equal(reply.text,'Урбанистика изучает развитие городов.');
+    assert.equal(reply.readSources?.length || 0,0);
+  } finally {s.close();}
+});
+test('a simple order-index chart uses the saved case series without waiting for tool inference', async () => {
+  const s=open();
+  try {
+    const {thread,caseId,view}=sample(s);
+    enqueue(s,user,{thread,caseId,screen:{calc:view.id},question:'Нарисуй график индекса заказов по текущему разбору.'});
+    let calls=0;
+    await workJobs(s,{publicUser:()=>user},api,async()=>{calls++;throw Error('busy');});
+    const result=messages(s.db,user,thread).items.at(-1).body;
+    assert.equal(calls,0);
+    assert.equal(result.outcome,'done');
+    assert.ok(result.materials.some(m=>m.kind==='chart'));
+  } finally {s.close();}
+});
 test('exact weekly questions reference the recorded value or report the available dates without a model', async () => {
   const s = open();
   try {

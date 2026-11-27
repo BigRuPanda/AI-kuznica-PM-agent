@@ -190,6 +190,7 @@ test('Telegram fans out once per recipient, SMTP gets one link and repeated work
       TELEGRAM_CHANNEL_ID: '22',
       TELEGRAM_BOT_TOKEN: 'fixture',
       SMTP_HOST: 'example.invalid',
+      SMTP_FROM: 'sender@example.invalid',
       SMTP_TO: 'demo@example.invalid',
       APP_BASE_URL: 'https://example.invalid',
     };
@@ -201,7 +202,7 @@ test('Telegram fans out once per recipient, SMTP gets one link and repeated work
         env,
         async (url, init) => {
           ids.push(JSON.parse(init.body).chat_id);
-          return Response.json({ result: { message_id: 1 } });
+          return Response.json({ ok: true, result: { message_id: 1 } });
         },
         async (text) => emails.push(text),
       );
