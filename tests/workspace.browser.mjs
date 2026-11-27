@@ -614,6 +614,17 @@ test('versioned case presentations in the browser and both downloads', async t =
   await workJobs(store, app.accounts, env, noModel);
   await workPresentations(store, env, noModel);
   assert.equal(await bubble.getByRole('link', { name: 'Скачать PDF' }).getAttribute('href'), chatPdf);
+
+  const lostId=chatPdf.split('/').at(-2);
+  db.prepare('DELETE FROM presentation_inputs WHERE id=?').run(lostId);
+  db.prepare('DELETE FROM presentations WHERE id=?').run(lostId);
+  const lost=page.locator('.bubble.assistant').filter({ hasText: 'Исходный снимок презентации утрачен.' });
+  await submit(page, 'ask', () => role(lost, 'Собрать новую версию').click());
+  await workJobs(store, app.accounts, env, noModel);
+  await workPresentations(store, env, noModel);
+  assert.notEqual(await bubble.getByRole('link', { name: 'Скачать PDF' }).getAttribute('href'), chatPdf);
+  await visible(lost);
+  assert.equal(await lost.getByRole('link', { name: 'Скачать PDF' }).count(),0);
 });
 
 test('Softline workspace, upgrade and browser journeys', async t => {

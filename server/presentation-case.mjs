@@ -13,6 +13,7 @@ const date = value => {
 const unique = refs => [...new Map(refs.filter(r => r?.url).map(r => [r.url, r])).values()];
 const allowed=(db,user,id,shared=false)=>{try {access(db,user,id,shared);return true;} catch {return false;}};
 const archiveRef = r => source(r.file + ' · ' + r.loc, '#knowledge-source/' + r.version + '/' + encodeURIComponent(r.loc));
+const salesRef = r => source(r.source,'#knowledge-source/'+r.version+'/'+encodeURIComponent(r.source.split(' · ').at(-1)));
 const titleOf = (s, fallback) => clean(s).split(/\n/u)[0] || fallback;
 
 // Collect a coherent version while the caller holds its SQLite transaction.
@@ -37,29 +38,52 @@ export function casePresentationInput(db, user, caseId, created) {
   const signal=b.signal, plan=b.plan || {}, watch=b.watch;
   const observed=watch ? effect(db,c) : null;
   let headline='', keyValue='', keyLabel='', leadRefs=[card];
+  const withdrawn=signal?.status==='withdrawn';
+  if(withdrawn) {
+    headline='Сигнал отозван после пересчёта';
+    check(signal.week,'Статус сигнала',headline);
+  }
   if (signal?.metric) {
     const rows=[...(signal.evidence?.baseline || []),signal.evidence?.latest].filter(Boolean);
-    const refs=rows.flatMap(week=>(week.rows || []).filter(r=>r.version && r.source)
-      .map(r=>source(r.source,'#knowledge-source/'+r.version+'/'+encodeURIComponent(r.source.split(' · ').at(-1)))));
-    if(refs.length) leadRefs=refs;
-    keyLabel=signal.title || signal.metric;
-    keyValue=Number.isFinite(signal.change) ? fmt(signal.change)+' '+(signal.changeUnit || '') : '';
-    headline=keyValue ? keyLabel+' · изменение '+keyValue : keyLabel;
-    check(signal.week,'Исходный сигнал',headline,leadRefs);
-    if(rows.length) candidate({kind:'table',title:'Наблюдения по сигналу',
-      columns:['Начало недели','Числитель','Знаменатель'],rows:rows.map(r=>[r.week,fmt(r.n),fmt(r.d)]),refs:leadRefs});
+    const refs=rows.flatMap(week=>(week.rows || []).filter(r=>r.version && r.source).map(salesRef));
+    if(!withdrawn) {
+      if(refs.length) leadRefs=refs;
+      keyLabel=signal.title || signal.metric;
+      keyValue=Number.isFinite(signal.change) ? fmt(signal.change)+' '+(signal.changeUnit || '') : '';
+      headline=keyValue ? keyLabel+' · изменение '+keyValue : keyLabel;
+      check(signal.week,'Исходный сигнал',headline,leadRefs);
+    }
+    if(rows.length && (!withdrawn || refs.length)) candidate({kind:'table',
+      title:withdrawn?'Данные первоначального сигнала':'Наблюдения по сигналу',
+      columns:['Начало недели','Числитель','Знаменатель'],rows:rows.map(r=>[r.week,fmt(r.n),fmt(r.d)]),refs:refs.length?refs:[card]});
   } else if (signal) {
     const history=listSales(db).filter(r=>r.product===c.product && !r.partial && r.week<=signal.week);
     const rows=signal.rule==='relative' ? history.slice(-16) : history.filter(r=>r.week>=signal.start);
-    const refs=rows.map(r=>source(r.source,'#knowledge-source/'+r.version+'/'+encodeURIComponent(r.source.split(' · ').at(-1))));
+    const refs=rows.map(salesRef);
     if (refs.length) leadRefs=refs;
     const relative=signal.rule==='relative' && Number.isFinite(signal.change);
-    keyValue=relative ? fmt(signal.change)+'%' : Number.isFinite(signal.value) ? fmt(signal.value) : '';
-    keyLabel=relative ? 'изменение индекса заказов' : 'индекс самостоятельных заказов';
-    headline=relative ? 'Средний индекс заказов за четыре недели '+(signal.change<0?'снизился':'вырос')+' на '+fmt(Math.abs(signal.change))+'%' :
-      'Недельный индекс самостоятельных заказов составил '+keyValue;
-    check(signal.week,'Исходный сигнал',headline,leadRefs);
-    if (rows.length) candidate({kind:'chart',title:'Как менялся индекс самостоятельных заказов',unit:'пункты индекса',
+    if(withdrawn) {
+      const last=rows.find(r=>r.week===signal.week);
+      if(last) {
+        keyValue=fmt(last.value);
+        keyLabel='индекс за '+last.week+' после пересчёта';
+        check(last.week,'Пересчёт сигнала','Индекс самостоятельных заказов составил '+keyValue,[salesRef(last)]);
+      }
+      const original=(signal.history || []).filter(r=>r.version && r.source && Number.isFinite(r.value));
+      if(original.length) {
+        const threshold=signal.rule==='absolute' && Number.isFinite(signal.threshold) ? ' · порог '+fmt(signal.threshold) : '';
+        candidate({kind:'table',title:'Данные первоначального сигнала'+threshold,columns:['Начало недели','Индекс'],
+          rows:original.map(r=>[r.week,fmt(r.value)]),refs:original.map(salesRef)});
+      }
+    } else {
+      keyValue=relative ? fmt(signal.change)+'%' : Number.isFinite(signal.value) ? fmt(signal.value) : '';
+      keyLabel=relative ? 'изменение индекса заказов' : 'индекс самостоятельных заказов';
+      headline=relative ? 'Средний индекс заказов за четыре недели '+(signal.change<0?'снизился':'вырос')+' на '+fmt(Math.abs(signal.change))+'%' :
+        'Недельный индекс самостоятельных заказов составил '+keyValue;
+      check(signal.week,'Исходный сигнал',headline,leadRefs);
+    }
+    if (rows.length) candidate({kind:'chart',
+      title:withdrawn?'Индекс самостоятельных заказов после пересчёта':'Как менялся индекс самостоятельных заказов',unit:'пункты индекса',
       series:[{name:c.product,points:rows.map(r=>({label:r.week,value:r.partial ? null : r.value}))}],refs:leadRefs});
     if(relative && rows.length===16 && Date.parse(rows.at(-1).week)-Date.parse(rows[0].week)===15*7*86400000) {
       const groups=[rows.slice(0,12),rows.slice(12)];
@@ -245,14 +269,15 @@ export function casePresentationInput(db, user, caseId, created) {
   const latestNote=notes.at(-1)?.text;
   const decision=watch ? 'Проверить результат за согласованный период' : c.state==='Завершено' ?
     (publishedConclusion || 'Разбор завершён. Отдельное решение в карточке не зафиксировано.') :
-    plan.success ? 'Сопоставить результат проверки с критерием успеха.' : signal ?
+    plan.success ? 'Сопоставить результат проверки с критерием успеха.' : withdrawn ?
+      'Сверить выводы разбора с пересчитанными данными.' : signal ?
       'Проверить, сохраняется ли изменение в следующем полном периоде, и сопоставить его с событиями продукта.' :
       !checks.length ? 'Собрать исходные наблюдения и сформулировать проверяемую гипотезу.' :
       'Зафиксировать решение по результатам проверки';
   const supporting=candidates.find(s=>s.kind==='finding' || s.kind==='quote');
   const planOnly=plan.hypothesis && checks.every(row=>row.stage==='Исходная гипотеза') && candidates.every(s=>s.kind==='table');
   return {caseId,product:c.product,title:c.title,state:c.state,created,personal,checks,candidates,
-    cover:{kind:'cover',title:titleOf(publishedConclusion || latestNote || headline || supporting?.body,c.title),
+    cover:{kind:'cover',title:titleOf(withdrawn ? headline : publishedConclusion || latestNote || headline || supporting?.body,c.title),
       body:planOnly ? 'Гипотеза сформулирована. Результат проверки пока не зафиксирован.' :
         checks.length || candidates.length ? c.title : 'Подтверждённых результатов в разборе пока нет.',
       keyValue,keyLabel,decision,refs:unique([card,...leadRefs,...(supporting?.refs || [])])},

@@ -372,6 +372,7 @@ function Chat({
     send = useRef<HTMLButtonElement>(null),
     follow = useRef(true),
     request = useRef<{ id: string; body: string; text: string } | null>(readPending());
+  const replacementRequests = useRef(new Map<number, string>());
   useEffect(() => {
     function accept(a: ChatAttachment) {
       setMaterial(a.material);
@@ -679,6 +680,22 @@ function Chat({
               <ChatPresentation id={m.body.presentationId} />}
             {m.body.mode === 'presentation' && m.body.outcome === 'clarification' &&
               <a href="#cases">Открыть разборы</a>}
+            {m.body.replacePresentation && (
+              <button disabled={running || sending} onClick={() => action(async () => {
+                const requestId = replacementRequests.current.get(m.seq) || crypto.randomUUID();
+                replacementRequests.current.set(m.seq, requestId);
+                work(true);
+                try {
+                  await post('ask', { thread:id, caseId:m.body.caseId, question:'Сделай презентацию', requestId });
+                  replacementRequests.current.delete(m.seq);
+                } catch (error) {
+                  work(false);
+                  throw error;
+                }
+              })}>
+                Собрать новую версию
+              </button>
+            )}
             {m.body.warning && !m.body.text.includes(m.body.warning) && <small>{m.body.warning}</small>}
             {m.body.canResume && (
               <button

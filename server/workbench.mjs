@@ -20,7 +20,10 @@ import {
   digest,
 } from './evidence.mjs';
 import { apiConfigured, providerCall } from './agent.mjs';
-import { chatPresentationStatus, initPresentations, queueChatPresentation, requestsPresentation } from './presentations.mjs';
+import {
+  chatPresentationRecovery, chatPresentationStatus, initPresentations, lostPresentationNotice,
+  queueChatPresentation, requestsPresentation,
+} from './presentations.mjs';
 import { initTracking } from './tracker-workflow.mjs';
 import { mail, smtpConfigured, telegram, telegramConfigured } from './connectors.mjs';
 import { destination, notificationOwner, telegramGroupAllowed } from './notification-contacts.mjs';
@@ -300,14 +303,18 @@ function presentationCase(db, user, body, scope) {
   return null;
 }
 
-function missingPresentation(db, user, job, reply, scope) {
-  if (!job || job.user !== user.id) return false;
+function presentationRecovery(db, user, job, reply, scope) {
+  if (!job || job.user !== user.id) return;
+  const caseId = presentationCase(db, user, JSON.parse(job.body), scope);
+  if (!caseId) return;
+  try {
+    if (visibleCase(db,user,caseId).body.owner && scope === 'group') return;
+  } catch { return; }
   if (reply.presentationId) {
-    const version = chatPresentationStatus(db, user, reply.presentationId);
-    if (version) return version.status === 'failed' || (version.status === 'ready' && !version.hasDeck);
-    if (db.prepare('SELECT 1 FROM presentations WHERE id=?').get(reply.presentationId)) return false;
-  } else if (reply.mode === 'presentation' || reply.actions?.length) return false;
-  return Boolean(presentationCase(db, user, JSON.parse(job.body), scope));
+    const action = chatPresentationRecovery(db, user, caseId, job.id, reply.presentationId);
+    return action && { action, caseId };
+  }
+  if (reply.mode !== 'presentation' && !reply.actions?.length) return { action:'repair', caseId };
 }
 
 export function enqueue(store, user, b, { telegramReply } = {}) {
@@ -437,24 +444,30 @@ export function messages(db, user, id) {
       .map((x) => {
         const { authorId, ...body } = JSON.parse(x.body);
         if (x.role === 'assistant' && body.jobId) {
-          const job = db.prepare('SELECT user,status,body FROM jobs WHERE id=? AND thread=?').get(body.jobId, id);
-          if (missingPresentation(db, user, job, body, scope)) {
+          const job = db.prepare('SELECT id,user,status,body FROM jobs WHERE id=? AND thread=?').get(body.jobId, id);
+          const recovery = presentationRecovery(db, user, job, body, scope);
+          if (recovery?.action === 'repair') {
             body.missingPresentation = true;
             body.canResume = !['queued', 'running'].includes(job.status);
+          } else if (recovery?.action === 'replace') {
+            body.replacePresentation = true;
+            body.caseId = recovery.caseId;
           }
         }
         if (body.presentationId) {
           const version = chatPresentationStatus(db, user, body.presentationId);
-          if (!version && !body.missingPresentation)
+          if (!version && !body.missingPresentation && !body.replacePresentation)
             return { ...x, own: false, body: { text: 'Презентация недоступна в этом чате.', materials: [] } };
-          body.presentationStatus = body.missingPresentation || (version.status === 'ready' && !version.hasDeck)
+          body.presentationStatus = body.missingPresentation || body.replacePresentation || (version.status === 'ready' && !version.hasDeck)
             ? 'failed' : version.status;
-          body.text = body.presentationStatus === 'ready' ? 'Презентация разбора готова.'
+          body.text = body.replacePresentation
+            ? lostPresentationNotice
+            : body.presentationStatus === 'ready' ? 'Презентация разбора готова.'
             : body.presentationStatus === 'failed'
               ? (version?.status === 'failed' && version.notice) || 'Презентация недоступна. Повторите сборку.'
               : 'Собираю презентацию по материалам разбора…';
         }
-        if (body.mode !== 'daily' && body.jobId && ['partial', 'failed'].includes(body.outcome)) {
+        if (body.mode !== 'daily' && body.jobId && !body.replacePresentation && ['partial', 'failed'].includes(body.outcome)) {
           const job = db.prepare('SELECT status FROM jobs WHERE id=? AND user=?').get(body.jobId,user.id);
           if (job) {
             body.resuming = ['queued','running'].includes(job.status) || undefined;
@@ -678,9 +691,10 @@ export async function answer(store, user, b, env = process.env, send = fetch, jo
     text: 'Откройте карточку нужного разбора и попросите собрать презентацию в её чате.',
   };
   if (presentation) {
-    const version = store.tx(() => queueChatPresentation(db, user, presentation, job));
+    const previous = JSON.parse(db.prepare('SELECT result FROM jobs WHERE id=? AND user=?').get(job,user.id)?.result || 'null');
+    const version = store.tx(() => queueChatPresentation(db, user, presentation, job, {previousId:previous?.presentationId}));
     return { mode: 'presentation', caseId: presentation, presentationId: version.id,
-      text: 'Презентация добавлена в материалы разбора.', outcome: 'done' };
+      text: version.unavailable ? lostPresentationNotice : 'Презентация добавлена в материалы разбора.', outcome: 'done' };
   }
   const range=b.rangeId && (access(db,user,b.rangeId,shared),readRange(db,user,b.rangeId));
   const attachments=(b.materialIds || []).map(id=>readMaterial(db,user,id,shared));
@@ -1103,12 +1117,13 @@ export function resumeJob(db, user, id) {
   const j = db.prepare('SELECT * FROM jobs WHERE id=? AND user=?').get(id, user.id);
   if (!j) throw Error('Поручение недоступно');
   const previous = JSON.parse(j.result || 'null');
-  const body = JSON.parse(j.body);
   const scope = thread(db,user,j.thread).scope;
-  const repair = previous && missingPresentation(db,user,j,previous,scope);
+  const recovery = previous && presentationRecovery(db,user,j,previous,scope);
+  if (recovery?.action === 'replace') return { id };
+  const repair = recovery?.action === 'repair';
   if (!['failed','partial'].includes(j.status) && !(j.status === 'done' && repair)) return { id };
   if (previous?.retryExhausted && !repair) throw Error('Для следующей попытки уточните вопрос.');
-  if (repair) queueChatPresentation(db,user,presentationCase(db,user,body,scope),id,{rebuild:true});
+  if (repair) queueChatPresentation(db,user,recovery.caseId,id,{rebuild:true,previousId:previous?.presentationId});
   const row = db.prepare('SELECT body FROM agent_turns WHERE job=?').get(id);
   if (row) {
     const state = JSON.parse(row.body);
