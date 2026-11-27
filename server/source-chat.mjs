@@ -2,7 +2,7 @@ import {readPublicPage} from './public-page.mjs';
 import {cellSource,sourceRows} from './knowledge.mjs';
 import {apiConfigured,providerCall} from './agent.mjs';
 import {webQuestion,webAnswer,noWeb} from './web-search.mjs';
-import {competitorQuestion,competitorAnswer} from './competitor-chat.mjs';
+import {archivedOfferAnswer,archivedOfferQuestion,competitorQuestion,competitorAnswer} from './competitor-chat.mjs';
 import {localData} from './data-profile.mjs';
 
 const tokens=s=>String(s).toLowerCase().match(/[\p{L}\d]{3,}/gu)||[];
@@ -54,8 +54,28 @@ export async function publicAnswer(store,b,env,send,job,options) {
   return {mode:'public-page',steps:['read_public_page'],checkedAt:page.checkedAt,text,readSources};
 }
 
-export async function externalAnswer(store,user,b,env,send,job,shared,pageOptions) {
+export async function externalAnswer(store,user,b,env,send,job,shared,pageOptions,releasePeriod) {
   const typed=typeof b.typedQuestion==='string' && b.question.trim().endsWith(b.typedQuestion.trim()) ? b.typedQuestion.trim() : b.question;
+  const workspaceRequest=/(?:создай|создать|подготовь|сохрани|добавь|опубликуй|назначь|обнови|измени).{0,80}(?:задач|черновик|комментар|материал|страниц.{0,10}confluence)|(?:задач[ауи]|страниц[ауе]).{0,20}(?:redmine|confluence)|#(?:case|material|snapshot|range|demo-issue|demo-page)\//iu;
+  if(!b.sourceCell && workspaceRequest.test(typed)) return;
+  if (releasePeriod) {
+    const query=webQuestion(typed,b.webSearch);
+    if (query!==null) {
+      const current=await webAnswer(store,job,query,env,send);
+      return {...current,text:'Текущий поиск в интернете, вне среза релиза.\n\n'+current.text};
+    }
+    const link=typed.match(/#knowledge-source\/([a-f\d]{64})\/([^\s<>]+)/iu);
+    let ref=b.sourceCell;
+    if (link && !ref) {
+      try { ref={version:link[1],loc:decodeURIComponent(link[2])}; }
+      catch { return {mode:'archive',outcome:'clarification',text:'Уточните ссылку на архивную ячейку.',readSources:[]}; }
+    }
+    if (ref || archivedOfferQuestion(typed) && !/https?:\/\//iu.test(typed))
+      return archivedOfferAnswer(store.db,typed,releasePeriod,ref);
+    if (/https?:\/\//iu.test(typed)) return {mode:'archive',outcome:'clarification',readSources:[],
+      text:'Публичная страница открывается отдельно от среза релиза. Включите «Поиск в интернете», чтобы выполнить текущий поиск.'};
+    return;
+  }
   if(noWeb(typed)){
     if(!b.sourceCell)return;
     const cell=sourceRows(store.db,b.sourceCell.version,0,b.sourceCell.loc);
@@ -63,8 +83,6 @@ export async function externalAnswer(store,user,b,env,send,job,shared,pageOption
     return {mode:'source-value',steps:['knowledge-source'],text:typeof row.value==='string'?row.value:JSON.stringify(row.value),
       readSources:[{label:cell.file+' · '+b.sourceCell.loc,url:'#knowledge-source/'+cell.version+'/'+encodeURIComponent(b.sourceCell.loc)}]};
   }
-  const workspaceRequest=/(?:создай|создать|подготовь|сохрани|добавь|опубликуй|назначь|обнови|измени).{0,80}(?:задач|черновик|комментар|материал|страниц.{0,10}confluence)|(?:задач[ауи]|страниц[ауе]).{0,20}(?:redmine|confluence)|#(?:case|material|snapshot|range|demo-issue|demo-page)\//iu;
-  if(!b.sourceCell && workspaceRequest.test(typed)) return;
   const body={...b,typedQuestion:typed};
   if (b.sourceCell || /https?:\/\/|#knowledge-source\//iu.test(typed)) return publicAnswer(store,body,env,send,job,pageOptions);
   const query=webQuestion(typed,b.webSearch);

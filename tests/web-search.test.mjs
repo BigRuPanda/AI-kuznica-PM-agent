@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { openStore } from '../server/store.mjs';
 import { initEvidence, importDocs } from '../server/evidence.mjs';
-import { initWorkbench, createThread, enqueue, workJobs, messages, answer } from '../server/workbench.mjs';
+import { initWorkbench, createThread, enqueue, openReleaseThread, saveReleaseDecisionContext, workJobs, messages, answer } from '../server/workbench.mjs';
 import { marketOffers } from '../server/market-offers.mjs';
 import { checkOffer, sellerUrl } from '../server/competitor-check.mjs';
 import { workspaceOperation } from '../server/workspace-operations.mjs';
@@ -57,6 +57,59 @@ test('any topic in queued chat uses Yandex, then the configured model, and cites
   assert.equal(body.webSearchCount, 1);
   assert.equal(webQuestion('Найди задачу в Redmine'), null);
   assert.equal(webQuestion('Не ищи в интернете'), null);
+});
+
+test('archived release chat uses the selected offer dates and keeps opted-in web results separate',async t=>{
+  const store=workspace(t),db=store.db;
+  const file='Astra offers.xlsx';
+  const rows=[['A2','2026-09-28',999],['A3','2026-10-07',1234],['A4','2026-11-11',5678]];
+  importDocs(store,[{file,facts:rows.map(([cell,checked,competitorPrice])=>({kind:'competitor',loc:'Цены!'+cell,
+    text:'Astra · конкурент · '+competitorPrice,prices:{'Продукт':'Astra','Цена конкурента, ₽':competitorPrice,'Дата проверки':checked},
+    comparison:{...offer,product:'Astra',checked,competitorPrice}}))}],{notify:false});
+  const version=db.prepare('SELECT version FROM documents WHERE file=?').get(file).version;
+  const decision={release:{id:'R-11'},product:'Astra',asOf:'2026-10-11',historical:true,scope:'product'};
+  const thread=openReleaseThread(store,user,decision);
+  const decisionContext=saveReleaseDecisionContext(db,user,decision);
+  const ask=async (question,options={},send=()=>assert.fail('an archived lookup attempted a network request'))=>{
+    enqueue(store,user,{thread,decisionContext,question,...options});
+    await workJobs(store,{publicUser:()=>user},env,send);
+    return messages(db,user,thread).items.at(-1).body;
+  };
+  const plain=await ask('Проверь предложение продавца Astra');
+  assert.equal(plain.mode,'archive',plain.text);
+  assert.deepEqual(plain.readSources.map(source=>source.url.split('!').at(-1)),['A3','A2']);
+  const archived=await ask('Проверь предложение продавца Astra за период с 2026-10-01 по 2026-11-20');
+  assert.equal(archived.outcome,'done',archived.text);
+  assert.equal(archived.decisionThrough,'2026-10-11');
+  assert.match(archived.text,/2026-10-07/);
+  assert.doesNotMatch(archived.text,/999|5678|2026-11-11/);
+  assert.deepEqual(archived.readSources.map(source=>source.url),['#knowledge-source/'+version+'/'+encodeURIComponent('Цены!A3')]);
+  const lookup=await ask('Какая цена конкурента Astra в архиве за период с 2026-10-01 по 2026-11-20?');
+  assert.doesNotMatch(lookup.text,/999|5678|2026-11-11/);
+  assert.ok(lookup.readSources.some(source=>source.url.includes('A3')),lookup.text);
+
+  const outside=await ask('Проверь ссылку на предложение '+ '#knowledge-source/'+version+'/Цены!A4');
+  assert.equal(outside.outcome,'clarification');
+  assert.deepEqual(outside.readSources,[]);
+  const pasted=await ask('Посмотри предложение продавца https://allsoft.ru/software/vendors/test/12345/');
+  assert.equal(pasted.outcome,'clarification');
+  assert.deepEqual(pasted.readSources,[]);
+
+  importDocs(store,[{file,facts:[{kind:'competitor',loc:'Цены!A3',text:'Astra · обновлённая книга',
+    comparison:{...offer,product:'Astra',checked:'2026-10-07',competitorPrice:9876}}]}],{notify:false});
+  const pinned=await ask('Какая цена конкурента Astra в архиве за период с 2026-10-01 по 2026-10-10?');
+  assert.deepEqual(pinned.readSources,archived.readSources);
+  assert.doesNotMatch(pinned.text,/9876|9\s876/);
+
+  const current=await ask('Найди в интернете актуальную цену Astra',{},async target=>{
+    assert.match(String(target),/searchapi\.api\.cloud\.yandex\.net/);
+    return yandex(result);
+  });
+  assert.equal(current.mode,'web');
+  assert.equal(current.decisionThrough,undefined);
+  assert.match(current.text,/текущ/iu);
+  assert.doesNotMatch(current.text,/1234|2026-10-07/);
+  assert.ok(current.readSources.every(source=>source.url.startsWith('https://')));
 });
 
 test('requests for a website link return the first search result without waiting for model narration', async t => {

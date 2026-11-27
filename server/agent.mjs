@@ -60,10 +60,11 @@ export async function providerCall(env,messages,tools,choice='auto',send=fetch,l
     const unit = { one:'секунду', few:'секунды', many:'секунд', other:'секунды' }[new Intl.PluralRules('ru').select(seconds)];
     return Object.assign(Error('Модель не успела ответить за ' + seconds + ' ' + unit + '.'), {timedOut:true});
   };
-  const history = messages.map(({usage, googleParts, ...message}) => message);
+  const history = messages.map(({usage, googleParts, lengthLimited, ...message}) => message);
   try{response=await send(target,{method:'POST',redirect:'error',signal,headers:{'Content-Type':'application/json',...(key?{Authorization:'Bearer '+key}:{})},
     body:JSON.stringify({model:env.LLM_MODEL,messages:history,...(tools.length?{tools,tool_choice:choice}:{}),
       ...(limits.maxTokens?{max_tokens:limits.maxTokens}:{}),
+      ...(limits.responseFormat?{response_format:limits.responseFormat}:{}),
       ...(limits.temperature!==undefined?{temperature:limits.temperature}:{})})});}
   catch(error) {
     if(timedOut(error))throw timeoutError();

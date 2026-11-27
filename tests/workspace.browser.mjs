@@ -2500,6 +2500,7 @@ test('Softline workspace, upgrade and browser journeys', async t => {
       elements.map(element => [...element.classList].find(name => name.startsWith('card-')).slice(5)));
     const full = field(page,'Только полные недели');
     const peer = field(page,'Контроль');
+    const controlOption = peer.getByRole('option',{name:control,exact:true});
     const sourceQuestion = 'Покажи источники о переносе лицензии' + ' и соответствующие детали'.repeat(18);
     const query = sourceQuestion.slice(0,400);
     const fields = response => {
@@ -2510,8 +2511,10 @@ test('Softline workspace, upgrade and browser journeys', async t => {
     const initial = {control:undefined,sourceQuery:'',full:false};
 
     await open(caseId,title);
-    assert.equal(await peer.locator('option').nth(1).textContent(),control);
+    assert.equal(await controlOption.count(),1);
+    assert.ok(await controlOption.isEnabled());
     await Promise.all([viewRequest(caseId,v => v.control === control), peer.selectOption(control)]);
+    assert.equal(await peer.inputValue(),control);
     await role(card('trend'),'Закрепить').click();
     await field(page,'Вопрос агенту').fill(sourceQuestion);
     const [sources] = await submit(page,'ask',()=>role(page,'Отправить').click());
@@ -2539,6 +2542,8 @@ test('Softline workspace, upgrade and browser journeys', async t => {
     },{key,sourceQuestion});
     const [reloaded] = await Promise.all([viewRequest(caseId), page.reload()]);
     assert.deepEqual(fields(reloaded),expected);
+    assert.equal(await peer.inputValue(),control);
+    assert.ok(await controlOption.isEnabled());
     const saved = (await reloaded.json()).view;
     const {id:calcId,...calculation} = saved;
     assert.equal(saved.summary[1].product,control);

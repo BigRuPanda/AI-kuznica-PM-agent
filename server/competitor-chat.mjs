@@ -2,29 +2,53 @@ import { marketOffers } from './market-offers.mjs';
 import { visibleCase } from './workbench.mjs';
 import { checkOffer } from './competitor-check.mjs';
 import { noWeb } from './web-search.mjs';
+import { fmt } from './evidence.mjs';
 
 export function competitorQuestion(question) {
   if (noWeb(question) || /(?:не проверяй|на дату|на момент|по состоянию на\s+(?!сегодня)|\d{4}-\d{2}-\d{2}|\d{1,2}[./]\d{1,2}[./]\d{2,4})/iu.test(question)) return false;
   return /(?:проверь|проверить|сверь|сверить|обнови|актуальн|сейчас|сегодня)/iu.test(question) &&
-    /(?:цен[ауые]|предложени|карточк[ауи]|лицензи|артикул)/iu.test(question) &&
-    /конкурент|продавц|allsoft|аллсофт|[a-z0-9-]+\.(?:ru|com)\b|артикул/iu.test(question);
+    archivedOfferQuestion(question);
 }
 
-export async function competitorAnswer(store, user, b, env, send, shared, job) {
-  const question = b.question.toLowerCase();
-  const today = new Date().toISOString().slice(0, 10);
-  const decision = b.caseId ? visibleCase(store.db, user, b.caseId) : null;
-  if (shared && decision?.body.owner) throw Error('Личный разбор недоступен в группе');
+export function archivedOfferQuestion(question) {
+  return /(?:цен[ауые]|предложени|карточк[ауи]|лицензи|артикул)/iu.test(question) &&
+    /конкурент|продав[це]|allsoft|аллсофт|[a-z0-9-]+\.(?:ru|com)\b|артикул/iu.test(question);
+}
+
+function matchingOffers(db, question, product, through, bounds) {
+  question = question.toLowerCase();
   const domains = question.match(/[a-z0-9-]+(?:\.[a-z0-9-]+)*\.(?:ru|com)\b/g) || [];
-  const all = marketOffers(store.db, null, today);
+  const all = marketOffers(db, null, through, bounds);
   const named = [...new Set(all.map(o => o.merchant))].filter(m => question.includes(m.split('.')[0].toLowerCase()) ||
     (m === 'allsoft.ru' && question.includes('аллсофт')));
   const sku = /\b(?=[a-z0-9-]*[a-z])(?=[a-z0-9-]*\d)[a-z0-9-]{7,32}\b/i.exec(question)?.[0];
-  const product = /kaspersky|каспер/u.test(question) ? 'Kaspersky' : /astra|астр/u.test(question) ? 'Astra' : null;
-  const source = product || (!sku && (b.product || decision?.product));
-  const offers = (source ? marketOffers(store.db, source, today) : all).filter(o =>
+  const namedProduct = /kaspersky|каспер/u.test(question) ? 'Kaspersky' : /astra|астр/u.test(question) ? 'Astra' : null;
+  const source = namedProduct || (!sku && product);
+  return (source ? marketOffers(db, source, through, bounds) : all).filter(o =>
     (!domains.length || domains.includes(o.merchant)) && (!named.length || named.includes(o.merchant)) &&
     (!sku || o.sku?.toLowerCase() === sku));
+}
+
+const offerSource = o => ({url:'#knowledge-source/'+o.version+'/'+encodeURIComponent(o.loc),label:o.file+' · '+o.loc});
+
+export function archivedOfferAnswer(db, question, {from,through,product,versions}, ref) {
+  const bounds = {from,versions};
+  const offers = ref ? marketOffers(db, null, through, bounds).filter(o=>o.version===ref.version && o.loc===ref.loc)
+    : matchingOffers(db, question, product, through, bounds);
+  const rows = offers.slice(0,8);
+  return {mode:'archive',outcome:rows.length ? 'done' : 'clarification',
+    text:rows.length ? ['Предложения в срезе по '+through+'.', ...rows.map(o=>
+      [o.checked,o.merchant,o.product,Number.isFinite(o.competitorPrice) && fmt(o.competitorPrice)+' ₽',
+        o.match==='Частично' && 'частичное совпадение'].filter(Boolean).join(' · '))].join('\n')
+      : 'В выбранном периоде нет подтверждённой строки предложения. Для текущей проверки включите «Поиск в интернете» или попросите поискать в интернете.',
+    readSources:rows.map(offerSource)};
+}
+
+export async function competitorAnswer(store, user, b, env, send, shared, job) {
+  const today = new Date().toISOString().slice(0, 10);
+  const decision = b.caseId ? visibleCase(store.db, user, b.caseId) : null;
+  if (shared && decision?.body.owner) throw Error('Личный разбор недоступен в группе');
+  const offers = matchingOffers(store.db, b.question, b.product || decision?.product, today);
   const offer = offers[0];
   if (!offer) return { text: 'В исследовании нет такой позиции. Для свободного поиска напишите «Найди в интернете» и укажите товар.', mode: 'conversation' };
   if (offers.length > 1)
@@ -33,6 +57,6 @@ export async function competitorAnswer(store, user, b, env, send, shared, job) {
   return { mode: 'competitor-check', steps: ['competitor_check'], webSearchCount: result.searchRequests,
     text: [offer.merchant + ' · ' + offer.product, result.text, result.searchNote,
       'Веб-проверка ' + new Date(result.checkedAt).toLocaleDateString('ru-RU') + '. Запросов к Яндексу: ' + result.searchRequests + '.'].filter(Boolean).join('\n'),
-    readSources: [{ url: '#knowledge-source/' + offer.version + '/' + encodeURIComponent(offer.loc), label: offer.file + ' · ' + offer.loc },
+    readSources: [offerSource(offer),
       ...(result.url ? [{ url: result.url, label: 'Карточка продавца · ' + offer.merchant }] : [])] };
 }

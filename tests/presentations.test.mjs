@@ -7,7 +7,7 @@ import {join} from 'node:path';
 import {createTeamApp} from '../server/team-http.mjs';
 import {digest,importDocs} from '../server/evidence.mjs';
 import {listPresentations,readPresentation,requestsPresentation,startPresentation,workPresentations} from '../server/presentations.mjs';
-import {createThread,enqueue,messages,resumeJob,workJobs} from '../server/workbench.mjs';
+import {addUserMessage,bindReleaseThreadCase,createThread,dashboard,enqueue,messages,openCaseThread,openReleaseThread,resumeJob,workJobs} from '../server/workbench.mjs';
 import {assembleDeck,composeSlide} from '../server/presentation-layout.mjs';
 import {casePresentationInput} from '../server/presentation-case.mjs';
 import {exportPptx,presentationHtml} from '../server/presentation-export.mjs';
@@ -114,6 +114,42 @@ test('chat commands use the case exporter once, expose its real status and respe
   await workJobs(store,{publicUser:()=>author},local,noModel);
   assert.ok(messages(db,author,'group').items.at(-1).body.presentationId);
   assert.equal(messages(db,peer,'group').items.at(-1).body.presentationId,undefined);
+});
+
+test('an accepted release discussion remains grouped with its case and can queue a deck from Chats',async t=>{
+  const store=await fixture(t),db=store.db;
+  const decision={release:{id:'R-42'},product:'Сервис',scope:'product'};
+  const thread=openReleaseThread(store,author,decision);
+  const otherProduct=openReleaseThread(store,author,{...decision,product:'Другой сервис'});
+  const otherOwner=openReleaseThread(store,peer,decision);
+  addUserMessage(db,author,thread,{text:'История обсуждения релиза'});
+  db.prepare("UPDATE cases SET body=json_set(body,'$.release','R-42','$.owner',?) WHERE id='sample'").run(author.id);
+  bindReleaseThreadCase(db,author,'R-42','sample','Сервис');
+
+  assert.equal(openCaseThread(db,author,'sample'),thread);
+  const originIds=Object.fromEntries(dashboard(db,author).threads.map(row=>[row.id,row.caseId]));
+  assert.equal(originIds[thread],'sample');
+  assert.equal(originIds[otherProduct],null);
+  assert.equal(dashboard(db,peer).threads.find(row=>row.id===otherOwner)?.caseId,null);
+  assert.ok(!dashboard(db,peer).threads.some(row=>row.id===thread));
+  assert.equal(messages(db,author,thread).items[0].body.text,'История обсуждения релиза');
+
+  enqueue(store,author,{thread,question:'Сделай презентацию'});
+  const [version]=listPresentations(db,author,'sample');
+  assert.ok(version?.id,'the accepted release discussion queues the case presentation');
+  await workJobs(store,{publicUser:()=>author},local,()=>assert.fail('the command must use the case exporter'));
+  assert.equal(messages(db,author,thread).items.at(-1).body.presentationId,version.id);
+  assert.equal(listPresentations(db,author,'sample').length,1);
+});
+
+test('a slide cover keeps a percentage together at the configured title size',()=>{
+  const title='Доля завершённых заказов · 48 % за 2026-11-03';
+  const deck={product:'Интернет-магазин',state:'Исследуем',created:Date.now(),
+    slides:[{kind:'cover',title,keyValue:'48',keyLabel:'Доля завершённых заказов',body:'Оформление заказа',decision:'Сопоставить результат'}]};
+  const heading=composeSlide(deck,0).find(object=>object.type==='text' && object.lines[0].startsWith('Доля завершённых заказов'));
+  assert.equal(heading.size,47);
+  assert.ok(heading.lines.some(line=>/48\s%/u.test(line)),JSON.stringify(heading.lines));
+  assert.match(presentationHtml(deck,'http://localhost'),/48\s% за 2026-11-03/u);
 });
 
 test('empty and long cases preserve every check and export without a model',async t=>{
@@ -315,4 +351,23 @@ test('the presentation editor cannot send a private snapshot through ProxyAPI',a
   const result=readPresentation(db,author,version.id);
   assert.equal(result.status,'ready');
   assert.match(result.notice,/по шаблону/);
+});
+
+test('the loopback presentation editor requests a strict JSON schema',async t=>{
+  const store=await fixture(t),db=store.db;
+  const {id}=startPresentation(store,author,'sample','strict-editor-schema');
+  const requests=[];
+  await workPresentations(store,local,async (url,{body})=>{
+    requests.push({url:String(url),body:JSON.parse(body)});
+    return Response.json({choices:[{message:{content:'{"slides":[0]}'}}]});
+  });
+  assert.equal(requests.length,1);
+  assert.equal(requests[0].url,'http://127.0.0.1:8080/v1/chat/completions');
+  const format=requests[0].body.response_format;
+  assert.equal(format?.type,'json_schema');
+  assert.equal(format.json_schema.name,'presentation');
+  assert.equal(format.json_schema.strict,true);
+  assert.deepEqual(format.json_schema.schema.required,['slides']);
+  assert.equal(format.json_schema.schema.additionalProperties,false);
+  assert.equal(readPresentation(db,author,id).status,'ready');
 });

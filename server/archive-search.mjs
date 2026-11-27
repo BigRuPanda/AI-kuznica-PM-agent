@@ -39,6 +39,7 @@ function archiveIndex(db) {
     for(const f of JSON.parse(saved.body).facts) {
       if(!locs.has(f.loc) || f.kind==='reference') continue;
       const item={kind:f.kind, data:f.row, refs:[ref(version,saved.file,f.loc)]};
+      if(f.kind==='competitor') item.offerDate=f.comparison?.checked || f.prices?.['Дата проверки'] || f.row?.date;
       if(f.kind==='metrics') {item.data=normalizeObservation(f.row,saved.file);metrics.push(item);continue;}
       if(f.kind==='sales') {sales.push(item);continue;}
       if(f.kind==='interview' && f.detail) {
@@ -120,7 +121,7 @@ function excerpt(r, words) {
   return {text:retained.map(f=>f.field.slice(0,130)+' — '+passage(f.answer,words,size)).join('\n'),refs:retained.map(f=>f.ref)};
 }
 
-function archiveScope(db, {product,from,through,full,snapshot}) {
+function archiveScope(db, {product,from,through,full,snapshot,fixedPeriod,competitorVersions}) {
   const idx=archiveIndex(db);
   const corrections=product?db.prepare('SELECT source,comment FROM feedback WHERE product=? ORDER BY id').all(product):[];
   const excluded=new Map(corrections.map(row=>[row.source,row.comment.startsWith('[Исключить связь]')]));
@@ -132,8 +133,10 @@ function archiveScope(db, {product,from,through,full,snapshot}) {
   const metricVersions = snapshot?.metricVersions && new Set(snapshot.metricVersions);
   const versions = {releases:releaseVersions,
     backlog:snapshot?.backlogVersions && new Set(snapshot.backlogVersions),
-    dictionary:snapshot?.dictionaryVersions && new Set(snapshot.dictionaryVersions)};
+    dictionary:snapshot?.dictionaryVersions && new Set(snapshot.dictionaryVersions),
+    competitor:competitorVersions && new Set(competitorVersions)};
   const records=idx.records.filter(r=>visible(r) && inPeriod(r.data?.release_date || r.data?.created_date || r.data?.date) &&
+    (!fixedPeriod || r.kind!=='competitor' || /^\d{4}-\d{2}-\d{2}$/u.test(r.offerDate) && inPeriod(r.offerDate)) &&
     (!versions[r.kind] || versions[r.kind].has(r.refs[0].version)));
   const indexedReleases = new Set(records.filter(r=>r.kind==='releases').map(r=>r.refs[0].version+'/'+r.refs[0].loc));
   const decision = snapshot?.decision?.release;

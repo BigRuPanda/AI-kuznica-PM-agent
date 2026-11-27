@@ -53,6 +53,29 @@ test('profile photo, renamed case chat and ordinary chart attachments work toget
   assert.ok(savedPhoto);
 
   const { id: caseThread } = await api('case-thread', { caseId });
+  for (const menu of ['left', 'top']) {
+    await page.evaluate(menu => localStorage.setItem('pm-menu-layout', menu), menu);
+    await page.reload();
+    for (const width of [390, 900, 1440]) {
+      await page.setViewportSize({ width, height: 900 });
+      await page.goto(origin + '/#case/' + caseId);
+      await page.locator('.team-app[data-menu="' + menu + '"]').waitFor();
+      const discussion = page.locator('.case-discussion');
+      if (width <= 820) await button(page, 'Обсудить').click();
+      const send = button(discussion, 'Отправить');
+      await send.waitFor();
+      const geometry = await send.evaluate(control => {
+        const button = control.getBoundingClientRect();
+        const panel = control.closest('.chat-box');
+        const box = panel.getBoundingClientRect();
+        const row = control.closest('.composer-row').getBoundingClientRect();
+        return { left: button.left, right: button.right, panelLeft: box.left, panelRight: box.right,
+          rowRight: row.right, scrollWidth: panel.scrollWidth, clientWidth: panel.clientWidth };
+      });
+      assert.ok(geometry.left >= geometry.panelLeft && geometry.right <= geometry.panelRight &&
+        geometry.scrollWidth <= geometry.clientWidth + 1, `${menu} at ${width}px ${JSON.stringify(geometry)}`);
+    }
+  }
   const title = 'Переименованная переписка о результатах';
   await api('rename-thread', { thread: caseThread, title });
   const { threads } = await api('overview');

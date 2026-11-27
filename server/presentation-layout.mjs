@@ -8,7 +8,7 @@ export function wrap(text,size,available) {
   const out=[];
   for(const paragraph of String(text ?? '').split(/\r?\n/u)) {
     let line='';
-    for(const word of paragraph.trim().split(/\s+/u)) {
+    for(const word of paragraph.trim().split(/[^\S\u00a0\u202f]+/u)) {
       if(width(line+(line?' ':'')+word,size)<=available) {line+=(line?' ':'')+word;continue;}
       if(line) {out.push(line);line='';}
       for(const c of word) {if(line && width(line+c,size)>available) {out.push(line);line='';} line+=c;}
@@ -113,7 +113,7 @@ export function composeSlide(deck, index) {
   rect(64,84,1152,1,rule);
   if(s.kind==='cover') {
     text(deck.state+'   /   '+new Date(deck.created).toLocaleDateString('ru-RU',{timeZone:'Europe/Moscow'}),64,117,1130,19,{color:accent,bold:true});
-    text(s.title,64,167,s.keyValue?820:1128,47,{bold:true,limit:4});
+    text(s.title.replace(/(\d)[ \u00a0\u202f]+%/gu,'$1\u00a0%'),64,167,s.keyValue?820:1128,47,{bold:true,limit:4});
     if(s.keyValue) {
       rect(946,176,4,159,accent);
       const size=Math.min(58,Math.max(25,Math.floor(240/width(s.keyValue,1))));

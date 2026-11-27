@@ -9,13 +9,17 @@ function mentions(text, product) {
   return (' ' + words.join(' ') + ' ').includes(' ' + product.toLowerCase() + ' ') || words.includes(needle);
 }
 
-export function marketOffers(db, product, asOf) {
-  // A document contains structured columns in addition to the searchable text. Read only active versions.
-  const docs = db.prepare(`SELECT file, version, body FROM documents WHERE version IN
-    (SELECT DISTINCT version FROM facts WHERE kind='competitor')`).all();
-  const active = new Set(db.prepare("SELECT version,loc FROM facts WHERE kind='competitor'").all().map(r=>JSON.stringify([r.version,r.loc])));
+export function marketOffers(db, product, asOf, { from, versions } = {}) {
+  // A saved decision can refer to a workbook version that has since been replaced.
+  const docs = versions
+    ? db.prepare('SELECT file,version,body FROM documents WHERE version IN (SELECT value FROM json_each(?))').all(JSON.stringify(versions))
+    : db.prepare(`SELECT file,version,body FROM documents WHERE version IN
+      (SELECT DISTINCT version FROM facts WHERE kind='competitor')`).all();
+  const active = !versions && new Set(db.prepare("SELECT version,loc FROM facts WHERE kind='competitor'").all().map(r=>JSON.stringify([r.version,r.loc])));
   const offers = docs.flatMap(doc => JSON.parse(doc.body).facts
-    .filter(f => active.has(JSON.stringify([doc.version,f.loc])) && f.comparison && (!product || mentions(f.comparison.product, product)) && f.comparison.checked <= asOf)
+    .filter(f => f.kind === 'competitor' && (!active || active.has(JSON.stringify([doc.version,f.loc]))) &&
+      f.comparison && (!product || mentions(f.comparison.product, product)) &&
+      /^\d{4}-\d{2}-\d{2}$/u.test(f.comparison.checked) && f.comparison.checked <= asOf && (!from || f.comparison.checked >= from))
     .map(f => {
       const url = [...(f.links || []).map(link => link.url), ...(f.text || '').split(' · ')].map(value => sellerUrl(value, f.comparison.merchant)).find(Boolean) || null;
       return { ...f.comparison, url, ...citation({ ...doc, loc: f.loc }) };

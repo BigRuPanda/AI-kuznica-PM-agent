@@ -727,11 +727,12 @@ export async function runAssistant(
               const versions = {
                 releases:releaseSnapshot.releaseVersions, metrics:releaseSnapshot.metricVersions, sales:releaseSnapshot.salesVersions,
                 backlog:releaseSnapshot.backlogVersions, dictionary:releaseSnapshot.dictionaryVersions,
+                competitor:releaseSnapshot.competitorVersions,
               };
               r = r.filter(row=>{
                 const kind = op==='search' ? row.kind : ['orders_index','family_orders_idx'].includes(row.metric) ? 'sales' : 'metrics';
                 if (versions[kind] && !versions[kind].includes(row.version)) return false;
-                const date = row.date || row.data?.date || row.data?.week_start || row.data?.release_date || row.data?.created_date;
+                const date = row.date || row.metadata?.date || row.data?.date || row.data?.week_start || row.data?.release_date || row.data?.created_date;
                 const step = kind==='sales' ? 7 : row.stepDays || row.data?.step_days || 1;
                 return !date || observationWithin({date,step_days:step},scope.from,scope.through);
               });

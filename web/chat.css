@@ -366,6 +366,7 @@
 
 .chat-composer {
   width: min(100%, 860px);
+  grid-template-columns: minmax(0, 1fr);
   margin: 0 auto;
   padding: 11px clamp(10px, 3vw, 22px) 12px;
   gap: 5px;

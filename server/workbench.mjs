@@ -135,7 +135,9 @@ export function caseThreadId(userId, caseId) {
 
 export function dashboard(db, user) {
   const visibleCases = cases(db).filter(c => !c.body.owner || c.body.owner === user.id);
-  const caseByThread = new Map(visibleCases.map(c => [caseThreadId(user.id, c.id), c.id]));
+  const discussionIndex = caseDiscussionIndex(visibleCases, user);
+  const releases = new Map(db.prepare(`SELECT r.* FROM release_threads r JOIN conversations c ON c.id=r.thread
+    WHERE c.owner=? AND c.scope='private'`).all(user.id).map(row=>[row.thread,row]));
   const products = [...new Set(listSales(db).map((r) => r.product))];
   return {
     user,
@@ -145,7 +147,7 @@ export function dashboard(db, user) {
       .all(user.id)
       .map(chat => ({
         ...chat,
-        caseId: caseByThread.get(chat.id) ?? null,
+        caseId: caseForThread(db, user, chat, releases.get(chat.id), discussionIndex)?.id ?? null,
         canRename: canRenameThread(user, chat),
         canDelete: canDeleteThread(user, chat),
       })),
@@ -173,16 +175,37 @@ function releaseThreadProduct(db, row) {
   const product = row.product || legacyReleaseProduct(db, row.release_id);
   return product && !hasOtherReleaseContext(db, row.thread, row.release_id, product) ? product : null;
 }
+const caseRelease = c => c.body.release || c.body.signal?.releaseId;
+const isolatedDiscussionId = (user,c) => digest(JSON.stringify(['case-thread', user.id, c.id]));
+
+function canonicalCaseDiscussion(db, user, c) {
+  const id = caseThreadId(user.id, c.id), releaseId = caseRelease(c);
+  return releaseId && hasOtherReleaseContext(db, id, releaseId, c.product)
+    ? isolatedDiscussionId(user, c) : id;
+}
+
+function caseDiscussionIndex(visibleCases, user) {
+  const byCase = new Map(visibleCases.map(c=>[c.id,c]));
+  const byThread = new Map(visibleCases.flatMap(c=>[[caseThreadId(user.id,c.id),c],[isolatedDiscussionId(user,c),c]]));
+  return {byCase,byThread};
+}
+
+function caseForThread(db, user, chat, release, index) {
+  if (chat?.scope !== 'private' || chat.owner !== user.id) return;
+  const {byCase,byThread} = index || caseDiscussionIndex(cases(db).filter(c=>!c.body.owner || c.body.owner===user.id),user);
+  const c = release?.case_id ? byCase.get(release.case_id) : byThread.get(chat.id);
+  if (!c || release && (caseRelease(c) !== release.release_id || c.product !== releaseThreadProduct(db, release))) return;
+  if (release?.case_id || canonicalCaseDiscussion(db, user, c) === chat.id) return c;
+}
+
 export function openCaseThread(db, user, caseId) {
   const c = visibleCase(db, user, caseId);
-  const releaseId = c.body.release;
+  const releaseId = caseRelease(c);
   const linked = releaseId && db.prepare(`SELECT r.* FROM release_threads r JOIN conversations c ON c.id=r.thread
     WHERE r.case_id=? AND r.release_id=? AND c.owner=? AND c.scope='private'`).all(c.id, releaseId, user.id)
     .find(row => releaseThreadProduct(db, row) === c.product);
   if (linked) return linked.thread;
-  const original = caseThreadId(user.id, c.id);
-  const id = releaseId && hasOtherReleaseContext(db, original, releaseId, c.product)
-    ? digest(JSON.stringify(['case-thread', user.id, c.id])) : original;
+  const id = canonicalCaseDiscussion(db, user, c);
   db.prepare("INSERT OR IGNORE INTO conversations VALUES(?,?,'private',?)").run(id, user.id, c.title);
   return id;
 }
@@ -193,7 +216,7 @@ export function openReleaseThread(store, user, decision) {
   const product = decision.product;
   const legacy = legacyReleaseThreadId(user, releaseId);
   const linkedCase = decision.caseId && decision.scope !== 'account' && visibleCase(db, user, decision.caseId);
-  const caseId = linkedCase?.body?.release === releaseId && linkedCase.product === product ? linkedCase.id : null;
+  const caseId = linkedCase && caseRelease(linkedCase) === releaseId && linkedCase.product === product ? linkedCase.id : null;
   return store.tx(() => {
     const candidates = db.prepare(`SELECT c.id AS thread, r.release_id, r.product, r.case_id
       FROM conversations c LEFT JOIN release_threads r ON r.thread=c.id
@@ -220,7 +243,7 @@ function freezeReleaseDecision(db, decision) {
   const versions = kind => db.prepare('SELECT DISTINCT version FROM facts WHERE kind=? ORDER BY version').all(kind).map(row => row.version);
   return { releaseId: decision.release.id, through: decision.asOf, product: decision.product, decision,
     metricVersions: versions('metrics'), releaseVersions: versions('releases'), salesVersions: versions('sales'),
-    dictionaryVersions: versions('dictionary'), backlogVersions: versions('backlog') };
+    dictionaryVersions: versions('dictionary'), backlogVersions: versions('backlog'), competitorVersions: versions('competitor') };
 }
 export function saveReleaseDecisionContext(db, user, decision) {
   if (!decision.release) return undefined;
@@ -296,11 +319,10 @@ function presentationCase(db, user, body, scope) {
     ? body.typedQuestion : body.question;
   if (!requestsPresentation(typed)) return undefined;
   if (body.caseId) return body.caseId;
-  if (scope !== 'group') {
-    const cases = db.prepare("SELECT id FROM cases WHERE COALESCE(json_extract(body,'$.owner'),'') IN ('',?)").all(user.id);
-    return cases.find(c => caseThreadId(user.id, c.id) === body.thread)?.id || null;
-  }
-  return null;
+  if (scope === 'group') return null;
+  const chat = db.prepare('SELECT * FROM conversations WHERE id=?').get(body.thread);
+  const release = db.prepare('SELECT * FROM release_threads WHERE thread=?').get(body.thread);
+  return caseForThread(db, user, chat, release)?.id ?? null;
 }
 
 function presentationRecovery(db, user, job, reply, scope) {
@@ -327,7 +349,7 @@ export function enqueue(store, user, b, { telegramReply } = {}) {
     if (store.db.prepare('SELECT id FROM jobs WHERE id=?').get(id)) return id;
     const { decisionContext, decisionReleaseId: _release, decisionThrough: _through, releaseDecisionSnapshot: _snapshot, ...input } = b;
     b = input;
-    let release = store.db.prepare('SELECT * FROM release_threads WHERE thread=?').get(t.id);
+    let release = t.scope === 'private' && store.db.prepare('SELECT * FROM release_threads WHERE thread=?').get(t.id);
     if (!release && t.scope === 'private' && /^[a-f0-9]{64}$/.test(t.id)) {
       const legacy = facts(store.db, 'releases').find(row => legacyReleaseThreadId(user, row.data.release_id) === t.id);
       if (legacy) release = { thread: t.id, release_id: legacy.data.release_id };
@@ -338,7 +360,7 @@ export function enqueue(store, user, b, { telegramReply } = {}) {
       ON CONFLICT(thread) DO UPDATE SET product=excluded.product`).run(t.id, releaseId, product);
     if (releaseId && b.caseId) {
       const c = visibleCase(store.db, user, b.caseId);
-      if (c.product !== product || (c.body.release || c.body.signal?.releaseId) !== releaseId ||
+      if (c.product !== product || caseRelease(c) !== releaseId ||
           (release.case_id && c.id !== release.case_id)) throw Error('Разбор относится к другой переписке.');
     }
     if (decisionContext) {
@@ -350,7 +372,7 @@ export function enqueue(store, user, b, { telegramReply } = {}) {
       b = { ...b, caseId: snapshotCase || undefined, decisionReleaseId: releaseId,
         decisionThrough: snapshot.through, product, releaseDecisionSnapshot: snapshot };
     } else if (releaseId) {
-      b = { ...b, decisionReleaseId: releaseId, product };
+      b = { ...b, caseId: b.caseId || caseForThread(store.db, user, t, release)?.id, decisionReleaseId: releaseId, product };
     }
     if (b.caseId && t.scope === 'group' && getCase(store.db, b.caseId).body.owner)
       throw Error('Сначала опубликуйте личный разбор');
@@ -698,29 +720,12 @@ export async function answer(store, user, b, env = process.env, send = fetch, jo
   }
   const range=b.rangeId && (access(db,user,b.rangeId,shared),readRange(db,user,b.rangeId));
   const attachments=(b.materialIds || []).map(id=>readMaterial(db,user,id,shared));
-  const comparisonContext=[
-    ...(range?[{label:'Выделенный период',url:'#range/'+range.id,text:rangeComparisonText(range)}]:[]),
-    ...attachments.map(m=>({label:m.title,url:'#material/'+m.id,text:(m.summary||m.title).slice(0,1400)})),
-  ];
-  const external=await externalAnswer(store,user,{...b,comparisonContext},env,send,job,shared,pageOptions);
-  if(external) {
-    const readSources=[...(external.readSources||[]),...comparisonContext.map(({label,url})=>({label,url}))];
-    return {...external,readSources,text:[external.text,...comparisonContext.map(r=>r.label+' · '+r.text)].join('\n\n'),
-      ...(range && {rangeId:range.id}),...(activeCase && {caseId:activeCase.id})};
-  }
   let focus;
   if (!b.rangeId && b.materialIds?.length === 1) {
     if (readMaterial(db, user, b.materialIds[0], shared).plot) focus = { id: b.materialIds[0] };
   } else if (!b.decisionThrough && !b.rangeId && !screenRequest(b.question) && !newTopic(b.question)) {
     focus = resolveChartFocus(db, user, b, shared);
   }
-  if (focus?.choices)
-    return {
-      mode: 'clarification',
-      chartChoices: focus.choices.map((c) => c.id),
-      text:
-        'Какой график вы имеете в виду?\n' + focus.choices.map((c, i) => i + 1 + '. ' + c.label).join('\n'),
-    };
   if (focus?.id) b = { ...b, materialIds: [focus.id], screen: undefined };
   const selected = focus ? undefined : screen;
   const decisionSnapshot = b.decisionReleaseId && b.releaseDecisionSnapshot?.releaseId === b.decisionReleaseId
@@ -739,12 +744,36 @@ export async function answer(store, user, b, env = process.env, send = fetch, jo
   const previous = last && (!b.caseId || last.caseId===b.caseId) && (!b.decisionReleaseId || last.decisionReleaseId===b.decisionReleaseId)
     ? last : undefined;
   const archiveScope = { product:activeCase?.product || selected?.product || decisionSnapshot?.product || b.product,
-    from,through,full:selected?.full,snapshot:selected || decisionSnapshot };
+    from,through,full:selected?.full,snapshot:selected || decisionSnapshot,fixedPeriod,
+    competitorVersions:decisionSnapshot?.competitorVersions };
   if (fixedPeriod) {
+    if (from && through && from > through)
+      return {mode:'archive',outcome:'clarification',readSources:[],
+        text:'Запрошенные даты не пересекаются с выбранным периодом. Выберите даты в пределах этого экрана.'};
     for (const ref of [range,...attachments].filter(Boolean)) checkReleaseReferencePeriod(ref,fixedPeriod);
     const screenFits = selected && selected.cut===through && (!from || (selected.requested?.from || selected.base)===from);
     b = {...b,analysisPeriod:fixedPeriod,screen:screenFits ? b.screen : undefined};
   }
+  const comparisonContext=fixedPeriod ? [] : [
+    ...(range?[{label:'Выделенный период',url:'#range/'+range.id,text:rangeComparisonText(range)}]:[]),
+    ...attachments.map(m=>({label:m.title,url:'#material/'+m.id,text:(m.summary||m.title).slice(0,1400)})),
+  ];
+  const external=await externalAnswer(store,user,{...b,comparisonContext},env,send,job,shared,pageOptions,
+    fixedPeriod && {...fixedPeriod,product:archiveScope.product,versions:decisionSnapshot?.competitorVersions});
+  if(external) {
+    if (fixedPeriod) return external.mode==='web' ? external : {...external,...decisionContext,
+      ...(activeCase && {caseId:activeCase.id})};
+    const readSources=[...(external.readSources||[]),...comparisonContext.map(({label,url})=>({label,url}))];
+    return {...external,readSources,text:[external.text,...comparisonContext.map(r=>r.label+' · '+r.text)].join('\n\n'),
+      ...(range && {rangeId:range.id}),...(activeCase && {caseId:activeCase.id})};
+  }
+  if (focus?.choices)
+    return {
+      mode: 'clarification',
+      chartChoices: focus.choices.map((c) => c.id),
+      text:
+        'Какой график вы имеете в виду?\n' + focus.choices.map((c, i) => i + 1 + '. ' + c.label).join('\n'),
+    };
   const sourceQuestion = !focus && !b.rangeId && !b.materialIds?.length && !last?.rangeId;
   if (sourceQuestion) {
     if (from && through && from > through)
