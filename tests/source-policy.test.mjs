@@ -94,6 +94,23 @@ test('reindexing an original archive preserves superseding revisions, old links,
   assert.equal(importApproved(store,[current],refresh,false).inserted,0);
 });
 
+test('a long research digest cannot displace a focused record with the same matching words', t => {
+  const store = openStore(':memory:', {seedDemo:false});
+  t.after(() => store.close());
+  initEvidence(store.db);
+  initSourcePolicy(store.db);
+  const subject = 'маяк калибровка';
+  const unrelated = Array.from({length:150}, (_,i) => 'sensor'+i).join(' ');
+  const doc = {file:'Workshop.xlsx',facts:[
+    {kind:'interview',loc:'Notes!C3',text:'Survey',detail:{field:'Обзор',answer:subject+' '+unrelated}},
+    {kind:'dictionary',loc:'Units!A2',row:{metric_id:'lab',metric_name:'Сигнал',formula_or_logic:subject}},
+  ]};
+  importApproved(store,[doc],sourcePermission(store.db,sha,archive,'archive.zip'),false);
+  const rows=archiveEvidence(store.db,'Что известно про маяк и калибровку?');
+  assert.equal(rows[0].refs[0].loc,'Units!A2');
+  assert.ok(rows.every(row => !row.text.includes('sensor')));
+});
+
 test('archive answers fall back to the retrieved source on timeout or an invented number', async t => {
   const store = fixture(t);
   initWorkbench(store.db);

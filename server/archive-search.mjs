@@ -54,12 +54,15 @@ function archiveIndex(db) {
       records.push(group);
     }
   }
+  let totalTerms=0;
   for(const r of records) {
     r.words=new Set(stems(r.text));
+    totalTerms+=r.words.size;
     r.titleWords=new Set(stems(r.data?.metric_name || r.data?.title || r.prices?.Продукт || ''));
     for(const w of r.words) freq.set(w,1+(freq.get(w)||0));
   }
-  const result={stamp,records,metrics,sales,freq};
+  const averageTerms=totalTerms/records.length || 1;
+  const result={stamp,records,metrics,sales,freq,averageTerms};
   indexes.set(db,result);return result;
 }
 
@@ -71,7 +74,9 @@ function ranked(rows, words, idx) {
       const hit = r.words.has(w) ? w : (r.words.has(latin) ? latin : null);
       if(hit) score+=Math.log(1+idx.records.length/(1+(idx.freq.get(hit)||0))) * (r.titleWords.has(hit)?1.55:1);
     }
-    return {r,score};
+    // BM25 length normalization, with one occurrence per distinct term.
+    const lengthRatio=r.words.size/idx.averageTerms;
+    return {r,score:score*2.2/(1+1.2*(0.25+0.75*lengthRatio))};
   }).filter(h=>h.score>0).sort((a,b)=>b.score-a.score);
 }
 
