@@ -456,7 +456,7 @@ export function createTeamApp({
                 caseId = workspaceOperation(store, user, 'create-case', {
                   title: m.title,
                   product: m.product || b.product,
-                }).id;
+                }, env, send).id;
                 db.prepare('INSERT INTO material_case_requests VALUES(?,?,?)').run(
                   user.id,
                   b.createRequest,

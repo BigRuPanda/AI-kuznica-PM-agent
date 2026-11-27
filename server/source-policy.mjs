@@ -134,6 +134,22 @@ function validateRevision(db, doc, approval) {
   saveRevision(db, doc, approval);
 }
 
+function retainedLegacyReferences(db, docs, sha) {
+  const references = docs.filter(doc => doc.role === 'reference' && !doc.facts.length);
+  const basenames = new Map();
+  for (const {file} of references) {
+    const name = file.split('/').at(-1).normalize('NFC').toLowerCase();
+    basenames.set(name, (basenames.get(name) ?? 0) + 1);
+  }
+  const archived = db.prepare(`SELECT 1 FROM source_revisions r JOIN documents d ON d.version=r.version
+    WHERE r.file=? AND r.sha=? AND json_extract(d.body,'$.role')='reference' AND json_array_length(d.body,'$.facts')=0`);
+  // Older indexes recorded only the basename. Reuse that ID when the same ZIP identifies one entry.
+  return new Set(references.filter(({file}) => {
+    const name = file.split('/').at(-1);
+    return file !== name && basenames.get(name.normalize('NFC').toLowerCase()) === 1 && archived.get(name, sha);
+  }).map(doc => doc.file));
+}
+
 export function importApproved(store, docs, permission, notify) {
   if (!permission) return importDocs(store, docs, { notify });
   if (permission.alreadyImported)
@@ -144,10 +160,12 @@ export function importApproved(store, docs, permission, notify) {
     const candidates = [];
     return importDocs(store, candidates, { notify: false, guard: db => {
       if (db.prepare('SELECT format FROM archive_indexes WHERE sha=?').get(permission.sha)?.format === format) return false;
+      const retained = permission.archive ? retainedLegacyReferences(db, docs, permission.sha) : new Set();
       for (const doc of docs) {
         const prior = db.prepare('SELECT * FROM source_revisions WHERE file=? ORDER BY rowid DESC LIMIT 1').get(doc.file);
         if (!prior && permission.archive && doc.role === 'reference' && !doc.facts.length &&
             !db.prepare('SELECT 1 FROM documents WHERE file=?').get(doc.file)) {
+          if (retained.has(doc.file)) continue;
           saveRevision(db, doc, {sha: permission.sha, origin: archiveOrigin});
           candidates.push(doc);
           continue;

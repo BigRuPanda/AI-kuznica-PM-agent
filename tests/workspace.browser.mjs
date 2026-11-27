@@ -13,7 +13,7 @@ import { digest, facts, importDocs } from '../server/evidence.mjs';
 import { saveMetricRule } from '../server/metric-rules.mjs';
 import { workJobs } from '../server/workbench.mjs';
 import { workspaceOperation } from '../server/workspace-operations.mjs';
-import { readMaterial } from '../server/materials.mjs';
+import { readMaterial, saveMaterial } from '../server/materials.mjs';
 import { seedWorkspace, fixtureEnv } from './workspace-fixture.mjs';
 
 const role = (p, name) => p.getByRole('button', { name, exact: true });
@@ -119,6 +119,22 @@ test('archive settings diagnose Reports API and sources show the protected ZIP i
   assert.match((await invalid.json()).error, /семейство/);
 
   const {db} = app.space('team');
+  const legacy = saveMaterial(db, 'group', {kind:'report', title:'Прежний материал', product:'Отсутствующая семья'});
+  const casesBefore = db.prepare('SELECT count(*) AS n FROM cases').get().n;
+  const deniedPin = await api(admin, 'pin-material', {id:legacy.id, createRequest:'archive-invalid', product:'Контрольная семья'});
+  assert.equal(deniedPin.status(), 400);
+  assert.match((await deniedPin.json()).error, /семейство/);
+  assert.equal(db.prepare('SELECT count(*) AS n FROM cases').get().n, casesBefore);
+  assert.equal(db.prepare('SELECT count(*) AS n FROM material_case_requests').get().n, 0);
+  const supported = saveMaterial(db, 'group', {kind:'report', title:'Архивный материал', product:'Контрольная семья'});
+  const pin = () => api(admin, 'pin-material', {id:supported.id, createRequest:'archive-valid'});
+  const accepted = await pin();
+  assert.equal(accepted.status(), 200);
+  const pinned = await accepted.json();
+  assert.equal(pinned.pinned, true);
+  assert.deepEqual(await (await pin()).json(), pinned);
+  assert.equal(db.prepare('SELECT count(*) AS n FROM cases').get().n, casesBefore + 1);
+
   const totals = () => [
     db.prepare('SELECT count(*) AS n FROM documents').get().n,
     db.prepare("SELECT count(*) AS n FROM facts WHERE kind='metrics'").get().n,

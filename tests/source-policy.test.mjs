@@ -12,10 +12,9 @@ const sha = digest(archive);
 const first = 'finance.xlsx';
 const second = 'metrics.xlsx';
 test('an already indexed ZIP can add reference inventory without replacing an indexed book', t => {
-  const store = fixture(t);
   const book = report('Data/metrics.xlsx', ['reach']);
   const reference = { file: 'Reference/Instructions.pdf', facts: [], role: 'reference' };
-  importApproved(store, [book], { archive: true, sha, alreadyImported: false }, false);
+  const store = fixture(t, [book]);
   const before = protectedSources(store.db).find(row => row.file === book.file);
   store.db.prepare('UPDATE archive_indexes SET format=3 WHERE sha=?').run(sha);
   const permission = sourcePermission(store.db, sha, archive, 'original.zip');
@@ -32,17 +31,44 @@ test('an already indexed ZIP can add reference inventory without replacing an in
   assert.equal(version.active, true);
   assert.equal(sourcePermission(store.db, sha, archive, 'original.zip').alreadyImported, true);
 });
+
+test('reimporting a donor ZIP preserves the original ID of an unambiguous flattened reference', t => {
+  const old = {file:'guide.pdf', facts:[], role:'reference'};
+  const store = fixture(t, [old]);
+  const [original] = sourceHistory(store.db, old.file);
+  store.db.prepare('UPDATE archive_indexes SET format=2 WHERE sha=?').run(sha);
+  const permission = sourcePermission(store.db, sha, archive, 'original.zip');
+  const nested = {...old, file:'reference/guide.pdf'};
+  assert.equal(importApproved(store, [nested], permission, false).inserted, 0);
+  assert.deepEqual(protectedSources(store.db).filter(row => row.role === 'reference').map(row => [row.file, row.version]),
+    [[old.file, original.version]]);
+  assert.deepEqual(sourceHistory(store.db, old.file), [original]);
+  assert.equal(sourcePermission(store.db, sha, archive, 'original.zip').alreadyImported, true);
+});
+
+test('an ambiguous flattened reference does not claim either archive path with the same basename', t => {
+  const old = {file:'guide.pdf', facts:[], role:'reference'};
+  const store = fixture(t, [old]);
+  const [original] = sourceHistory(store.db, old.file);
+  store.db.prepare('UPDATE archive_indexes SET format=2 WHERE sha=?').run(sha);
+  const docs = [{...old, file:'a/guide.pdf'}, {...old, file:'b/guide.pdf'}];
+  assert.equal(importApproved(store, docs, sourcePermission(store.db, sha, archive, 'original.zip'), false).inserted, 2);
+  const inventory = protectedSources(store.db).filter(row => row.role === 'reference');
+  assert.deepEqual(inventory.map(row => row.file), ['a/guide.pdf', 'b/guide.pdf', 'guide.pdf']);
+  assert.equal(inventory.find(row => row.file === old.file).version, original.version);
+  assert.equal(new Set(inventory.map(row => row.version)).size, 3);
+});
 const report = (file, keys) => ({ file, facts: keys.map((metric_id, i) => ({
   kind: 'metrics', loc: 'Метрики!A' + (i + 2), row: { metric_id, date:'2026-06-01', product:'Astra', segment:'all', value:i },
 })) });
 
-function fixture(t) {
+function fixture(t, docs = [report(first, ['visits']), report(second, ['cart'])]) {
   const store = openStore(':memory:', { seedDemo: false });
   initEvidence(store.db);
   initSourcePolicy(store.db);
   t.after(() => store.close());
   const permission = sourcePermission(store.db, sha, archive, 'original.zip');
-  importApproved(store, [report(first, ['visits']), report(second, ['cart'])], permission, false);
+  importApproved(store, docs, permission, false);
   return store;
 }
 
