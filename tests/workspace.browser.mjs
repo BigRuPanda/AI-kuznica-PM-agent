@@ -453,6 +453,46 @@ test('Softline workspace, upgrade and browser journeys', async t => {
     await visible(proof.getByText('Только полные недели.',{exact:false}));
   });
 
+  await journey('chat groups keep team conversations personal and case discussions searchable', async () => {
+    async function api(page, operation, data) {
+      const response = await page.request.post(base+'/api/team/'+operation, {data});
+      assert.ok(response.ok());
+      return response.json();
+    }
+    const {id:caseThread} = await api(admin,'case-thread',{caseId:fixture.caseId});
+    const {id:privateThread} = await api(admin,'thread',{title:'Приёмка переписок · вопрос'});
+    await api(admin,'rename-thread',{thread:caseThread,title:'Приёмка переписок · обсуждение'});
+    await go(admin,'chats/'+caseThread);
+    const nav = admin.getByRole('navigation',{name:'Переписки'});
+    const group = name => nav.getByRole('region',{name,exact:true});
+    const link = (area,id) => area.locator('a[href="#chats/'+id+'"]');
+    const search = field(admin,'Поиск чатов');
+    await visible(link(group('Разборы'),caseThread));
+    assert.deepEqual(await nav.getByRole('heading').allTextContents(),['Личные','Разборы']);
+    await visible(link(group('Личные'),'group'));
+    await visible(link(group('Личные'),privateThread));
+    assert.equal(await link(nav,caseThread).count(),1);
+    assert.equal(await link(nav,caseThread).getAttribute('aria-current'),'page');
+    await search.fill('ПРИЁМКА ПЕРЕПИСОК');
+    assert.equal(await nav.getByRole('link').count(),2);
+    await search.fill('Приёмка переписок · вопрос');
+    assert.equal(await group('Разборы').count(),0);
+    await search.fill('zzz-no-match');
+    await visible(nav.getByText('Чаты не найдены'));
+    await search.fill('');
+    assert.equal(await link(nav,caseThread).getAttribute('aria-current'),'page');
+
+    const {id:memberThread} = await api(member,'case-thread',{caseId:fixture.caseId});
+    await go(member,'chats/group');
+    const toggle = role(member,'Список чатов');
+    await toggle.click();
+    const mobileNav = member.getByRole('navigation',{name:'Переписки'});
+    await visible(link(mobileNav.getByRole('region',{name:'Личные'}),'group'));
+    await link(mobileNav.getByRole('region',{name:'Разборы'}),memberThread).click();
+    await member.waitForURL('**/#chats/'+memberThread);
+    assert.equal(await toggle.getAttribute('aria-expanded'),'false');
+  });
+
   await journey('A/B, resumable research, pin, delete, reopen and explicitly share', async () => {
     await go(admin,'snapshot/'+fixture.calc+'/trend');
     const plot = admin.locator('.range-plot svg').first();

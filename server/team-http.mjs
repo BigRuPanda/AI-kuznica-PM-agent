@@ -24,6 +24,7 @@ import {
   initWorkbench,
   dashboard,
   visibleCase,
+  caseThreadId,
   createThread,
   renameThread,
   deleteThread,
@@ -374,7 +375,7 @@ export function createTeamApp({
         }
         if (op === 'case-thread') {
           const c = visibleCase(db, user, b.caseId),
-            id = digest(user.id + '/' + c.id);
+            id = caseThreadId(user.id, c.id);
           db.prepare("INSERT OR IGNORE INTO conversations VALUES(?,?,'private',?)").run(id, user.id, c.title);
           return reply(200, { id });
         }
