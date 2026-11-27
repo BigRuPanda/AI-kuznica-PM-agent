@@ -8,11 +8,10 @@
   const slot = name => root.querySelector('[data-slot="'+name+'"]');
   const find = selector => root.querySelector(selector);
   const themeButton = find('[data-theme-toggle]');
-  const systemTheme = matchMedia('(prefers-color-scheme: dark)');
   let preference;
   try { preference = localStorage.getItem('pm-theme'); } catch {}
   function applyTheme() {
-    const dark = preference ? preference === 'dark' : systemTheme.matches;
+    const dark = preference === 'dark';
     document.documentElement.dataset.theme = dark ? 'dark' : 'light';
     themeButton.setAttribute('aria-pressed', String(dark));
   }
@@ -21,7 +20,6 @@
     try { localStorage.setItem('pm-theme', preference); } catch {}
     applyTheme();
   };
-  systemTheme.addEventListener('change', applyTheme);
   applyTheme();
   const layout = find('.layout');
   let saved = {};

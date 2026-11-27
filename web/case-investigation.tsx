@@ -165,13 +165,14 @@ function ThresholdObservation({ observation, calcId }: { observation: NonNullabl
   </div>;
 }
 
-function RunSummary({ run,refresh }: { run: InvestigationRun; refresh?: () => Promise<void> }) {
+function RunSummary({ run, refresh, active = false }: { run: InvestigationRun; refresh?: () => Promise<void>; active?: boolean }) {
   if (run.status === 'waiting' && run.thresholdObservation && run.calcId)
     return <ThresholdObservation observation={run.thresholdObservation} calcId={run.calcId} />;
   const failures = refresh ? (run.stages || []).filter(stage => stage.canRetry) : [];
   return <>
     {run.status !== 'ready' && <p className="investigation-status" role={run.status === 'superseded' ? undefined : 'status'}>
-      <strong>{runStatus[run.status]}</strong>{run.reason && !failures.some(s => s.reason === run.reason) && ' · ' + run.reason}
+      <strong>{active && run.status === 'queued' ? 'Очередь' : runStatus[run.status]}</strong>
+      {run.reason && !failures.some(stage => stage.reason === run.reason) && ' · ' + run.reason}
     </p>}
     {refresh && failures.map(stage => <StageRetry key={run.id + stage.role + stage.attempt} run={run} stage={stage} refresh={refresh} />)}
     {(run.result?.summary || run.summary) && <p className="investigation-text">{run.result?.summary || run.summary}</p>}
@@ -267,11 +268,14 @@ export function CaseInvestigation({ investigation, error, refresh, userId, canEx
   const [prompt, setPrompt] = useState<InvestigationRun>();
   const [selected, select] = useState('');
   const ready = current?.status === 'ready' ? current.result : undefined;
+  const compactQueue = current?.status === 'queued' && !current.summary && !current.reason &&
+    !current.period && !current.unit && !current.calcId && !current.checks.length && !error;
   const currentMeasurement = ready && current ? measurement?.(current) : undefined;
   const publishable = (run: InvestigationRun) => canPublish && run.owner === userId
     && !run.published && run.status === 'ready' && !!run.result;
   return <div className="case-investigation">
-    {(current || canExplore || next || error) && <section className="paper investigation-decision" aria-label="Исследование">
+    {(current || canExplore || next || error) && <section className="paper investigation-decision" aria-label="Исследование"
+      data-compact-queue={compactQueue}>
       {current ? <>
         {current.owner && <p className="investigation-visibility muted">
           <span>{current.published ? 'Опубликовано для команды' : 'Личное исследование'}</span>
@@ -280,7 +284,7 @@ export function CaseInvestigation({ investigation, error, refresh, userId, canEx
         {!current.thresholdObservation && <RunMeta run={current} />}
         <div aria-live="polite">
           {ready && <h2>Вывод</h2>}
-          <RunSummary run={current} refresh={refresh} />
+          <RunSummary run={current} refresh={refresh} active />
         </div>
         {ready && canExplore && ((!next && ready.action) || currentMeasurement) && <div className="investigation-recommendation">
           {!next && <><h3>Что делать ПМу</h3>

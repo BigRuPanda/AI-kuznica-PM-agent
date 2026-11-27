@@ -8,10 +8,7 @@
       const root = document.documentElement;
       let theme;
       try { theme = localStorage.getItem('pm-theme'); } catch {}
-      if (theme === 'light' || theme === 'dark') root.dataset.themeOverride = 'true';
-      else theme = matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
-      root.dataset.theme = theme;
-
+      root.dataset.theme = theme === 'dark' ? 'dark' : 'light';
     </script>
     <style>
       html { background: #f4f5f7; color-scheme: light; }

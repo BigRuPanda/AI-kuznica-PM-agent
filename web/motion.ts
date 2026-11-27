@@ -17,6 +17,8 @@ export function moveMenu(layout: MenuLayout, update: () => void) {
       if (menuTransition === transition) flushSync(update);
     });
     menuTransition = transition;
+    // The browser may skip the animation when the window is resized.
+    void transition.ready.catch(() => {});
     const clear = () => {
       if (menuTransition === transition) menuTransition = undefined;
     };

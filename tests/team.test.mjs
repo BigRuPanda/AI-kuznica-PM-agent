@@ -35,11 +35,30 @@ test('legacy chat history survives upgrade and deleted message numbers are not r
     store.db.prepare('INSERT INTO chat_items VALUES(42,?,?,?,?,?)').run('group', user.name, 'user', '{"text":"Old message"}', 1);
     initWorkbench(store.db);
     assert.equal(messages(store.db, user, 'group').items[0].body.text, 'Old message');
+    assert.equal(messages(store.db, user, 'group').items[0].own, false);
     const id = createThread(store.db, user, 'Delete fixture');
+    store.db.prepare("INSERT INTO chat_items(thread,author,role,body) VALUES(?,?,'user',?)")
+      .run(id, 'Old display name', '{"text":"Older private message"}');
+    assert.equal(messages(store.db, user, id).items[0].own, true);
     const write = store.db.prepare("INSERT INTO chat_items(thread,body) VALUES(?,'{}')");
     const removedSeq = write.run(id).lastInsertRowid;
     deleteThread(store, user, id);
     assert.ok(write.run('group').lastInsertRowid > removedSeq);
+  } finally {
+    store.close();
+  }
+});
+
+test('group chat identifies the sender even if another participant has the same name', () => {
+  const store = openStore(':memory:');
+  const sender = { id: 'sender', name: 'Fixture' };
+  const reader = { id: 'reader', name: 'Fixture' };
+  try {
+    initEvidence(store.db);
+    initWorkbench(store.db);
+    enqueue(store, sender, { thread: 'group', question: 'Отправленное сообщение' });
+    assert.equal(messages(store.db, { ...sender, name: 'New name' }, 'group').items[0].own, true);
+    assert.equal(messages(store.db, reader, 'group').items[0].own, false);
   } finally {
     store.close();
   }
@@ -441,6 +460,42 @@ test('accounts, private and group chat, isolated judges, publish, MCP parity, du
       (await call('login', { login: 'judge-one', password: 'fixture-password' })).b.space,
       judge.b.space,
     );
+  } finally {
+    await app.close();
+  }
+});
+test('profile changes are limited to the signed-in account and persist across sessions', async () => {
+  const base = join(await mkdtemp(join(tmpdir(), 'pm-profile-')), 'releases.sqlite');
+  const env = { ADMIN_INVITE_KEY: 'profile-test' };
+  const app = createTeamApp({ base, env, background: false });
+  try {
+    const url = await localServer(app);
+    const post = (op, body, token) => fetch(url + '/api/team/' + op, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...(token && { cookie: 'pm_session=' + token }) },
+      body: JSON.stringify(body),
+    });
+    const password = 'fixture-password';
+    const { user: admin } = await app.accounts.register(
+      { login: 'profile-admin', name: 'Админ', password, code: env.ADMIN_INVITE_KEY }, env,
+    );
+    const { token } = await app.accounts.register(
+      { login: 'profile-member', name: 'Участник', password, code: app.accounts.invite('team') }, env,
+    );
+    assert.equal((await post('profile', { name: 'Гость' })).status, 401);
+    assert.equal((await post('profile', { name: '  ' }, token)).status, 400);
+    assert.equal((await post('profile', { name: 'Другое имя', avatar: 'data:image/svg+xml;base64,PHN2Zz4=' }, token)).status, 400);
+    const session = await fetch(url + '/api/team/session', { headers: { cookie: 'pm_session=' + token } });
+    assert.equal((await session.json()).user.name, 'Участник');
+    const change = await post('profile', { id: admin.id, role: 'admin', login: 'new-login', name: ' Мария Орлова ' }, token);
+    assert.equal(change.status, 200);
+    const updated = await change.json();
+    assert.equal(updated.name, 'Мария Орлова');
+    assert.equal(updated.login, 'profile-member');
+    assert.equal(updated.role, 'member');
+    assert.equal(app.accounts.publicUser(admin.id).name, 'Админ');
+    const login = await post('login', { login: 'profile-member', password });
+    assert.deepEqual(await login.json(), updated);
   } finally {
     await app.close();
   }

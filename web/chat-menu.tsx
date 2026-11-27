@@ -5,14 +5,15 @@ import type { Thread } from './team-data';
 
 export type ChatAction = 'rename' | 'delete';
 
-export function ChatMenu({ thread, onAction }: {
+export function ChatMenu({ thread, onAction, onOpenChange }: {
   thread: Thread;
   onAction: (thread: Thread, action: ChatAction) => void;
+  onOpenChange: (open: boolean) => void;
 }) {
   if (!thread.canRename && !thread.canDelete) return null;
   return (
     <ChatPopupMenu label="Действия чата" triggerLabel={'Действия чата «' + thread.title + '»'} triggerContent={<Icon name="more" />}
-      triggerClass="thread-menu-trigger">
+      triggerClass="thread-menu-trigger" onOpenChange={onOpenChange}>
       {close => <>
         {thread.canRename && (
           <button type="button" role="menuitem" onClick={() => { close(); onAction(thread, 'rename'); }}><Icon name="edit" />Переименовать</button>
@@ -27,12 +28,13 @@ export function ChatMenu({ thread, onAction }: {
   );
 }
 
-export function ChatPopupMenu({ label, triggerLabel = label, triggerContent, triggerClass, menuClass = '', children }: {
+export function ChatPopupMenu({ label, triggerLabel = label, triggerContent, triggerClass, menuClass = '', onOpenChange, children }: {
   label: string;
   triggerLabel?: string;
   triggerContent: ReactNode;
   triggerClass: string;
   menuClass?: string;
+  onOpenChange?: (open: boolean) => void;
   children: (close: () => void) => ReactNode;
 }) {
   const id = useId();
@@ -108,7 +110,11 @@ export function ChatPopupMenu({ label, triggerLabel = label, triggerContent, tri
         role="menu"
         aria-label={label}
         className={'thread-menu ' + menuClass}
-        onToggle={(event) => setOpen(event.newState === 'open')}
+        onToggle={(event) => {
+          const active = event.newState === 'open';
+          setOpen(active);
+          onOpenChange?.(active);
+        }}
         onBlur={(event) => {
           if (event.relatedTarget !== trigger.current && !event.currentTarget.contains(event.relatedTarget)
             && event.currentTarget.matches(':popover-open')) {

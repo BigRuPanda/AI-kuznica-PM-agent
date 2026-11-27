@@ -32,9 +32,9 @@ import { Cards, initialCards, labels } from './work-cards';
 import { InterviewSearch } from './interview-search';
 import { Icon } from './icons';
 import { Dialog } from './dialog';
-import { ChatMenu } from './chat-menu';
+import { ChatThreadRow } from './chat-thread-row';
 import type { ChatAction } from './chat-menu';
-import { ThemeSwitch } from './theme-switch';
+import { ThemeProvider, ThemeSwitch } from './theme-switch';
 import { MetricRules } from './metric-rules';
 import { InvestigationSettings } from './investigation-settings';
 import { CaseInvestigation, InvestigationSnapshot, useCaseInvestigation } from './case-investigation';
@@ -47,7 +47,9 @@ import { styleFormValidation } from './form-validation';
 import { menuLayoutKey, readMenuLayout } from './menu-layout';
 import type { MenuLayout } from './menu-layout';
 import { minSidebarWidth, SidebarResizeHandle, useSidebarWidth } from './sidebar-width';
+import { PanelResizeHandle, useDiscussionDock, usePanelSize, usePanelSpace } from './panel-size';
 import { BrandLogo } from './brand-logo';
+import { ProfileEntry, ProfilePage } from './profile';
 import './team.css';
 import './tracking.css';
 import './chat.css';
@@ -270,6 +272,7 @@ function Overview({ home, onAsk }: { home: Home; onAsk: () => void }) {
 function Chat({
   id,
   userId,
+  avatar,
   caseId,
   threads,
   action,
@@ -279,10 +282,10 @@ function Chat({
   attachment,
   screen,
   onAttachFocus,
-  headerActions,
 }: {
   id: string;
   userId: string;
+  avatar: User['avatar'];
   caseId?: string;
   threads: Thread[];
   action: Action;
@@ -292,7 +295,6 @@ function Chat({
   attachment?: Attachment;
   screen?: { calc: string; full: boolean; control?: string; cards: string[] };
   onAttachFocus?: () => void;
-  headerActions?: React.ReactNode;
 }) {
   const { open: openMaterial, load: loadMaterial, listen } = useMaterials();
   const [progress, setProgress] = useState<string[]>([]);
@@ -499,7 +501,6 @@ function Chat({
           <h3>{caseId ? 'Обсудить разбор' : activeThread?.title || 'Чат'}</h3>
           <small>{isGroup ? 'Командный чат' : 'Личный чат'}</small>
         </div>
-        {headerActions}
       </header>
       <div className="conversation-body">
         <div
@@ -537,7 +538,9 @@ function Chat({
           <article className={'bubble ' + m.role} key={m.seq}>
             <div className="message-author">
               <span className="chat-avatar" aria-hidden="true">
-                {m.role === 'assistant' ? <Icon name="agent" /> : m.author.trim().slice(0, 1).toUpperCase()}
+                {m.role === 'assistant' ? <Icon name="agent" /> : m.own && avatar
+                  ? <img src={avatar} alt="" />
+                  : m.author.trim().slice(0, 1).toUpperCase()}
               </span>
               <b>{m.author}</b>
             </div>
@@ -945,9 +948,10 @@ function DeleteChatDialog({ thread, close, onDelete }: {
   );
 }
 
-function ChatWorkspace({ home, id, action, refresh, onRename, onDelete }: {
+function ChatWorkspace({ home, id, avatar, action, refresh, onRename, onDelete }: {
   home: Home;
   id: string;
+  avatar: User['avatar'];
   action: Action;
   refresh: () => Promise<void>;
   onRename: (renamed: ThreadTitle) => void;
@@ -955,11 +959,14 @@ function ChatWorkspace({ home, id, action, refresh, onRename, onDelete }: {
 }) {
   const [query, search] = useState('');
   const [listOpen, toggleList] = useState(false);
+  const [listCollapsed, collapseList] = useState(false);
   const [creating, create] = useState(false);
   const [saving, save] = useState(false);
   const [editing, edit] = useState<{ thread: Thread; action: ChatAction } | null>(null);
+  const { available, observe } = usePanelSpace();
+  const listWidth = usePanelSize('pm-chat-list-width', 228, 164,
+    available ? Math.max(164, Math.min(368, Math.floor(available - 314))) : 368);
   const activeId = id || 'group';
-  const activeThread = home.threads.find((thread) => thread.id === activeId);
   const term = query.trim().toLocaleLowerCase('ru');
   const threads = home.threads.filter((thread) => thread.title.toLocaleLowerCase('ru').includes(term));
   const groups = [
@@ -989,11 +996,23 @@ function ChatWorkspace({ home, id, action, refresh, onRename, onDelete }: {
           <Icon name="plus" /> Новый чат
         </button>
       </div>
-      <div className="chat-layout">
+      <div className="chat-layout" ref={observe} data-list-collapsed={listCollapsed}
+        style={{ '--thread-width': listWidth.size + 'px' } as React.CSSProperties}>
         <aside className="threads-panel" aria-label="Чаты" data-open={listOpen}>
+          <div className="threads-heading">
+            {!listCollapsed && <h2>Список чатов</h2>}
+            <button type="button" className="threads-collapse"
+              aria-label={listCollapsed ? 'Развернуть список чатов' : 'Свернуть список чатов'}
+              title={listCollapsed ? 'Развернуть список чатов' : 'Свернуть список чатов'}
+              aria-expanded={!listCollapsed} aria-controls="thread-panel-content"
+              onClick={() => collapseList(value => !value)}>
+              <Icon name={listCollapsed ? 'right' : 'left'} />
+            </button>
+          </div>
           <button
             type="button"
             className="threads-toggle"
+            aria-label={listOpen ? 'Свернуть список чатов' : 'Развернуть список чатов'}
             aria-expanded={listOpen}
             aria-controls="thread-panel-content"
             onClick={() => toggleList(!listOpen)}
@@ -1011,31 +1030,24 @@ function ChatWorkspace({ home, id, action, refresh, onRename, onDelete }: {
                 <section className="thread-group" key={group.id} aria-labelledby={'thread-group-' + group.id}>
                   <h2 id={'thread-group-' + group.id}>{group.title}</h2>
                   {group.threads.map(t => (
-                    <div className="thread-row" key={t.id}>
-                      <a
-                        aria-current={activeId === t.id ? 'page' : undefined}
-                        href={'#chats/' + t.id}
-                        onClick={() => toggleList(false)}
-                      >
-                        <span className="thread-icon"><Icon name={t.scope === 'group' ? 'people' : 'chat'} /></span>
-                        <span className="thread-title">{t.title}</span>
-                      </a>
-                      <ChatMenu thread={t} onAction={openAction} />
-                    </div>
+                    <ChatThreadRow key={t.id} thread={t} current={activeId === t.id}
+                      onSelect={() => toggleList(false)} onAction={openAction} />
                   ))}
                 </section>
               ))}
               {!threads.length && <p className="muted">{query ? 'Чаты не найдены' : 'Пока нет чатов'}</p>}
             </nav>
           </div>
+          {!listCollapsed && <PanelResizeHandle panel={listWidth} className="threads-resizer"
+            label="Ширина списка чатов" controls="thread-panel-content" />}
         </aside>
         <Chat
           key={activeId}
           userId={home.user.id}
+          avatar={avatar}
           id={activeId}
           threads={home.threads}
           action={action}
-          headerActions={activeThread && <ChatMenu thread={activeThread} onAction={openAction} />}
         />
       </div>
       {creating && (
@@ -1087,11 +1099,13 @@ function ChatWorkspace({ home, id, action, refresh, onRename, onDelete }: {
 function Investigation({
   id,
   home,
+  avatar,
   action,
   refresh,
 }: {
   id: string;
   home: Home;
+  avatar: User['avatar'];
   action: Action;
   refresh: () => Promise<void>;
 }) {
@@ -1194,6 +1208,12 @@ function Investigation({
     [pinned, prefix],
   );
   const [mobileChat, chatMode] = useState(false);
+  const [focusDiscussion, requestDiscussionFocus] = useState(false);
+  const discussion = useRef<HTMLDivElement>(null);
+  const { available, observe } = usePanelSpace();
+  const discussionWidth = usePanelSize('pm-case-chat-width', (available || 940) * .34, 232,
+    available ? Math.max(232, Math.min(540, Math.floor(available - 300))) : 540);
+  useDiscussionDock(discussion, !!d && !!tid);
   const [editingMeasurement, editMeasurement] = useState(false);
   const taskTitle = useRef<HTMLHeadingElement>(null);
   const effectSection = useRef<HTMLDetailsElement>(null);
@@ -1208,6 +1228,11 @@ function Investigation({
     document.getElementById('case-draft-' + draftToFocus)?.focus();
     setDraftToFocus('');
   }, [draftToFocus]);
+  useLayoutEffect(() => {
+    if (!focusDiscussion || !tid) return;
+    discussion.current?.querySelector<HTMLTextAreaElement>('.chat-composer textarea')?.focus();
+    requestDiscussionFocus(false);
+  }, [focusDiscussion, tid]);
   if (!d) return <p className={err ? 'error' : 'empty'} role={err ? 'alert' : 'status'}>{err || 'Загружаем разбор…'}</p>;
   const v = d.view,
     c = d.case;
@@ -1324,22 +1349,24 @@ function Investigation({
         </div>
         {!researchAvailable && caseActions}
       </div>
-      {research.investigation && <CaseInvestigation investigation={research.investigation} error={research.error}
-        refresh={research.refresh} userId={home.user.id} canExplore={!withdrawn && !completed}
-        canPublish={!withdrawn && !completed && !c.body.owner}
-        canDraft={!!(redmine.local || redmine.connected)} onDraft={draftId => action(() => onDraft(draftId))}
-        measurement={measurementEditor}
-        next={!withdrawn && (showEffect || scheduleEffect) ? {
-          label: showEffect ? 'Посмотреть результат проверки эффекта' : 'Назначить проверку эффекта', open: openNext,
-        } : undefined} />}
-      {researchAvailable && caseActions}
-      {tid && (
-        <button className="mobile-toggle" aria-expanded={mobileChat} onClick={() => moveView(() => chatMode(!mobileChat))}>
-          <Icon name="down" /> {mobileChat ? 'К разбору' : 'Обсудить'}
-        </button>
-      )}
-      <div className={'case-layout ' + (mobileChat ? 'show-chat' : '')}>
+      <div className={'case-layout ' + (mobileChat && tid ? 'show-chat' : '')} ref={observe} data-discussion={!!tid} style={{
+        '--discussion-width': discussionWidth.size + 'px',
+      } as React.CSSProperties}>
         <div className="case-main" aria-busy={updating}>
+          {research.investigation && <CaseInvestigation investigation={research.investigation} error={research.error}
+            refresh={research.refresh} userId={home.user.id} canExplore={!withdrawn && !completed}
+            canPublish={!withdrawn && !completed && !c.body.owner}
+            canDraft={!!(redmine.local || redmine.connected)} onDraft={draftId => action(() => onDraft(draftId))}
+            measurement={measurementEditor}
+            next={!withdrawn && (showEffect || scheduleEffect) ? {
+              label: showEffect ? 'Посмотреть результат проверки эффекта' : 'Назначить проверку эффекта', open: openNext,
+            } : undefined} />}
+          {researchAvailable && caseActions}
+          {tid && (
+            <button className="mobile-toggle" aria-expanded={mobileChat} onClick={() => moveView(() => chatMode(!mobileChat))}>
+              <Icon name="down" /> {mobileChat ? 'К разбору' : 'Обсудить'}
+            </button>
+          )}
           {err && <p role="alert">{err}</p>}
           {c.body.origin && <p>
             <a href={'#snapshot/' + c.body.origin.calc + '/' + (c.body.origin.cards || initialCards).join(',')}>
@@ -1412,6 +1439,7 @@ function Investigation({
             onAsk={(x) => {
               ask(x);
               chatMode(true);
+              requestDiscussionFocus(true);
             }}
             onPin={(k) => {
               const next = pinned.includes(k) ? pinned.filter((p) => p !== k) : [...pinned, k];
@@ -1557,22 +1585,27 @@ function Investigation({
           )}
         </div>
         {tid && (
-          <Chat
-            id={tid}
-            userId={home.user.id}
-            caseId={id}
-            threads={home.threads}
-            action={action}
-            context={ctx}
-            attachment={attachment}
+          <div id="case-discussion" className="case-discussion" ref={discussion}>
+            <PanelResizeHandle panel={discussionWidth} className="discussion-width"
+              label="Ширина обсуждения" controls="case-discussion" direction={-1} />
+            <Chat
+              id={tid}
+              userId={home.user.id}
+              avatar={avatar}
+              caseId={id}
+              threads={home.threads}
+              action={action}
+              context={ctx}
+              attachment={attachment}
               screen={{ calc: v.id, full, control: peer || v.summary[1]?.product, cards: caseCards }}
-            clearContext={() => {
-              ask('');
-              attach(undefined);
-            }}
-            onResult={result}
-            onAttachFocus={() => chatMode(true)}
-          />
+              clearContext={() => {
+                ask('');
+                attach(undefined);
+              }}
+              onResult={result}
+              onAttachFocus={() => chatMode(true)}
+            />
+          </div>
         )}
       </div>
       {confirmation && (
@@ -1783,6 +1816,10 @@ const deliveryState: Record<string, string> = {
   uncertain:'Доставка не подтверждена', review:'Требуется сверка', cancelled:'Отменено',
 };
 const deliveryChannel: Record<string, string> = { telegram:'Telegram',smtp:'Электронная почта' };
+const settingsLinks = [
+  { scope: 'personal', href: '#settings/personal', label: 'Мои настройки', icon: 'settings' },
+  { scope: 'team', href: '#settings', label: 'Настройки команды', icon: 'people' },
+] as const;
 
 function Settings({ home, action, refresh, menu, changeMenu, scope }: {
   home: Home;
@@ -1796,13 +1833,10 @@ function Settings({ home, action, refresh, menu, changeMenu, scope }: {
   const admin = home.user.role === 'admin';
   return (
     <>
+      <a className="crumb" href="#profile" aria-label="Вернуться в профиль">← Профиль</a>
       <div className="page-head">
-        <h1>Настройки</h1>
+        <h1>{scope === 'personal' ? 'Мои настройки' : 'Настройки команды'}</h1>
       </div>
-      <nav className="settings-scopes" aria-label="Разделы настроек">
-        <a href="#settings" aria-current={scope === 'team' ? 'page' : undefined}>Настройки команды</a>
-        <a href="#settings/personal" aria-current={scope === 'personal' ? 'page' : undefined}>Мои настройки</a>
-      </nav>
       <InvestigationSettings scope={scope} admin={admin} />
       <Connections home={home} action={action} refresh={refresh} scope={scope} />
       {scope === 'team' && <MetricRules admin={admin} refresh={refresh}/>}
@@ -1858,6 +1892,10 @@ function Settings({ home, action, refresh, menu, changeMenu, scope }: {
         </section>
       )}
       {scope === 'personal' && <>
+        <section className="paper" aria-labelledby="appearance-title">
+          <h3 id="appearance-title">Оформление</h3>
+          <ThemeSwitch />
+        </section>
         <section className="paper menu-preference" aria-labelledby="menu-preference-title">
           <h3 id="menu-preference-title">Положение меню</h3>
           <div className="actions menu-preference-options">
@@ -2027,7 +2065,7 @@ function Snapshot({
     </>
   );
 }
-function Workspace({ user, onLogout }: { user: User; onLogout: () => void }) {
+function Workspace({ user, onLogout, onUpdate }: { user: User; onLogout: () => void; onUpdate: (user: User) => void }) {
   const [route, id, selected] = useRoute(),
     [home, setHome] = useState<Home | null>(null),
     [err, fail] = useState(''),
@@ -2037,6 +2075,7 @@ function Workspace({ user, onLogout }: { user: User; onLogout: () => void }) {
     [menu, setMenu] = useState(readMenuLayout);
   const sidebar = useSidebarWidth();
   const settings = route === 'settings' || (route === 'cases' && id === 'settings');
+  const settingsScope = route === 'settings' && id === 'personal' ? 'personal' : 'team';
   const homeVersion = useRef(0);
   const refresh = useCallback(async () => {
     const version = ++homeVersion.current;
@@ -2101,28 +2140,13 @@ function Workspace({ user, onLogout }: { user: User; onLogout: () => void }) {
           })}
         </nav>
         <div className="side-bottom">
-          <a className="menu-command" href="#settings" aria-label="Настройки" title="Настройки" aria-current={settings ? 'page' : undefined}>
-            <Icon name="settings" /><span className="menu-label">Настройки</span>
-          </a>
-          <ThemeSwitch />
-          <span className="session-role" title={user.role === 'admin' ? 'Администратор' : undefined}>
-            {user.role === 'admin' ? <><span className="full-role">Администратор</span><span className="short-role">Админ</span></> :
-              user.role === 'judge' ? 'Демо · жюри' : 'Участник'}
-          </span>
-          <small>{user.name}</small>
-          <button
-            className="menu-command"
-            aria-label="Выйти"
-            title="Выйти"
-            onClick={() =>
-              action(async () => {
-                await post('logout');
-                onLogout();
-              })
-            }
-          >
-            <Icon name="logout" /><span className="menu-label">Выйти</span>
-          </button>
+          {settingsLinks.map(({ scope, href, label, icon }) => (
+            <a key={scope} className="side-setting" href={href} aria-label={label} title={label}
+              aria-current={settings && scope === settingsScope ? 'page' : undefined}>
+              <Icon name={icon} /><span className="menu-label">{label}</span>
+            </a>
+          ))}
+          <ProfileEntry user={user} active={route === 'profile'} />
         </div>
       </aside>
       {menu === 'left' && <SidebarResizeHandle {...sidebar} />}
@@ -2133,7 +2157,12 @@ function Workspace({ user, onLogout }: { user: User; onLogout: () => void }) {
           </p>
         )}
         <div className="workspace-page" data-route={route} key={route === 'chats' ? route : [route, id, selected].join('/')}>
-        {!home ? (
+        {route === 'profile' ? (
+          <ProfilePage user={user} onUpdate={onUpdate} onLogout={() => action(async () => {
+            await post('logout');
+            onLogout();
+          })} />
+        ) : !home ? (
           <p className="empty" role="status">Загрузка…</p>
         ) : route === 'demo-page' || route === 'demo-issue' ? (
           <DemoObject key={route+id} service={route} id={id}/>
@@ -2144,14 +2173,14 @@ function Workspace({ user, onLogout }: { user: User; onLogout: () => void }) {
         ) : ['releases', 'release', 'calc'].includes(route) ? (
           <ReleaseAnalytics route={route} requestedId={id} author={user.name} admin={user.role === 'admin'} />
         ) : route === 'case' ? (
-          <Investigation key={id} id={id} home={home} action={action} refresh={refresh} />
+          <Investigation key={id} id={id} home={home} avatar={user.avatar} action={action} refresh={refresh} />
         ) : route === 'range' ? (
           <RangeResult id={id} />
         ) : route === 'snapshot' ? (
           <Snapshot id={id} selected={selected} />
         ) : settings ? (
           <Settings home={home} action={action} refresh={refresh} menu={menu} changeMenu={changeMenu}
-            scope={route === 'settings' && id === 'personal' ? 'personal' : 'team'} />
+            scope={settingsScope} />
         ) : route === 'knowledge-source' ? (
           <SourceExtract key={id+selected} version={id} loc={selected && decodeURIComponent(selected)} />
         ) : route === 'sources' ? (
@@ -2160,6 +2189,7 @@ function Workspace({ user, onLogout }: { user: User; onLogout: () => void }) {
           <ChatWorkspace
             home={home}
             id={id}
+            avatar={user.avatar}
             action={action}
             refresh={refresh}
             onRename={(renamed) => updateThreads((threads) => threads.map((thread) =>
@@ -2321,6 +2351,7 @@ function Root() {
   ) : user ? (
     <Workspace
       user={user}
+      onUpdate={(updated) => set(current => current?.id === updated.id ? updated : current)}
       onLogout={() => {
         set(null);
         jump('overview');
@@ -2331,4 +2362,4 @@ function Root() {
   );
 }
 styleFormValidation();
-createRoot(document.getElementById('root')!).render(<Root />);
+createRoot(document.getElementById('root')!).render(<ThemeProvider><Root /></ThemeProvider>);

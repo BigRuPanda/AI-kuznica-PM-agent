@@ -6,6 +6,17 @@ import { mkdirSync } from 'node:fs';
 import { digest } from './evidence.mjs';
 const scrypt = promisify(deriveKey);
 export const secret = () => randomBytes(32).toString('base64url');
+const avatarPrefix = 'data:image/jpeg;base64,';
+function validateAvatar(avatar) {
+  if (typeof avatar !== 'string' || !avatar.startsWith(avatarPrefix) || avatar.length > 128000)
+    throw Error('Не удалось сохранить фото профиля.');
+  const encoded = avatar.slice(avatarPrefix.length);
+  const image = Buffer.from(encoded, 'base64');
+  if (image.length < 5 || image.toString('base64') !== encoded ||
+      image[0] !== 0xff || image[1] !== 0xd8 || image[2] !== 0xff ||
+      image.at(-2) !== 0xff || image.at(-1) !== 0xd9)
+    throw Error('Не удалось сохранить фото профиля.');
+}
 export function openAccounts(path) {
   mkdirSync(dirname(path), { recursive: true });
   const db = new DatabaseSync(path);
@@ -13,7 +24,8 @@ export function openAccounts(path) {
     'PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000; CREATE TABLE IF NOT EXISTS users(id TEXT PRIMARY KEY,login TEXT UNIQUE,name TEXT,salt TEXT,hash TEXT,space TEXT,role TEXT);' +
       'CREATE TABLE IF NOT EXISTS sessions(hash TEXT PRIMARY KEY,user TEXT,expires INTEGER);CREATE TABLE IF NOT EXISTS invites(hash TEXT PRIMARY KEY,space TEXT,role TEXT,expires INTEGER);' +
       'CREATE TABLE IF NOT EXISTS bindings(code TEXT PRIMARY KEY,user TEXT,expires INTEGER);CREATE TABLE IF NOT EXISTS telegram(chat TEXT PRIMARY KEY,user TEXT,space TEXT,kind TEXT);' +
-      'CREATE TABLE IF NOT EXISTS api_keys(hash TEXT PRIMARY KEY,user TEXT);',
+      'CREATE TABLE IF NOT EXISTS api_keys(hash TEXT PRIMARY KEY,user TEXT);' +
+      'CREATE TABLE IF NOT EXISTS user_avatars(user TEXT PRIMARY KEY,image TEXT NOT NULL);',
   );
   const publicUser = (id) => db.prepare('SELECT id,login,name,space,role FROM users WHERE id=?').get(id);
   function session(id) {
@@ -24,6 +36,28 @@ export function openAccounts(path) {
   return {
     db,
     publicUser,
+    avatar(id) {
+      return db.prepare('SELECT image FROM user_avatars WHERE user=?').get(id)?.image ?? null;
+    },
+    updateProfile(id, { name, avatar }) {
+      if (name !== undefined) {
+        name = typeof name === 'string' ? name.trim() : '';
+        if (!name || name.length > 100) throw Error('Введите имя длиной от 1 до 100 символов.');
+      }
+      if (avatar != null) validateAvatar(avatar);
+      db.exec('BEGIN IMMEDIATE');
+      try {
+        if (name !== undefined) db.prepare('UPDATE users SET name=? WHERE id=?').run(name, id);
+        if (avatar === null) db.prepare('DELETE FROM user_avatars WHERE user=?').run(id);
+        else if (avatar !== undefined)
+          db.prepare('INSERT INTO user_avatars VALUES(?,?) ON CONFLICT(user) DO UPDATE SET image=excluded.image').run(id, avatar);
+        db.exec('COMMIT');
+      } catch (error) {
+        db.exec('ROLLBACK');
+        throw error;
+      }
+      return publicUser(id);
+    },
     sessionUser(token) {
       const s = db
         .prepare('SELECT user FROM sessions WHERE hash=? AND expires>?')
