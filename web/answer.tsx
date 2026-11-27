@@ -1,7 +1,7 @@
 import { Fragment, type ReactNode } from 'react';
-import { hiddenDemoPage } from './tracking-visibility';
+import { useTrackingVisibility } from './tracking-visibility';
 
-function inline(text: string, openMaterial?: (id: string) => void): ReactNode[] {
+function renderInline(text: string, hiddenDemoPage: (href: string) => boolean, openMaterial?: (id: string) => void): ReactNode[] {
   const pattern =
     /(\*\*[^*\n]+\*\*|__[^_\n]+__|\*[^*\n]+\*|`[^`\n]+`|\[[^\]\n]+\]\((?:https?:\/\/|#)[^\s)]+\)|(?:https?:\/\/[^\s<>]*\/)?#material\/[a-f0-9]{64})/gi;
   return text.split(pattern).map((part, i) => {
@@ -43,6 +43,8 @@ export function Answer({
   compact?: boolean;
   openMaterial?: (id: string) => void;
 }) {
+  const { hiddenDemoPage } = useTrackingVisibility();
+  const inline = (text: string, open?: (id: string) => void) => renderInline(text, hiddenDemoPage, open);
   const lines = text.trim().replace(/\r\n?/g, '\n').split('\n');
   if (compact && text.length > 240 && lines.length === 1) {
     const end = text.search(/(?<=[.!?])\s+(?=[А-ЯЁA-Z])/u);

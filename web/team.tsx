@@ -1,9 +1,10 @@
 import { SourceExtract } from './knowledge-source';
+import { Knowledge } from './knowledge';
 import { ReleaseAnalytics } from './app';
 import { MetrikaJournal } from './metrika-status';
 import { ChatTrackerPreview, Connections, DemoObject, Tracking } from './tracking';
 import type { TrackerPreview } from './tracking';
-import { hiddenDemoPage, visibleTrackerStep } from './tracking-visibility';
+import { BridgePages, useTrackingVisibility } from './tracking-visibility';
 import { RangeResult } from './range-result';
 import { rangeLabel, RangeChart, DAY } from './range-chart';
 import type { Attachment } from './range-chart';
@@ -61,7 +62,6 @@ import './chat.css';
 type Action = (fn: () => Promise<void>) => void;
 type ThreadTitle = Pick<Thread, 'id' | 'title'>;
 function currentRoute() {
-  if (hiddenDemoPage(location.hash)) return 'cases';
   if (location.hash.length > 1) return location.hash.slice(1);
   const params = new URLSearchParams(location.search);
   if (params.get('openChat')) return 'chats/' + params.get('openChat');
@@ -200,6 +200,7 @@ const stepNames: Record<string, string> = {
 };
 const stepLabel = (name: string) => stepNames[name] || name;
 function CompletedChecks({ body }: { body: Msg['body'] }) {
+  const { visibleTrackerStep } = useTrackingVisibility();
   const checks = [...new Set([...(body.checks || []), ...(body.steps || [])]
     .filter(visibleTrackerStep).map(stepLabel))];
   if (!checks.length) return null;
@@ -304,6 +305,7 @@ function Chat({
   onAttachFocus?: () => void;
 }) {
   const { open: openMaterial, load: loadMaterial, listen } = useMaterials();
+  const { hiddenDemoPage, visibleTrackerStep } = useTrackingVisibility();
   const [progress, setProgress] = useState<string[]>([]);
   const [jobIssue, setJobIssue] = useState('');
   const [material, setMaterial] = useState<MaterialRef | null>(null);
@@ -559,9 +561,13 @@ function Chat({
             ) : (
               <p>{m.body.text}</p>
             )}
-            {m.body.readSources?.map(source => <div key={source.url}>
+            {m.body.readSources?.filter(source => !hiddenDemoPage(source.url)).map(source => <div key={source.url}>
               <a href={source.url} {...(/^https?:\/\//i.test(source.url) && {target:'_blank',rel:'noreferrer'})}>{source.label}</a>
               {source.detail && <small> · {source.detail}</small>}
+            </div>)}
+            {m.body.closingQuotes?.map(quote => <div key={quote.key}>
+              <small>Комментарий при закрытии{quote.author ? ' · ' + quote.author : ''}</small>
+              <blockquote className="tracker-text">{quote.text}</blockquote>
             </div>)}
             {m.body.checkedAt && <small>Проверено {new Date(m.body.checkedAt).toLocaleString('ru-RU')}</small>}
             {m.body.materials?.map((item) => (
@@ -1137,6 +1143,7 @@ function ChatWorkspace({ home, id, avatar, action, refresh, onRename, onDelete }
 function Investigation({
   id,
   selected,
+  documentation,
   home,
   avatar,
   action,
@@ -1144,6 +1151,7 @@ function Investigation({
 }: {
   id: string;
   selected?: string;
+  documentation?: string;
   home: Home;
   avatar: User['avatar'];
   action: Action;
@@ -1268,6 +1276,10 @@ function Investigation({
   const [editingMeasurement, editMeasurement] = useState(false);
   const [advancedEffectOpen, setAdvancedEffectOpen] = useState(false);
   const taskTitle = useRef<HTMLHeadingElement>(null);
+  useEffect(() => {
+    if (documentation === undefined || !d) return;
+    taskTitle.current?.focus();
+  }, [documentation, d?.case.id]);
   const effectSection = useRef<HTMLDetailsElement>(null);
   const detailLoaded = !!d;
   const hasWatch = !!d?.case.body.watch;
@@ -1536,6 +1548,7 @@ function Investigation({
           )}
           <PinnedMaterials caseId={id} />
           <Tracking headingRef={taskTitle}
+            documentation={documentation}
             caseId={id}
             product={c.product}
             title={c.title}
@@ -2150,13 +2163,17 @@ function Snapshot({
   );
 }
 function Workspace({ user, onLogout, onUpdate }: { user: User; onLogout: () => void; onUpdate: (user: User) => void }) {
-  const [route, id, selected] = useRoute(),
+  const [requestedRoute, id, selected] = useRoute(),
     [home, setHome] = useState<Home | null>(null),
     [err, fail] = useState(''),
     [filter, setFilter] = useState(''),
     [newCaseRelease, showCaseForm] = useState<string | null>(null),
     [menu, setMenu] = useState(readMenuLayout);
   const sidebar = useSidebarWidth();
+  const bridgePages = Boolean(home?.bridgeEnabled);
+  const route = home && !bridgePages && ['knowledge', 'demo-page'].includes(requestedRoute) ? 'cases' : requestedRoute;
+  const documentation = bridgePages && selected?.split('?')[0] === 'documentation'
+    ? selected.slice('documentation'.length) : undefined;
   const settings = route === 'settings' || (route === 'cases' && id === 'settings');
   const settingsScope = route === 'settings' && id === 'personal' ? 'personal' : 'team';
   const homeVersion = useRef(0);
@@ -2192,6 +2209,7 @@ function Workspace({ user, onLogout, onUpdate }: { user: User; onLogout: () => v
     ['overview', 'Обзор'],
     ['chats', 'Чаты'],
     ['cases', 'Разборы'],
+    ...(bridgePages ? [['knowledge', 'База знаний']] : []),
     ['sources', 'Источники'],
   ];
   const content = (
@@ -2206,7 +2224,8 @@ function Workspace({ user, onLogout, onUpdate }: { user: User; onLogout: () => v
         </a>
         <nav aria-label="Основные разделы">
           {tabs.map(([k, t]) => {
-            const active = !settings && (route === k || (k === 'cases' && ['case','snapshot','range','material','demo-issue','demo-page','releases-list','release-detail','release','releases','calc'].includes(route)));
+            const active = !settings && (route === k || (k === 'knowledge' && route === 'demo-page') ||
+              (k === 'cases' && ['case','snapshot','range','material','demo-issue','releases-list','release-detail','release','releases','calc'].includes(route)));
             return (
             <a
               className={active ? 'active' : ''}
@@ -2216,7 +2235,7 @@ function Workspace({ user, onLogout, onUpdate }: { user: User; onLogout: () => v
               key={k}
               href={'#' + k}
             >
-              <Icon name={k === 'chats' ? 'chat' : k} />
+              <Icon name={k === 'chats' ? 'chat' : k === 'knowledge' ? 'sources' : k} />
               <span className="menu-label">{t}</span>
             </a>
             );
@@ -2256,7 +2275,8 @@ function Workspace({ user, onLogout, onUpdate }: { user: User; onLogout: () => v
         ) : ['releases', 'release', 'calc'].includes(route) ? (
           <ReleaseAnalytics route={route} requestedId={id} user={user} />
         ) : route === 'case' ? (
-          <Investigation key={home.user.id + '/' + id} id={id} selected={selected} home={home} avatar={user.avatar} action={action} refresh={refresh} />
+          <Investigation key={home.user.id + '/' + id} id={id} selected={selected} documentation={documentation}
+            home={home} avatar={user.avatar} action={action} refresh={refresh} />
         ) : route === 'range' ? (
           <RangeResult id={id} />
         ) : route === 'snapshot' ? (
@@ -2266,6 +2286,8 @@ function Workspace({ user, onLogout, onUpdate }: { user: User; onLogout: () => v
             scope={settingsScope} />
         ) : route === 'knowledge-source' ? (
           <SourceExtract key={id+selected} version={id} loc={selected && decodeURIComponent(selected)} />
+        ) : route === 'knowledge' ? (
+          <Knowledge admin={user.role === 'admin'} />
         ) : route === 'sources' ? (
           <Sources home={home} action={action} refresh={refresh} />
         ) : route === 'chats' ? (
@@ -2420,7 +2442,7 @@ function Workspace({ user, onLogout, onUpdate }: { user: User; onLogout: () => v
   );
   return (
     <MaterialsProvider caseId={route === 'case' ? id : undefined}>
-      {content}
+      <BridgePages.Provider value={bridgePages}>{content}</BridgePages.Provider>
     </MaterialsProvider>
   );
 }

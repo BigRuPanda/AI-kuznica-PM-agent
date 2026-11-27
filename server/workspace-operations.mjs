@@ -1,4 +1,4 @@
-import { excelSources, sourceRows, sourceValues, cellSource } from './knowledge.mjs';
+import { excelSources, sourceRows, sourceValues, cellSource, issuePages, issueClosure, pageByIssue } from './knowledge.mjs';
 import { readPublicPage } from './public-page.mjs';
 import { marketOffers } from './market-offers.mjs';
 import { checkOffer, savedOfferCheck } from './competitor-check.mjs';
@@ -181,7 +181,9 @@ export const operations = {
   ],
   issue_options: ['Приоритеты, исполнители и типы задач Redmine', {}],
   page_search: ['Найти страницы Confluence в пространстве команды', { query: z.string().max(400) }],
-  page_read: ['Прочитать страницу Confluence и её версию', { key: id, local: z.boolean().optional() }],
+  page_read: ['Прочитать страницу и её версию. Для встроенной страницы используйте номер задачи Redmine (issueKey) либо её ключ (key с local: true).', {
+    key: id.optional(), issueKey: id.optional(), local: z.boolean().optional(),
+  }],
   page_draft: [
     'Предпросмотр изменения страницы Confluence. fragment — уникальный исходный текст для замены, иначе content добавляется в конец. issueKey связывает страницу с задачей.',
     {
@@ -191,6 +193,8 @@ export const operations = {
       content: z.string().max(30000).optional(),
       fragment: z.string().max(10000).optional(),
       issueKey: optional,
+      sourceVersions: z.array(z.string().regex(/^[a-f0-9]{64}$/)).max(8).optional(),
+      resultPage: id.optional(),
       baseVersion: z.number().int().positive().optional(),
     },
   ],
@@ -749,7 +753,8 @@ export function workspaceOperation(
     ].includes(op)
   ) {
     const service = op.startsWith('page_') ? 'confluence' : 'redmine';
-    const target = b.local ? { service, local: true } : targetFor(db, user, service, env);
+    const linkedPage = op === 'page_read' && b.issueKey;
+    const target = b.local || linkedPage ? { service, local: true } : targetFor(db, user, service, env);
     if (
       sharedOnly &&
       (!target.local || (op === 'page_draft' && b.issueKey && !targetFor(db, user, 'redmine', env).local))
@@ -780,8 +785,13 @@ export function workspaceOperation(
       async (api) => {
         if (op.endsWith('_search')) return { local: !!target.local, items: await api.search(b.query, false, b.origin) };
         if (op === 'issue_options') return api.options();
+        if (op === 'page_read') {
+          const key = linkedPage ? pageByIssue(db, user, b.issueKey, sharedOnly) : b.key;
+          if (!key) throw Error('Укажите ключ страницы или номер задачи Redmine');
+          return publicPage(await api.read(key));
+        }
         const value = await api.read(b.key);
-        return op === 'page_read' ? publicPage(value) : value;
+        return { ...value, ...issueClosure(db, user, value.url, sharedOnly), pages: issuePages(db, user, value.url, sharedOnly) };
       },
     );
   }

@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { openStore } from '../server/store.mjs';
 import { initWorkbench } from '../server/workbench.mjs';
-import { initEvidence } from '../server/evidence.mjs';
+import { initEvidence, importDocs } from '../server/evidence.mjs';
 import { workspaceOperation } from '../server/workspace-operations.mjs';
 import {
   configure,
@@ -21,6 +21,7 @@ import { openAccounts } from '../server/accounts.mjs';
 import { initContacts } from '../server/notification-contacts.mjs';
 import { collectClosures } from '../server/redmine-bridge.mjs';
 import { syncWatches } from '../server/redmine-watch.mjs';
+import { knowledge, recordResultPage } from '../server/knowledge.mjs';
 
 const owner = { id: 'one', role: 'admin', name: 'Автор' },
   peer = { id: 'two', role: 'member', name: 'Коллега' };
@@ -30,6 +31,84 @@ const config = {
 };
 const macro =
   '<ac:structured-macro ac:name="code"><ac:plain-text-body><![CDATA[<macro>]]></ac:plain-text-body></ac:structured-macro>';
+
+test('publication pins the selected Excel version and makes the linked page readable by issue number', async () => {
+  const store = dbAt();
+  try {
+    const mock = siteMock();
+    const s = scenario(store, mock);
+    store.db.prepare("UPDATE cases SET body=json_remove(body,'$.owner') WHERE id=?").run(s.caseId);
+    await s.connect('redmine');
+    const issue = await s.confirm(await s.draft('draft', { title: 'Закрытый результат', description: 'Исходная постановка' }));
+    const closure = { episode: 1, reference: 'fixture', issue: Number(issue.key), url: issue.url, title: 'Закрытый результат',
+      description: 'Исходная постановка', status: 'Закрыта', observed: '2026-09-02', personalOwner: owner.id,
+      closing_note: { text: 'Проверено: дословный комментарий', author: 'Автор' },
+      report: { start: '2026-08-17', end: '2026-08-30', status: 'снижение', web: 'https://report.test/original', periods: [[70, 27], [62, 15]] } };
+    store.db.prepare('INSERT INTO redmine_results VALUES(?,?,?,?)').run('fixture/1', s.caseId, JSON.stringify(closure), Date.parse(closure.observed));
+    recordResultPage(store.db, 'fixture/1', s.caseId, closure);
+    const [record] = knowledge(store.db, owner).results;
+    assert.deepEqual(record.report, closure.report);
+    assert.equal(knowledge(store.db, peer).results.length, 0);
+    assert.equal(knowledge(store.db, peer).pages.length, 0);
+    const book = text => ({ file: 'Аналитика.xlsx', facts: [{ kind: 'competitor', loc: 'Сводка!C4', text }] });
+    importDocs(store, [book('Исходный вывод')], { notify: false });
+    const [{ version }] = s.run('knowledge-sources');
+    importDocs(store, [book('Новая версия')], { notify: false });
+    s.env.APP_BASE_URL = 'https://pm.test';
+    const draft = await s.draft('page_draft', { key: record.pageKey, content: 'Вывод', issueKey: issue.key,
+      resultPage: record.pageKey, sourceVersions: [version] });
+    const result = await s.confirm(draft);
+    assert.equal((await s.confirm(draft)).key, result.key);
+    const page = await s.run('page_read', { issueKey: issue.key });
+    assert.equal(page.key, result.key);
+    assert.match(page.text, /Проверено: дословный комментарий/);
+    assert.ok(page.links.some(link => link.url === '#knowledge-source/' + version));
+    assert.equal(s.run('knowledge-source', { version, loc: 'Сводка!C4' }).rows[0].value, 'Исходный вывод');
+    assert.equal(mock.issues[0].journals.filter(journal => journal.notes.includes('https://pm.test/' + result.url)).length, 1);
+    await assert.rejects(s.run('page_read', { key: result.key, local: true }, peer), /недоступна/i);
+    await assert.rejects(s.run('page_read', { issueKey: issue.key }, peer), /недоступна/i);
+    await assert.rejects(s.run('page_read', { issueKey: issue.key }, owner, true), /недоступна/i);
+    assert.deepEqual((await s.run('page_search', { query: 'Закрытый результат' }, peer)).items, []);
+    const task = await s.run('issue_read', { key: issue.key });
+    assert.deepEqual(task.closingNote, closure.closing_note);
+    assert.deepEqual(task.originalReport, closure.report);
+    assert.equal(task.pages[0].key, page.key);
+
+    await s.connect('confluence');
+    const publication = await s.draft('page_draft', { title: 'Итог в Confluence', content: 'Опубликованный вывод',
+      resultPage: page.key, issueKey: issue.key });
+    await s.confirm(publication);
+    await s.confirm(publication);
+    assert.equal(mock.pages.length, 1);
+    assert.match(mock.pages[0].body.storage.value, /bugs\.test\/pm\/issues\/1/);
+    assert.ok(mock.pages[0].body.storage.value.includes('https://pm.test/#knowledge-source/' + version));
+    assert.equal(mock.issues[0].journals.length, 2);
+  } finally {
+    store.close();
+  }
+});
+
+test('a source lookup preserves zero, missing dates and the exact row of the imported version', () => {
+  const store = dbAt();
+  try {
+    const doc = { file: 'source.xlsx', facts: [
+      { kind: 'sales', loc: 'Sales!A7', row: { product_family: 'Product', week_start: '2026-01-05', orders_index: 0 } },
+    ] };
+    importDocs(store, [doc], { notify: false });
+    const query = { product: 'Product', metric: 'orders_index', date: '2026-01-05' };
+    const op = (name, data) => workspaceOperation(store, owner, name, data);
+    const [hit] = op('source_value', query);
+    assert.equal(hit.value, 0);
+    assert.deepEqual(op('source_value', { ...query, date: '2026-01-12' }), []);
+    assert.deepEqual(op('source_value', { ...query, segment: 'mobile' }), []);
+    importDocs(store, [{ ...doc, facts: [{ ...doc.facts[0], row: { ...doc.facts[0].row, orders_index: 5 } }] }], { notify: false });
+    const snapshot = op('knowledge-source', { version: hit.version, loc: hit.loc });
+    assert.equal(snapshot.rows[0].value.orders_index, 0);
+    assert.throws(() => op('knowledge-source', { version: hit.version, loc: 'Sales!A99' }), /отсутствует/);
+  } finally {
+    store.close();
+  }
+});
 function dbAt(path = ':memory:') {
   const store = openStore(path);
   initEvidence(store.db);

@@ -1,13 +1,19 @@
-// Controls the web interface only. Existing pages and integration APIs remain available.
-export const showConfluence = false;
+import { createContext, useContext } from 'react';
 
-export const visibleTrackers = (['redmine', 'confluence'] as const)
-  .filter(service => service === 'redmine' || showConfluence);
+export const BridgePages = createContext(false);
 
-export function visibleTrackerStep(step: string) {
-  return showConfluence || !['page_search', 'page_read', 'page_draft'].includes(step);
+function trackingVisibility(showConfluence: boolean) {
+  return {
+    showConfluence,
+    visibleTrackers: (['redmine', 'confluence'] as const).filter(service => service === 'redmine' || showConfluence),
+    visibleTrackerStep: (step: string) => showConfluence || !['page_search', 'page_read', 'page_draft'].includes(step),
+    hiddenDemoPage: (href: string) => !showConfluence && /#(?:demo-page|knowledge)(?:\/|$)/.test(href),
+  };
 }
 
-export function hiddenDemoPage(href: string) {
-  return !showConfluence && /#demo-page(?:\/|$)/.test(href);
+const redmineOnly = trackingVisibility(false);
+const withPages = trackingVisibility(true);
+
+export function useTrackingVisibility() {
+  return useContext(BridgePages) ? withPages : redmineOnly;
 }

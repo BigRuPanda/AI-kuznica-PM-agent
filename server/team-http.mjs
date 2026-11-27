@@ -1,5 +1,6 @@
 import { initSourcePolicy, approveSource, sourcePermission, importApproved, sourceHistory, protectedSources, protectedProducts } from './source-policy.mjs';
 import { operations as catalog, workspaceOperation } from './workspace-operations.mjs';
+import { knowledge } from './knowledge.mjs';
 import { createServer } from 'node:http';
 import { dirname, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -401,6 +402,7 @@ export function createTeamApp({
             integrations: connectionInfo(db, user, env),
             bridgeEnabled: user.role !== 'judge' && !!env.SIGNAL_BRIDGE_URL && !env.SOURCE_ARCHIVE_SHA256,
           });
+        if (op === 'knowledge') return reply(200, knowledge(db, user));
         if (op === 'invite') {
           admin(user);
           return reply(200, { code: accounts.invite(user.space) });

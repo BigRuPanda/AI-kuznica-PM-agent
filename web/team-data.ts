@@ -92,6 +92,7 @@ export type Release = {
   related_task_ids: string;
 };
 export type Home = {
+  bridgeEnabled?: boolean;
   integrations: Record<'redmine' | 'confluence', import('./tracking').Integration>;
   user: User;
   cases: Case[];
@@ -234,6 +235,7 @@ export type Msg = {
     selection?: import('./range-chart').GraphSelection;
     checkedAt?: string;
     readSources?: {url:string;label:string;detail?:string}[];
+    closingQuotes?: { key: string; text: string; author?: string }[];
     suggestions?: { calc: string; cards: string[]; title: string; source?: string }[];
     actions?: {
       canConfirm?: boolean;

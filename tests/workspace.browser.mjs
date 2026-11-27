@@ -17,6 +17,7 @@ import { workJobs } from '../server/workbench.mjs';
 import { workspaceOperation } from '../server/workspace-operations.mjs';
 import { readMaterial, saveMaterial } from '../server/materials.mjs';
 import { seedWorkspace, fixtureEnv } from './workspace-fixture.mjs';
+import { saveClosure } from '../server/redmine-bridge.mjs';
 
 const role = (p, name) => p.getByRole('button', { name, exact: true });
 const field = (p, name) => p.getByLabel(name);
@@ -277,6 +278,16 @@ function transport(url, options) {
   const tool = (name, args) => respond({tool_calls: [{id: 'fixture', type: 'function', function: {
     name, arguments: JSON.stringify(args)
   }}]});
+  const inquiry = req.messages.findLast(message => message.role === 'user')?.content || '';
+  if (inquiry.includes('Redmine #731')) {
+    const last = req.messages.at(-1);
+    if (last.role !== 'tool') return inquiry.includes('комментарий при закрытии')
+      ? tool('issue_read', { key: '731' }) : tool('page_read', { issueKey: '731' });
+    const value = JSON.parse(last.content);
+    if (value.error) return respond({ content: value.error });
+    if (value.closingNote) return tool('page_read', { issueKey: '731' });
+    return respond({ content: 'Страница прочитана. Показатели взяты из исходного отчёта Метрики.' });
+  }
   if (req.tools?.some(t => t.function.name === 'selection_context') && req.messages.at(-1).role !== 'tool')
     return tool('search', {query:'Kaspersky', kinds:['interview']});
   if (req.tools?.[0]?.function.name === 'record_findings')
@@ -310,8 +321,27 @@ test('Softline workspace, upgrade and browser journeys', async t => {
     TELEGRAM_WEBHOOK_SECRET:'workspace-fixture-secret',
     LLM_BACKEND:'api', LLM_DATA_MODE:'analysis', PYTHON_BIN:process.env.PYTHON_BIN,
     LLM_BASE_URL:'http://localhost/v1', LLM_MODEL:'fixture'};
+  const task = { key: 'Redmine #731', url: 'https://redmine.test/issues/731', title: 'Закрытие с результатом 731',
+    description: 'Проверить отчёт', status: 'Закрыта', comments: [] };
+  let bridgeReference = '';
+  function send(url, options) {
+    const target = new URL(url);
+    if (target.port !== '8731') return transport(url, options);
+    const data = options?.body && JSON.parse(options.body);
+    if (target.pathname === '/tasks') {
+      bridgeReference = data.reference;
+      return Response.json({ reference: data.reference, report_id: data.report_id, redmine_id: 731, url: task.url });
+    }
+    if (target.pathname === '/issue-options') return Response.json({ priorities: [], trackers: [], assignees: [] });
+    if (target.pathname === '/tasks/' + bridgeReference + '/details') return Response.json(task);
+    if (target.pathname === '/tasks/' + bridgeReference + '/changes') {
+      task.comments.push({ author: 'Автор', text: data.changes.comment + '\n' + data.marker });
+      return Response.json({ key: task.key, url: task.url });
+    }
+    throw Error('Неожиданный запрос к Signal Bridge ' + target.pathname);
+  }
   const start = () => createTeamApp({
-    base:join(dir,'releases.sqlite'), background:false, env, send:transport,
+    base:join(dir,'releases.sqlite'), background:false, env, send,
     sendMail:async (text, _env, to) => mail.push({ text, to }),
   });
   for (let n = 0; n < 2; n++) {
@@ -1186,6 +1216,7 @@ test('Softline workspace, upgrade and browser journeys', async t => {
       await go(p,'settings');
       await visible(p.getByRole('heading',{name:'Redmine',exact:true}));
       assert.equal(await p.getByText(/Confluence/i).count(),0);
+      assert.equal(await p.getByRole('navigation').getByRole('link', {name:'База знаний'}).count(),0);
     }
     await go(admin,caseRoute);
     const panel=admin.locator('.task-panel');
@@ -1232,6 +1263,94 @@ test('Softline workspace, upgrade and browser journeys', async t => {
     assert.equal(await msg.getByText(/Прочитана страница|Результаты приёмки/).count(),0);
     await go(judge,issueHref.slice(1));
     await visible(judge.getByRole('alert').first());
+  });
+
+  await journey('a previously imported workbook links back to Sources without Bridge', async () => {
+    const db = app.space('team').db;
+    const {version} = db.prepare("SELECT version FROM documents WHERE lower(file) LIKE '%.xlsx' LIMIT 1").get();
+    await go(admin, 'knowledge-source/' + version);
+    await admin.locator('main').getByRole('link', {name:'Источники', exact:true}).click();
+    await visible(admin.getByRole('heading', {name:'Источники', exact:true}));
+  });
+
+  await journey('Signal Bridge publishes a closed result with versioned Excel and hides it from a second account', async () => {
+    env.SIGNAL_BRIDGE_URL = 'http://localhost:8731';
+    env.APP_BASE_URL = base;
+    const store = app.space('team');
+    const owner = (await app.accounts.login({login:'fixture-admin',password:'fixture-password'})).user;
+    const post = async (page, op, data = {}) => {
+      const response = await page.request.post(base + '/api/team/' + op, { data });
+      assert.ok(response.ok(), await response.text());
+      return response.json();
+    };
+    const report = { start: '2026-05-11', end: '2026-05-24', status: 'Снижение', web: 'https://metrika.test/report',
+      periods: [[100, 20], [90, 12]] };
+    const quote = 'Сверили вручную.\nДанные подтверждены.';
+    const book = text => ({ file:'Документация 731.xlsx', facts: [{kind:'competitor', loc:'Итог!A2', text}] });
+    try {
+      const { id } = await post(admin, 'create-case', {title:'Личный результат 731', product:'Kaspersky'});
+      const draft = await post(admin, 'draft', {caseId:id, title:task.title, description:task.description});
+      await post(admin, 'confirm', {id:draft.id,revision:draft.revision});
+      store.tx(() => saveClosure(store.db, app.accounts, id, owner.id, {
+        ...task, reference:bridgeReference, issue:731, episode:1, observed:'2026-05-25',
+        closing_note:{text:quote,author:'Автор'}, report,
+      }, env, false));
+      importDocs(store, [book('Исходная ячейка 731')], {notify:false});
+      const {version} = (await post(admin,'knowledge-sources')).find(source => source.file === 'Документация 731.xlsx');
+      await admin.reload();
+      await admin.getByRole('navigation').getByRole('link', {name:'База знаний'}).click();
+      await field(admin,'Поиск по задачам, страницам и источникам').fill('731');
+      await visible(admin.getByRole('heading',{name:task.title,exact:true}));
+      assert.equal(await admin.getByRole('link',{name:'Отчёт Метрики',exact:true}).getAttribute('href'), report.web);
+      const pageUrl = await admin.getByRole('link',{name:'Страница по задаче'}).getAttribute('href');
+      await admin.getByRole('link',{name:'Оформить документацию'}).click();
+      const panel = admin.locator('.task-panel');
+      await field(panel,'Текст публикации').fill('Вывод по результату 731');
+      await field(panel,new RegExp('Документация 731.xlsx.*' + version.slice(0,12))).check();
+      const [previewResponse] = await submit(admin,'page_draft',()=>role(panel,'Подготовить страницу базы знаний').click());
+      const {id: previewId} = await previewResponse.json();
+      const preview = panel.locator('#case-draft-' + previewId);
+      await visible(preview.getByText('Источник Excel · Документация 731.xlsx'));
+      await submit(admin,'confirm',()=>role(preview,'Подтвердить запись').click());
+      await visible(preview.getByRole('link',{name:/Открыть страницу/}));
+      assert.equal(task.comments.filter(note => note.text.includes(base + '/' + pageUrl)).length, 1);
+      importDocs(store, [book('Более новая ячейка 731')], {notify:false});
+      await preview.getByRole('link',{name:/Открыть страницу/}).click();
+      await visible(admin.getByText('Вывод по результату 731',{exact:false}));
+      await admin.getByRole('link',{name:'Документация 731.xlsx',exact:true}).click();
+      await visible(admin.getByText('Исходная ячейка 731',{exact:true}));
+      await admin.locator('main').getByRole('link',{name:'База знаний',exact:true}).click();
+      await visible(admin.getByRole('heading',{name:'База знаний',exact:true}));
+
+      await member.reload();
+      await go(member,'knowledge');
+      await field(member,'Поиск по задачам, страницам и источникам').fill(task.title);
+      await visible(member.getByText('Совпадений нет.',{exact:true}));
+      assert.equal((await post(member,'knowledge')).results.some(r => r.issue === 731),false);
+      await member.goto(base + '/' + pageUrl);
+      await visible(member.getByRole('alert').filter({hasText:'Страница недоступна'}));
+      for (const [page, question] of [
+        [admin,'Прочитай комментарий при закрытии Redmine #731 и страницу'],
+        [member,'Прочитай страницу по задаче Redmine #731'],
+      ]) {
+        const thread = await post(page,'thread',{title:'База знаний 731'});
+        await post(page,'ask',{thread:thread.id,question});
+        await workJobs(store,app.accounts,env,send);
+        await go(page,'chats/' + thread.id);
+      }
+      await visible(admin.locator('blockquote').filter({hasText:'Данные подтверждены.'}));
+      assert.equal(await admin.locator('blockquote').textContent(), quote);
+      await visible(admin.getByRole('link',{name:'Отчёт Метрики при создании задачи'}));
+      await visible(admin.getByRole('link',{name:task.title,exact:false}));
+      await visible(member.getByText('Страница по задаче недоступна.',{exact:false}).first());
+      assert.equal(await member.locator('blockquote').count(),0);
+      assert.equal(await member.locator('a[href="'+pageUrl+'"]').count(),0);
+    } finally {
+      delete env.SIGNAL_BRIDGE_URL;
+      delete env.APP_BASE_URL;
+      await admin.reload();
+      await member.reload();
+    }
   });
 
   await journey('a historical period survives reload and reaches the filter, chat, MCP and saved calculations', async () => {

@@ -1,5 +1,94 @@
 import { digest } from './evidence.mjs';
 import { escapeXml } from './tracker-clients.mjs';
+import { localHref } from './tracker-demo.mjs';
+
+export function issuePages(db, user, issueUrl, sharedOnly = false) {
+  return db.prepare(`
+    WITH linked(key) AS (
+      SELECT rp.page FROM redmine_results r JOIN redmine_result_pages rp ON rp.result=r.id
+      WHERE json_extract(r.body,'$.url')=? AND COALESCE(json_extract(r.body,'$.personalOwner'),'') IN ('',?)
+      UNION SELECT d.external FROM draft_actions d WHERE d.state IN ('done','partial')
+        AND json_extract(d.body,'$.kind')='page' AND json_extract(d.body,'$.target.local')=1
+        AND json_extract(d.body,'$.issue.url')=?
+    )
+    SELECT p.key,p.title,p.version FROM linked JOIN demo_pages p ON p.key=linked.key
+    JOIN cases c ON c.id=p.case_id LEFT JOIN private_wiki_pages acl ON acl.page=p.key
+    WHERE COALESCE(json_extract(c.body,'$.owner'),'') IN ('',?) AND (acl.user IS NULL OR acl.user=?)
+    ORDER BY p.key
+  `).all(issueUrl, sharedOnly ? '' : user.id, issueUrl, sharedOnly ? '' : user.id, sharedOnly ? '' : user.id)
+    .map(page => ({ ...page, url: localHref('confluence', page.key) }));
+}
+
+export function issueClosure(db, user, issueUrl, sharedOnly = false) {
+  const actor = sharedOnly ? '' : user.id;
+  const row = db.prepare(`
+    SELECT r.body FROM redmine_results r JOIN cases c ON c.id=r.case_id
+    WHERE json_extract(r.body,'$.url')=? AND COALESCE(json_extract(c.body,'$.owner'),'') IN ('',?)
+    AND COALESCE(json_extract(r.body,'$.personalOwner'),'') IN ('',?) ORDER BY r.created DESC,r.id DESC LIMIT 1
+  `).get(issueUrl, actor, actor);
+  if (!row) return {};
+  const result = JSON.parse(row.body);
+  return { closingNote: result.closing_note ?? null, originalReport: result.report ?? null };
+}
+
+export function pageByIssue(db, user, issueKey, sharedOnly = false) {
+  const number = String(issueKey).trim().replace(/^(?:Redmine\s*)?[#№]?\s*/i, '');
+  const urls = db.prepare(`
+    SELECT json_extract(body,'$.url') AS url FROM redmine_results
+      WHERE CAST(json_extract(body,'$.issue') AS TEXT)=?
+    UNION SELECT json_extract(body,'$.issue.url') AS url FROM draft_actions
+      WHERE state IN ('done','partial') AND json_extract(body,'$.kind')='page'
+      AND json_extract(body,'$.issue.key') IN (?,?,?,?)
+  `).all(number, issueKey, number, 'Redmine #' + number, '#' + number);
+  const pages = new Map(urls.filter(row => row.url)
+    .map(({ url }) => [url, issuePages(db, user, url, sharedOnly)]).filter(([, pages]) => pages.length));
+  if (pages.size !== 1) {
+    if (pages.size > 1) throw Error('Найдено несколько задач с таким номером. Укажите ключ страницы из поиска.');
+    throw Error('Страница по задаче недоступна.');
+  }
+  const [url, linked] = pages.entries().next().value;
+  const preferred = db.prepare(`
+    SELECT rp.page FROM redmine_results r JOIN redmine_result_pages rp ON rp.result=r.id
+    WHERE json_extract(r.body,'$.url')=? ORDER BY r.created DESC,r.id DESC
+  `).all(url).find(row => linked.some(page => page.key === row.page));
+  return preferred?.page || linked[0].key;
+}
+
+export function knowledge(db, user) {
+  const pages = db.prepare(`
+    SELECT p.key,p.title,p.version,p.case_id AS caseId
+    FROM demo_pages p JOIN cases c ON c.id=p.case_id LEFT JOIN private_wiki_pages acl ON acl.page=p.key
+    WHERE COALESCE(json_extract(c.body,'$.owner'),'') IN ('',?) AND (acl.user IS NULL OR acl.user=?)
+    ORDER BY p.rowid DESC
+  `).all(user.id, user.id);
+  const visiblePages = new Set(pages.map(page => page.key));
+  const results = db.prepare(`
+    SELECT r.body,r.case_id AS caseId,rp.page AS pageKey FROM redmine_results r JOIN cases c ON c.id=r.case_id
+    LEFT JOIN redmine_result_pages rp ON rp.result=r.id
+    WHERE COALESCE(json_extract(c.body,'$.owner'),'') IN ('',?)
+    AND COALESCE(json_extract(r.body,'$.personalOwner'),'') IN ('',?) ORDER BY r.created DESC,r.id DESC
+  `).all(user.id, user.id);
+  const publications = db.prepare(`
+    SELECT p.id,p.case_id AS caseId,p.created,p.body,c.title FROM published p JOIN cases c ON c.id=p.case_id
+    WHERE COALESCE(json_extract(c.body,'$.owner'),'') IN ('',?) ORDER BY p.created DESC
+  `).all(user.id);
+  return {
+    results: results.map(({body,caseId,pageKey}) => ({ ...JSON.parse(body), caseId,
+      pageKey: visiblePages.has(pageKey) ? pageKey : null })),
+    sources: excelSources(db),
+    pages,
+    publications: publications.map(({body,...publication}) => ({ ...publication, conclusion: JSON.parse(body).conclusion || '' })),
+  };
+}
+
+export function sourceLinks(db, versions, target, env) {
+  return [...new Set(versions)].map(version => {
+    const row = db.prepare("SELECT file FROM documents WHERE version=? AND lower(file) LIKE '%.xlsx'").get(version);
+    if (!row) throw Error('Версия Excel недоступна в этом пространстве');
+    const href = '#knowledge-source/' + version;
+    return { file: row.file, version, url: target.local ? href : new URL(href, env.APP_BASE_URL || 'http://127.0.0.1:8090').href };
+  });
+}
 
 export function excelSources(db) {
   return db

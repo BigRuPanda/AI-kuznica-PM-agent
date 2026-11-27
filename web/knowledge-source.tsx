@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { post, type SourceReference } from './team-data';
+import { useTrackingVisibility } from './tracking-visibility';
 
 export function SourceLink({ source, file, loc, version }: SourceReference) {
   return file && /\.(xlsx|pptx)$/i.test(file) && loc && version
@@ -27,6 +28,7 @@ function OfferCheck({version,loc}:{version:string;loc:string}) {
   {error && <p role="alert">{error}</p>}</div>;
 }
 export function SourceExtract({ version, loc }: { version: string; loc?: string }) {
+  const { showConfluence } = useTrackingVisibility();
   const [offset, setOffset] = useState<number | undefined>(),
     [data, set] = useState<Extract>(),
     [error, fail] = useState('');
@@ -49,7 +51,7 @@ export function SourceExtract({ version, loc }: { version: string; loc?: string 
   }, [version, offset, loc]);
   return (
     <section className="paper">
-      <a href="#sources">Источники</a>
+      <a href={showConfluence ? '#knowledge' : '#sources'}>{showConfluence ? 'База знаний' : 'Источники'}</a>
       {error && <p role="alert">{error}</p>}
       {data && (
         <>

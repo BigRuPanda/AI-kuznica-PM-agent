@@ -19,6 +19,32 @@ const api = {
   LLM_BACKEND: 'api',
 };
 const say = (text) => new Response(JSON.stringify({ choices: [{ message: { content: text } }] }));
+
+test('reading a task status and closing comment does not request or authorize a draft', async () => {
+  const s = open();
+  try {
+    const c = workspaceOperation(s, user, 'create-case', { title: 'QA', product: 'Astra' });
+    const thread = createThread(s.db, user, 'Redmine');
+    const draft = await workspaceOperation(s, user, 'draft', { caseId: c.id, title: 'Check', description: 'Review' });
+    const issue = await workspaceOperation(s, user, 'confirm', { id: draft.id });
+    const prompt = { thread, caseId: c.id, question: 'Прочитай статус задачи и комментарий при закрытии' };
+    const tool = (name, args) => Response.json({choices:[{message:{tool_calls:[{
+      id:'fixture', type:'function', function:{name, arguments:JSON.stringify(args)},
+    }]}}]});
+    const accounts = { publicUser: () => user };
+    enqueue(s, user, prompt);
+    await workJobs(s, accounts, api, async (_url, options) => JSON.parse(options.body).messages.at(-1).role === 'tool'
+      ? say('Статус: Новая.') : tool('issue_read', { key:issue.key }));
+    const reply = messages(s.db, user, thread).items.at(-1).body;
+    assert.equal(reply.outcome, 'done');
+    assert.deepEqual(reply.steps, ['issue_read']);
+    enqueue(s, user, prompt);
+    await workJobs(s, accounts, api, async () => tool('draft', { title:'Лишняя задача', description:'Read only' }));
+    assert.equal(s.db.prepare('SELECT count(*) n FROM draft_actions').get().n, 1);
+  } finally {
+    s.close();
+  }
+});
 function sample(s, u = user) {
   const { selection } = evaluationCase(s, u);
   const c = workspaceOperation(s, u, 'create-case', { title: 'Воронка Astra', product: 'Astra' });
