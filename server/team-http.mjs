@@ -44,6 +44,8 @@ import { remoteMcp } from './team-mcp.mjs';
 import { retainMaterial, readMaterial, attachedMaterials, materialRef, materialPreview } from './materials.mjs';
 import { access } from './chart-ranges.mjs';
 import { resumeJob } from './workbench.mjs';
+import {initPresentations,listPresentations,startPresentation,readPresentation,workPresentations} from './presentations.mjs';
+import {presentationHtml,exportPdf,exportPptx} from './presentation-export.mjs';
 
 export function createTeamApp({
   base = databasePath(),
@@ -56,7 +58,7 @@ export function createTeamApp({
     spaces = new Map(),
     legacy = new Map(),
     busy = new Set(),
-    working = new Set(),
+    working = new Set(), presenting = new Set(),
     authAttempts = new Map();
   initContacts(accounts.db);
   let stopping = false;
@@ -70,6 +72,7 @@ export function createTeamApp({
       initEvidence(s.db);
       initSourcePolicy(s.db);
       initWorkbench(s.db, env);
+      initPresentations(s.db);
 
       spaces.set(id, s);
     }
@@ -155,6 +158,10 @@ export function createTeamApp({
   async function tick() {
     if (stopping) return;
     for (const [id, s] of spaces) {
+      if (!presenting.has(id)) {
+        presenting.add(id);
+        void workPresentations(s,env,send).catch(()=>console.error('Ошибка очереди презентаций')).finally(()=>presenting.delete(id));
+      }
       if (!working.has(id)) {
         working.add(id);
         void workJobs(s, accounts, env, send)
@@ -278,6 +285,22 @@ export function createTeamApp({
       }
       const token = req.headers.cookie?.match(/(?:^|;\s*)pm_session=([A-Za-z0-9_-]+)/)?.[1] || '';
       const user = accounts.sessionUser(token);
+      const presentationRoute=p.match(/^\/api\/presentations\/([\w-]+)\/(preview|pptx|pdf)$/u);
+      if(presentationRoute && method==='GET') {
+        if(!user) return reply(401,{error:'Войдите в приложение'});
+        const [,id,format]=presentationRoute;
+        const {deck}=readPresentation(space(user.space).db,user,id);
+        if(!deck) return reply(409,{error:'Презентация ещё не готова'});
+        const baseUrl=urlBase.origin;
+        const data=format==='preview' ? presentationHtml(deck,baseUrl,Number(url.searchParams.get('slide') || 0)) :
+          format==='pdf' ? await exportPdf(deck,baseUrl,env) : await exportPptx(deck,baseUrl);
+        const mime={preview:'text/html; charset=utf-8',pptx:'application/vnd.openxmlformats-officedocument.presentationml.presentation',pdf:'application/pdf'};
+        const filename=encodeURIComponent(deck.product+' — '+deck.created+'.'+format);
+        res.writeHead(200,{'Content-Type':mime[format],'Cache-Control':'private, no-store','X-Content-Type-Options':'nosniff',
+          ...(format==='preview'?{'Content-Security-Policy':"default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'self'"}:
+            {'Content-Disposition':"attachment; filename=Signal-"+id+"."+format+"; filename*=UTF-8''"+filename})});
+        res.end(data);return;
+      }
       if (p === '/api/integrations/confluence/callback' && method === 'GET') {
         if (!user) return reply(401, { error: 'Войдите и повторите подключение Confluence' });
         await finishOAuth(space(user.space).db, user, url.searchParams, env, send);
@@ -341,6 +364,12 @@ export function createTeamApp({
         }
         const store = space(user.space),
           db = store.db;
+        if(op==='presentation-create') return reply(202,startPresentation(store,user,b.caseId,b.request));
+        if(op==='presentation-list') return reply(200,{items:listPresentations(db,user,b.caseId)});
+        if(op==='presentation-status') {
+          const {deck,...info}=readPresentation(db,user,b.id);
+          return reply(200,{...info,slides:deck?.slides.map(s=>s.title) || []});
+        }
         if (op === 'approve-source') {
           admin(user);
           if (!env.SOURCE_ARCHIVE_SHA256) throw Error('Согласование доступно в пространстве организатора.');
@@ -607,7 +636,7 @@ export function createTeamApp({
     stopping = true;
     if (timer) clearInterval(timer);
     if (server.listening) await new Promise((r) => server.close(r));
-    while (busy.size || working.size) await new Promise((r) => setTimeout(r, 50));
+    while (busy.size || working.size || presenting.size) await new Promise((r) => setTimeout(r, 50));
     for (const s of spaces.values()) s.close();
     accounts.db.close();
   }

@@ -6,6 +6,7 @@ import { Knowledge, NotificationSettings } from './notifications';
 import { SourceExtract } from './knowledge-source';
 import { EffectPlan } from './effect-plan';
 import { ReleaseDecision } from './release-decision';
+import { PresentationMaterials } from './presentations';
 import { rangeLabel, RangeChart, DAY } from './range-chart';
 import type { Attachment } from './range-chart';
 import { SavedChart } from './calculations';
@@ -1090,6 +1091,7 @@ function Investigation({
     [err, fail] = useState(''),
     [confirmation, confirm] = useState<'reset' | 'finish'>(),
     [updating, setUpdating] = useState(false);
+  const [presentationAction,setPresentationAction] = useState<HTMLSpanElement|null>(null);
   const prefix = 'pm-view/' + home.user.id + '/' + id;
   const load = useCallback(
     async () =>
@@ -1216,6 +1218,7 @@ function Investigation({
           <span className="state">{c.state}</span>
         </div>
         <div className="actions">
+          <span ref={setPresentationAction} />
           {!completed && <button onClick={openShare} disabled={updating}>Поделиться</button>}
           <button className="primary arrow-action" disabled={updating && completed} onClick={completed ? openShare : openNext}>
             {completed ? 'Поделиться' : watchNext ? 'Проверить эффект' : 'К задаче'}
@@ -1299,6 +1302,7 @@ function Investigation({
             </section>
           )}
           <PinnedMaterials caseId={id} />
+          <PresentationMaterials key={id} caseId={id} actionSlot={presentationAction} />
           <Tracking
             headingRef={taskTitle}
             documentation={section?.startsWith('documentation?') ? new URLSearchParams(section.slice(14)) : undefined}

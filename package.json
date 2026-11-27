@@ -10,7 +10,7 @@
     "mcp": "node server/mcp.mjs",
     "agent:eval": "node scripts/eval-agent.mjs",
     "model:check": "node scripts/check-model.mjs",
-    "test": "node --test demo/versions.test.mjs tests/v1.test.mjs tests/team.test.mjs tests/ranges.test.mjs tests/materials.test.mjs tests/day-comparison.test.mjs tests/tracking.test.mjs tests/notifications.test.mjs tests/release-decision.test.mjs tests/source-policy.test.mjs tests/web-search.test.mjs",
+    "test": "node --test demo/versions.test.mjs tests/v1.test.mjs tests/team.test.mjs tests/ranges.test.mjs tests/materials.test.mjs tests/day-comparison.test.mjs tests/tracking.test.mjs tests/notifications.test.mjs tests/release-decision.test.mjs tests/source-policy.test.mjs tests/web-search.test.mjs tests/presentations.test.mjs",
     "test:ui": "pnpm build && node --test tests/workspace.browser.mjs"
   },
   "dependencies": {
@@ -18,6 +18,8 @@
     "@modelcontextprotocol/sdk": "^1.26.0",
     "csv-parse": "^6.1.0",
     "google-auth-library": "^10.9.1",
+    "playwright-core": "1.65.1",
+    "pptxgenjs": "^4.0.1",
     "react": "^19.2.0",
     "react-dom": "^19.2.0",
     "zod": "^3.25.76"

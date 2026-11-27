@@ -7,6 +7,7 @@ import { join } from 'node:path';
 import { chromium } from 'playwright';
 import { createTeamApp } from '../server/team-http.mjs';
 import { workJobs } from '../server/workbench.mjs';
+import { workPresentations } from '../server/presentations.mjs';
 import { workspaceOperation } from '../server/workspace-operations.mjs';
 import { readMaterial } from '../server/materials.mjs';
 import { seedWorkspace, fixtureEnv } from './workspace-fixture.mjs';
@@ -329,6 +330,26 @@ test('Softline workspace, upgrade and browser journeys', async t => {
     await go(admin,href.slice(1));
     // Separate demo databases can both allocate the same local issue number.
     assert.equal(await admin.getByRole('heading',{name:'Задача из пространства жюри'}).count(),0);
+  });
+
+  await journey('case presentation opens both exports from one saved version on mobile', async () => {
+    await go(member,caseRoute);
+    await submit(member,'presentation-create',()=>role(member,'Собрать презентацию').click());
+    await workPresentations(app.space('team'),{},model);
+    const dialog=member.getByRole('dialog',{name:'Презентация разбора'});
+    const pdf=dialog.getByRole('link',{name:'Скачать PDF'});
+    await visible(pdf);
+    await role(dialog,'Следующий слайд').click();
+    assert.equal(await dialog.getByLabel('Выбрать слайд').inputValue(),'1');
+    assert.ok(await member.evaluate(()=>document.documentElement.scrollWidth<=innerWidth));
+    const prefix=(await pdf.getAttribute('href')).replace(/\/pdf$/,'');
+    assert.equal(await dialog.getByRole('link',{name:'Скачать PPTX'}).getAttribute('href'),prefix+'/pptx');
+    for(const [format,signature] of [['pdf','%PDF-'],['pptx','PK']]) {
+      const response=await member.request.get(base+prefix+'/'+format);
+      assert.equal(response.status(),200);
+      assert.equal((await response.body()).subarray(0,signature.length).toString(),signature);
+    }
+    await role(dialog,'Закрыть').click();
   });
 
   await journey('Signal Bridge exposes the knowledge page and its documentation form', async () => {

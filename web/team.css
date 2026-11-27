@@ -879,6 +879,10 @@ p {
   .page-head button {
     font-size: 0.85rem;
   }
+  .investigation-head .actions {
+    max-width: 100%;
+    justify-content: flex-start;
+  }
   .toolbar {
     align-items: start;
     justify-content: flex-start;
