@@ -12,7 +12,7 @@ function namedProducts(text,catalog) {
 
 // A single dated week is an exact lookup. Leave chart requests, explanations,
 // multi-period analyses and compound tasks in the analytical workflow.
-export function weeklySourceAnswer(db, question, previous, { from, through, full, snapshot, now = Date.now() } = {}) {
+export function weeklySourceAnswer(db, question, previous, { from, through, full, snapshot, versions, now = Date.now() } = {}) {
   const q = question.toLowerCase();
   const sameWeek = /(?:ту же|эту же|за ту же самую) недел/u.test(q);
   if (!/недел/u.test(q) || /почему|объясни|причин|график|построй|релиз|задач|визит|конверси|динамик|средн(?:ее|ий)|прогноз|интервью|до и после|и (?:составь|подготовь|найди|создай|посчитай изменение)/u.test(q)) return;
@@ -21,7 +21,7 @@ export function weeklySourceAnswer(db, question, previous, { from, through, full
   if (!date) return;
   const revenue = /выручк/u.test(q);
   if (!revenue && !/индекс.{0,28}заказ|заказ.{0,28}индекс/u.test(q) && !(sameWeek && previous?.weeklyContext)) return;
-  const current = listSales(db);
+  const current = listSales(db).filter(row=>!versions || versions.includes(row.version));
   const weeks = snapshot ? (snapshot.summary || []).flatMap(series=>
     (series.rows || []).map(row=>({...row,product:series.product}))) : current;
   const included = week => observationWithin({date:week,step_days:7},from,through);
@@ -54,7 +54,7 @@ export function weeklySourceAnswer(db, question, previous, { from, through, full
         return [{ version:r.version,file,loc:r.source.slice(prefix.length),product,date:r.week,
           metric:'orders_index',value:r.value,comment:r.partial ? 'Неполная неделя' : undefined }];
       }) : sourceValues(db,{product,metric:'orders_index',date:requestedDate});
-      rows = rows.filter(r=>Number.isFinite(r.value));
+      rows = rows.filter(r=>Number.isFinite(r.value) && (!versions || versions.includes(r.version)));
     }
     if (!rows.length) {
       const source = snapshot ? 'На выбранном экране' : 'В доступных продажах';

@@ -3,9 +3,10 @@ import assert from 'node:assert/strict';
 import { openStore } from '../server/store.mjs';
 import { analysisView, initEvidence, importDocs } from '../server/evidence.mjs';
 import { grant } from '../server/chart-ranges.mjs';
-import { initWorkbench, createThread, enqueue, workJobs, messages } from '../server/workbench.mjs';
+import { answer, initWorkbench, createThread, enqueue, workJobs, messages } from '../server/workbench.mjs';
 import { webQuestion } from '../server/web-search.mjs';
 import { competitorQuestion } from '../server/competitor-chat.mjs';
+import { releaseDecision } from '../server/release-decision.mjs';
 
 const user = {id:'tester', name:'Продакт', role:'admin'};
 function context(t) {
@@ -188,4 +189,56 @@ test('carousel chat links the release, its task and actual clicks from the impor
   assert.ok(broad.readSources.some(s=>s.label.includes('Clicks!')));
   assert.match((await ask(' На 2026-10-30.')).text,/R-65/);
   assert.match((await ask(' На 2026-08-10.')).text,/нет такой выпущенной/);
+  const through='2026-09-01';
+  const version=store.db.prepare("SELECT version FROM facts WHERE loc='Calendar!A2'").get().version;
+  const historical=await answer(store,user,{thread,question:'После обновления карусели изменились визиты с кликом? На 2026-10-30.',
+    decisionReleaseId:'R-50',decisionThrough:through,
+    releaseDecisionSnapshot:{releaseId:'R-50',product:'ЛК',through,releaseVersions:[version],metricVersions:[version]}},
+    {},()=>assert.fail('Expected a local archive answer'));
+  assert.equal(historical.decisionThrough,through);
+  assert.match(historical.text,/12\/14/u);
+  assert.doesNotMatch(historical.text,/14 → 28|R-65/u);
+});
+
+test('carousel chat on a saved screen admits only the selected metric versions and calendar window', async t => {
+  const store=openStore(':memory:',{seedDemo:false});
+  t.after(()=>store.close());
+  initEvidence(store.db);
+  initWorkbench(store.db);
+  const row=(kind,loc,data)=>({kind,loc,row:data});
+  const calendar={file:'calendar.xlsx',facts:[
+    row('releases','Calendar!A2',{release_id:'R-50',release_type:'minor',status:'выпущен',release_date:'2026-08-20',
+      description:'Прокрутка карусели в ЛК',affected_metrics:'lk_reco_click_visits'}),
+    row('releases','Calendar!A3',{release_id:'R-65',release_type:'analytics',status:'выпущен',release_date:'2026-08-01',
+      description:'Начало измерения просмотров',affected_metrics:'lk_reco_viewed_visits,lk_reco_ctr'}),
+  ]};
+  const book=after=>({file:'clicks.xlsx',facts:Array.from({length:29},(_,i)=>row('metrics','Clicks!A'+(i+2),{
+    date:new Date(Date.UTC(2026,7,6+i)).toISOString().slice(0,10),product:'ЛК',
+    metric_id:'lk_reco_click_visits',segment:'mobile',unit:'visits',value:i<=14 ? 1 : after,
+  }))});
+  importDocs(store,[calendar,book(2)],{notify:false});
+  const thread=createThread(store.db,user,'Сохранённый ЛК');
+  const view=analysisView(store.db,{product:'ЛК',from:'2026-08-06',through:'2026-09-03'});
+  grant(store.db,view.id,'thread',thread);
+  const decision=releaseDecision(store.db,user,{product:'ЛК',releaseId:'R-50',through:view.cut});
+  const ask=async()=>{
+    enqueue(store,user,{thread,screen:{calc:view.id},question:'Что известно про карусель рекомендаций ЛК после выкладки?'});
+    await workJobs(store,{publicUser:()=>user},{},()=>assert.fail('Expected a local archive answer'));
+    return messages(store.db,user,thread).items.at(-1).body;
+  };
+  const confirmed=await ask();
+  assert.match(confirmed.text,/14 → 28/u);
+  assert.ok(confirmed.readSources.some(s=>s.label.includes('Clicks!')));
+  assert.ok(confirmed.readSources.every(s=>!s.label.includes('Calendar!A3')));
+  importDocs(store,[book(99)],{notify:false});
+  const changed=await ask();
+  assert.match(changed.text,/в выбранном снимке.{0,60}версии/iu);
+  assert.doesNotMatch(changed.text,/1.?386/u);
+  assert.ok(changed.readSources.every(s=>!s.label.includes('Clicks!')));
+  const frozen=await answer(store,user,{thread,question:'Как изменились визиты с кликом после выкладки?',
+    decisionReleaseId:'R-50',decisionThrough:view.cut,
+    releaseDecisionSnapshot:{releaseId:'R-50',product:'ЛК',through:view.cut,releaseVersions:view.releaseVersions,
+      metricVersions:view.metricVersions,decision}}, {},()=>assert.fail('Expected a local archive answer'));
+  assert.match(frozen.text,/14 → 28/u);
+  assert.ok(frozen.readSources.some(s=>s.url.includes(view.metricVersions[0]) && s.label.includes('Clicks!')));
 });

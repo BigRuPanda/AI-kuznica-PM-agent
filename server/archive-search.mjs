@@ -130,10 +130,16 @@ function archiveScope(db, {product,from,through,full,snapshot}) {
   const isComplete=r=>!full || !r.data?.partial && !/неполн/i.test(r.data?.comment || '');
   const releaseVersions = snapshot?.releaseVersions && new Set(snapshot.releaseVersions);
   const metricVersions = snapshot?.metricVersions && new Set(snapshot.metricVersions);
+  const versions = {releases:releaseVersions,
+    backlog:snapshot?.backlogVersions && new Set(snapshot.backlogVersions),
+    dictionary:snapshot?.dictionaryVersions && new Set(snapshot.dictionaryVersions)};
   const records=idx.records.filter(r=>visible(r) && inPeriod(r.data?.release_date || r.data?.created_date || r.data?.date) &&
-    (r.kind!=='releases' || !releaseVersions || releaseVersions.has(r.refs[0].version)));
+    (!versions[r.kind] || versions[r.kind].has(r.refs[0].version)));
   const indexedReleases = new Set(records.filter(r=>r.kind==='releases').map(r=>r.refs[0].version+'/'+r.refs[0].loc));
-  for (const row of snapshot?.timeline || []) {
+  const decision = snapshot?.decision?.release;
+  const frozenRelease = decision ? [{...decision,data:{release_id:decision.id,release_date:decision.date,
+    description:decision.description,related_task_ids:decision.relatedTaskIds?.join(',')}}] : [];
+  for (const row of [...(snapshot?.timeline || []),...frozenRelease]) {
     if (!row.version || !row.loc || !row.file || !row.data?.release_date ||
         indexedReleases.has(row.version+'/'+row.loc) || !inPeriod(row.data.release_date)) continue;
     const text=values(row.data), record={kind:'releases',data:row.data,text,

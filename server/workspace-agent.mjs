@@ -549,7 +549,10 @@ export async function runAssistant(
               '\n\nОснования из разбора:\n' + citations;
           }
         }
-        const scope = b.analysisPeriod || b.screen?.requested;
+        const selectedPeriod = b.analysisPeriod || b.screen?.requested;
+        const releaseSnapshot = b.decisionThrough && b.releaseDecisionSnapshot;
+        const scope = releaseSnapshot ? {...selectedPeriod,
+          through:[selectedPeriod?.through,releaseSnapshot.through].filter(Boolean).sort()[0]} : selectedPeriod;
         if (scope && ['view', 'chart'].includes(op)) {
           if (scope.from && (!args.from || args.from < scope.from)) args.from = scope.from;
           if (scope.through && (!args.through || args.through > scope.through)) args.through = scope.through;
@@ -636,6 +639,9 @@ export async function runAssistant(
             }
           }
           const execute = () => {
+            if (op==='release_decision' && releaseSnapshot?.decision && args.releaseId===releaseSnapshot.releaseId &&
+                args.through===releaseSnapshot.through && (!args.product || args.product===releaseSnapshot.product))
+              return releaseSnapshot.decision;
             if (op === 'chart' && research?.requestedChart && !args.releaseId) {
               const m = readMaterial(db, user, research.requestedChart.id, shared);
               const metric = m.plot.base.metric;
@@ -693,6 +699,16 @@ export async function runAssistant(
             return workspaceOperation(store, user, op, args, env, send, shared, digest(job + '/' + signature), true);
           };
           const record = (r) => {
+            if (releaseSnapshot && ['search','source_value'].includes(op) && Array.isArray(r)) {
+              const versions = {
+                releases:releaseSnapshot.releaseVersions, metrics:releaseSnapshot.metricVersions, sales:releaseSnapshot.salesVersions,
+                backlog:releaseSnapshot.backlogVersions, dictionary:releaseSnapshot.dictionaryVersions,
+              };
+              r = r.filter(row=>{
+                const kind = op==='search' ? row.kind : ['orders_index','family_orders_idx'].includes(row.metric) ? 'sales' : 'metrics';
+                return !versions[kind] || versions[kind].includes(row.version);
+              });
+            }
             if (matches)
               r = { ...r, similar: matches.items.slice(0, 5).map((x) => ({ key: x.key, title: x.title })) };
             if (shared && op === 'overview') r = { ...r, cases: r.cases.filter((c) => !c.body.owner) };

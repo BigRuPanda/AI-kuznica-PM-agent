@@ -195,7 +195,8 @@ export function releaseObservationAnswer(store, user, b, env, shared, history, {
   const boundedCutoff = date => date === '' ? '' : [date,through].filter(Boolean).sort()[0];
   const asOf = boundedCutoff(requestedCutoff ?? b.analysisPeriod?.through ?? b.screen?.asOf);
   const within = date => (!from || date >= from) && (!asOf || date <= asOf);
-  const validReleaseVersion = version => !snapshot?.releaseVersions || snapshot.releaseVersions.includes(version);
+  const releaseVersions = snapshot && (snapshot.releaseVersions || (snapshot.timeline || []).map(row=>row.version).filter(Boolean));
+  const validReleaseVersion = version => !releaseVersions || releaseVersions.includes(version);
   const segmentIds = Object.entries(segments).filter(([, pattern]) => pattern.test(plain)).map(([id]) => id);
   const metricIds = [...new Set(plain.match(/(?<![\p{L}\p{N}_])[a-z][a-z0-9]*(?:_[a-z0-9]+)+(?![\p{L}\p{N}_])/gu) || [])];
   const previous = history.at(-1)?.body.releaseObservation;
@@ -217,29 +218,36 @@ export function releaseObservationAnswer(store, user, b, env, shared, history, {
     const matching = facts(db, 'releases').filter(row => isAccountFeature(row) &&
       (selected ? row.data.release_id === selected : /карусел/iu.test(row.data.description)) &&
       String(row.data.affected_metrics).split(/\s*,\s*/u).includes('lk_reco_click_visits'));
-    if (matching.length === 1) {
+    const frozen = snapshot?.decision;
+    const savedRelease = frozen?.scope==='account' && frozen.release?.id===selected &&
+      frozen.release?.metrics?.includes('lk_reco_click_visits') ? frozen.release : undefined;
+    const reuse = savedRelease && !from && (!asOf || asOf===frozen.asOf) && !segmentIds.length &&
+      baselineWeeks===undefined && observationWeeks===undefined;
+    if (matching.length === 1 || reuse) {
       const row = matching[0];
+      const releaseDate = reuse ? savedRelease.date : row.data.release_date;
+      const releaseVersion = reuse ? savedRelease.version : row.version;
       const result = { mode: 'release-observation', outcome: 'done', steps: ['release_decision'], readSources: [] };
       if (snapshot?.product && snapshot.product !== 'ЛК')
         return { ...result, text:'Выбранный снимок относится к другому продукту. Откройте срез по личному кабинету.' };
       if (asOf === '' || asOf && asOf > localDate.format())
         return { ...result, text: 'Укажите одну дату среза, не позднее сегодняшней.' };
-      if (!within(row.data.release_date) || !validReleaseVersion(row.version))
+      if (!within(releaseDate) || !validReleaseVersion(releaseVersion))
         return { ...result, text: 'К указанной дате в календаре нет такой выпущенной функции ЛК.' };
       if ([baselineWeeks, observationWeeks].some(n => n !== undefined && (n < 1 || n > 12)))
         return { ...result, text: 'Для сравнения выберите от 1 до 12 недель с каждой стороны.' };
-      const decision = releaseDecision(db, user, { product: 'ЛК', releaseId: row.data.release_id, through: asOf }, shared,
-        { segment: segmentIds[0], baselineWeeks, observationWeeks });
+      const decision = reuse ? frozen : releaseDecision(db, user, { product: 'ЛК', releaseId: row.data.release_id, through: asOf }, shared,
+        { segment:segmentIds[0], baselineWeeks, observationWeeks, from, releaseVersions,
+          metricVersions:snapshot ? snapshot.metricVersions || [] : undefined,dictionaryVersions:snapshot?.dictionaryVersions });
       const { release, delivered, accountEvidence } = decision;
-      const tasks = delivered.filter(task=>!from || task.date >= from);
-      const coversBaseline = !from || addDays(row.data.release_date,-7*(baselineWeeks ?? 2)) >= from;
-      const comparison = accountComparison && coversBaseline && accountEvidence;
+      const tasks = delivered.filter(task=>(!from || task.date >= from) &&
+        (!snapshot?.backlogVersions || snapshot.backlogVersions.includes(task.version)));
+      const comparison = accountComparison && accountEvidence;
       result.readSources = [release, ...tasks, ...(comparison ? comparison.sources : [])].map(s => ref(s));
       return { ...result, product: decision.product, text: [
         release.id + ' · ' + release.date + '. ' + release.description + '.',
         tasks.length && 'Связанные задачи: ' + tasks.map(t => t.id + ' — ' + t.title).join(', ') + '.',
         ...(comparison ? comparison.lines : []),
-        accountComparison && !coversBaseline && 'Период до релиза начинается раньше выбранного среза.',
       ].filter(Boolean).join('\n\n') };
     }
   }
@@ -303,7 +311,8 @@ export function releaseObservationAnswer(store, user, b, env, shared, history, {
     return ask('В журнале семейства ' + current.product + ' ' + (params.asOf ? 'на ' + params.asOf + ' ' : '') +
       'нет выпущенного релиза ' + params.releaseId + '. Уточните релиз или дату среза.');
   const tasks = options.tasks.filter(t => t.releaseIds.includes(release.id) && (!from || t.created >= from) &&
-    (!params.asOf || t.created && t.created <= params.asOf));
+    (!params.asOf || t.created && t.created <= params.asOf) &&
+    (!snapshot?.backlogVersions || snapshot.backlogVersions.includes(t.source?.version)));
   const task = params.taskId ? tasks.find(t => t.id === params.taskId) : tasks.length === 1 ? tasks[0] : undefined;
   const title = release.title?.trim().replace(/[.!?]?$/u, '.');
   const lines = [[release.id + ' вышел ' + release.date + '.', title].filter(Boolean).join(' '),
@@ -342,7 +351,7 @@ export function releaseObservationAnswer(store, user, b, env, shared, history, {
     return clarify('Сколько недель взять до релиза и сколько после? Укажите для каждого окна от 1 до 12 недель.');
 
   const { metric: metricId, releaseId, segment } = params;
-  const useScreen = snapshot?.product === current.product;
+  const useScreen = snapshot?.product === current.product && Array.isArray(snapshot.summary);
   const screenControl = useScreen ? snapshot.summary?.[1]?.product ?? '' : undefined;
   const allowedControls = useScreen ? options.controls.filter(product=>product === screenControl) : options.controls;
   const savedControl = useScreen ? screenControl : [b.caseId === current.id && b.screen?.control,current.body.watch?.control]
@@ -357,10 +366,11 @@ export function releaseObservationAnswer(store, user, b, env, shared, history, {
   const { baseline, observed, control } = effect;
   if (from && baseline?.from < from) return clarify('Период до релиза начинается раньше выбранного среза.');
   const versions = metricId === 'orders_index'
-    ? snapshot?.summary?.flatMap(series=>(series.rows || []).map(row=>row.version))
+    ? snapshot?.summary?.flatMap(series=>(series.rows || []).map(row=>row.version)) || snapshot?.salesVersions
     : snapshot?.metricVersions;
   const observedRows = [baseline,observed,control?.baseline,control?.observed].flatMap(period=>period?.sources || []);
-  if (versions && observedRows.some(row=>!versions.includes(row.version)))
+  if (versions && observedRows.some(row=>!versions.includes(row.version)) ||
+      effect.breaks?.some(row=>!validReleaseVersion(row.version)))
     return clarify('В выбранном снимке нет подтверждённых версий всех строк для этого сравнения.');
   lines.push('Срез на ' + effect.asOf + ' · ' + effect.plan.title + ' (' + metricId + ') · ' + segment + '.');
   const step = metricStepDays(metricId);
@@ -392,7 +402,8 @@ export function releaseObservationAnswer(store, user, b, env, shared, history, {
   if (params.metrika) lines.push(metrikaStatus(db, env, effect));
   const representative = p => p?.sources.length > 5 ? [p.sources[0], p.sources.at(-1)] : p?.sources || [];
   const unique = new Map(result.readSources.map(item => [item.url, item]));
-  if (metric.source) unique.set(ref(metric.source).url, ref(metric.source));
+  if (metric.source && (!snapshot?.dictionaryVersions || snapshot.dictionaryVersions.includes(metric.source.version)))
+    unique.set(ref(metric.source).url, ref(metric.source));
   for (const row of [...representative(baseline), ...representative(observed),
     ...representative(control?.baseline), ...representative(control?.observed), ...(effect.breaks || [])]) {
     const citation = ref(row, row.date + (Number.isFinite(row.value) ? ' · ' + fmt(row.value) : ''));

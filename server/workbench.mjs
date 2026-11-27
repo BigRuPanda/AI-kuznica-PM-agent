@@ -655,13 +655,18 @@ export async function answer(store, user, b, env = process.env, send = fetch, jo
   if (focus?.id) b = { ...b, materialIds: [focus.id], screen: undefined };
   const history = recentDialogue(db, b.thread, b.questionSeq);
   const last = history.at(-1)?.body;
+  const decisionContext = {decisionReleaseId:b.decisionReleaseId,decisionThrough:b.decisionThrough};
   const previous = last && (!b.caseId || last.caseId === b.caseId) &&
-    (!b.decisionReleaseId || last.decisionReleaseId === b.decisionReleaseId) ? last : undefined;
+    (!b.decisionReleaseId || last.decisionReleaseId === b.decisionReleaseId && last.decisionThrough === b.decisionThrough)
+    ? last : undefined;
   const selected = focus ? undefined : screen;
+  const decisionSnapshot = b.decisionReleaseId && b.releaseDecisionSnapshot?.releaseId === b.decisionReleaseId
+    ? b.releaseDecisionSnapshot : undefined;
   const from = [b.analysisPeriod?.from,selected?.requested?.from || selected?.base].filter(Boolean).sort().at(-1);
-  const through = [b.analysisPeriod?.through,selected?.cut || selected?.requested?.through].filter(Boolean).sort()[0];
-  const archiveScope = { product:activeCase?.product || selected?.product || b.product,
-    from,through,full:selected?.full,snapshot:selected };
+  const through = [b.analysisPeriod?.through,selected?.cut || selected?.requested?.through,
+    decisionSnapshot?.through || b.decisionThrough].filter(Boolean).sort()[0];
+  const archiveScope = { product:activeCase?.product || selected?.product || decisionSnapshot?.product || b.product,
+    from,through,full:selected?.full,snapshot:selected || decisionSnapshot };
   const sourceQuestion = !focus && !b.rangeId && !b.materialIds?.length && !last?.rangeId;
   if (sourceQuestion) {
     if (from && through && from > through)
@@ -674,16 +679,16 @@ export async function answer(store, user, b, env = process.env, send = fetch, jo
         const evidence = archiveEvidence(db,b.question,archiveScope).filter(r=>['releases','backlog','task-link','measurement'].includes(r.kind));
         const known = await archiveAnswer(store,b.question,evidence,{},send,job);
         if (known) return {...known,text:known.text+'\n\n'+absent,archiveQuestion:b.question,
-          caseId:b.caseId,decisionReleaseId:b.decisionReleaseId};
+          caseId:b.caseId,...decisionContext};
       }
       return {mode:'archive',outcome:'clarification',steps:['search'],readSources:[],
         text:absent+' Проверьте идентификатор в календаре релизов или бэклоге.'};
     }
     const { releaseObservationAnswer } = await import('./release-observation-chat.mjs');
     const release = releaseObservationAnswer(store,user,b,env,shared,previous ? [history.at(-1)] : [],archiveScope);
-    if (release) return {...release,decisionReleaseId:b.decisionReleaseId};
-    const weekly = weeklySourceAnswer(db,b.question,previous,archiveScope);
-    if (weekly) return {...weekly,caseId:b.caseId,decisionReleaseId:b.decisionReleaseId};
+    if (release) return {...release,...decisionContext};
+    const weekly = weeklySourceAnswer(db,b.question,previous,{...archiveScope,snapshot:selected,versions:decisionSnapshot?.salesVersions});
+    if (weekly) return {...weekly,caseId:b.caseId,...decisionContext};
     if (!b.decisionReleaseId && !b.analysisPeriod && env.LLM_DATA_MODE==='analysis') {
       const brief = await briefConversation(store,job,b.question,activeCase,env,send,history);
       if (brief) return {...brief,caseId:b.caseId};
@@ -725,7 +730,7 @@ export async function answer(store, user, b, env = process.env, send = fetch, jo
     const evidence = archiveEvidence(db, query, {...archiveScope,releaseId});
     if (evidence.length && (!activeCase && !b.decisionReleaseId || explicitArchive || evidence.some(row=>row.kind==='task-link'))) {
       return { ...await archiveAnswer(store, query, evidence, env, send, job), archiveQuestion: b.question,
-        decisionReleaseId:b.decisionReleaseId,
+        ...decisionContext,
         ...(activeCase ? {caseId:activeCase.id,product:activeCase.product} : {}) };
     }
     if (taskQuery && !activeCase && !b.decisionReleaseId &&
