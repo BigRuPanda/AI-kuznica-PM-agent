@@ -129,6 +129,72 @@ test('Softline workspace, upgrade and browser journeys', async t => {
     }
   });
 
+  await journey('an invitation opens registration in an existing signed-out tab and updates its code', async () => {
+    const guest = await browser.newPage();
+    guest.setDefaultTimeout(4000);
+    guest.on('pageerror', err => errors.push(err.message));
+    try {
+      await guest.goto(base);
+      await visible(guest.getByRole('heading', {name:'Вход', exact:true}));
+      const codeA = app.accounts.invite('team');
+      const codeB = app.accounts.invite('team');
+      const codeInput = field(guest,'Код приглашения');
+      await guest.goto(base + '/#join/' + codeA);
+      await visible(guest.getByRole('heading', {name:'Создать аккаунт', exact:true}));
+      assert.equal(await codeInput.inputValue(), codeA);
+      await field(guest,'Имя').fill('Первое приглашение');
+      await guest.goto(base + '/#join/' + codeB);
+      await guest.waitForFunction(code => document.querySelector('input[name="code"]')?.value === code, codeB);
+      assert.equal(await codeInput.inputValue(), codeB);
+      assert.equal(await field(guest,'Имя').inputValue(), '');
+
+      await field(guest,'Имя').fill('Участник по приглашению');
+      await field(guest,'Логин').fill('invited-user');
+      await field(guest,'Пароль').fill('fixture-password');
+      await submit(guest,'register',()=>role(guest,'Создать аккаунт').click());
+      await guest.waitForURL(base + '/#overview');
+      await guest.getByRole('link',{name:'Профиль',exact:true}).click();
+      const account = guest.getByRole('region',{name:'Учётная запись'});
+      await visible(account.getByRole('heading',{name:'Участник по приглашению',exact:true}));
+      await visible(account.getByText('Участник',{exact:true}));
+    } finally { await guest.close(); }
+  });
+
+  await journey('a new case started from the case list does not inherit a previous release', async () => {
+    try {
+      await admin.getByRole('navigation').getByRole('link',{name:'Разборы',exact:true}).click();
+      await admin.getByRole('link',{name:'Журнал релизов →',exact:true}).click();
+      await admin.getByRole('link',{name:/DEMO-R/}).click();
+      await role(admin,'Запланировать оценку').click();
+      const releaseSelect = field(admin,'Связанный релиз');
+      assert.equal(await releaseSelect.inputValue(), 'DEMO-R');
+      await field(admin,'Вопрос или гипотеза').fill('Оценить новый релиз');
+      await field(admin,'Продукт').fill('Kaspersky');
+      await submit(admin,'create-case',()=>role(admin,'Создать личный разбор').click());
+      await visible(admin.getByRole('heading',{name:'Оценить новый релиз',exact:true}));
+      await admin.getByRole('link',{name:'← Разборы',exact:true}).click();
+      await role(admin,'Новый разбор').click();
+      assert.equal(await releaseSelect.inputValue(), '', 'У самостоятельного разбора релиз изначально не выбран');
+    } finally { await go(admin,'material/'+fixture.report); }
+  });
+
+  await journey('a judge can register from a direct invitation and see the role in their profile', async () => {
+    const guest = await browser.newPage();
+    guest.on('pageerror', err => errors.push(err.message));
+    try {
+      await guest.goto(base + '/#join/' + env.DEMO_INVITE_KEY);
+      await field(guest,'Имя').fill('Член жюри по приглашению');
+      await field(guest,'Логин').fill('invited-judge');
+      await field(guest,'Пароль').fill('fixture-password');
+      await submit(guest,'register',()=>role(guest,'Создать аккаунт').click());
+      await guest.waitForURL(base + '/#overview');
+      await guest.getByRole('link',{name:'Профиль',exact:true}).click();
+      const account = guest.getByRole('region',{name:'Учётная запись'});
+      await visible(account.getByRole('heading',{name:'Член жюри по приглашению',exact:true}));
+      await visible(account.getByText('Демо · жюри',{exact:true}));
+    } finally { await guest.close(); }
+  });
+
   await journey('settings sit above the profile and the account page keeps sign-out', async () => {
     for (const [page, name, accountRole] of [
       [admin,'fixture-admin','Администратор'], [member,'fixture-member','Участник'], [judge,'fixture-judge','Демо · жюри'],
