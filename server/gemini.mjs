@@ -1,4 +1,5 @@
 import { checkModelTransport } from './data-profile.mjs';
+import {readModelResponse} from './model-response.mjs';
 import {GoogleAuth} from 'google-auth-library';
 import {randomUUID} from 'node:crypto';
 
@@ -57,7 +58,7 @@ export async function geminiCall(env,messages,tools,choice,send,credentials=auth
   try{res=await send(url,{method:'POST',headers,redirect:'error',signal,body});}
   catch{throw Object.assign(Error('Не удалось связаться с Google Cloud.'),{retryable:true,timedOut:signal.aborted});}
   if(!res.ok)throw Object.assign(Error('Google вернул HTTP '+res.status+'. '+({400:'Проверьте параметры модели и тип ключа.',401:'Проверьте аутентификацию.',403:developer?'Проверьте доступ ключа к Gemini API и модели.':'Проверьте биллинг, включение API и право aiplatform.endpoints.predict.',404:'Проверьте доступность ID модели.',429:'Исчерпана квота запросов.'}[res.status]||'Повторите запрос позже.')),{status:res.status});
-  const response=await res.json(),parts=response.candidates?.[0]?.content?.parts;
+  const response=await readModelResponse(res,signal),parts=response?.candidates?.[0]?.content?.parts;
   if(!parts?.length)throw Object.assign(Error('Gemini вернула пустой ответ.'),{invalidModelResponse:true});
   // Gemini may split a word across adjacent parts. Whitespace belongs to the text itself.
   return {role:'assistant',usage:{input:response.usageMetadata?.promptTokenCount,output:response.usageMetadata?.totalTokenCount!=null?response.usageMetadata.totalTokenCount-(response.usageMetadata.promptTokenCount||0):undefined},content:parts.filter(p=>p.text&&!p.thought).map(p=>p.text).join(''),googleParts:parts,

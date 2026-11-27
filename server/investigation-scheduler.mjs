@@ -1,8 +1,9 @@
 import { listInvestigationWork, tryStartInvestigation } from './case-investigations.mjs';
 
 export function createInvestigationScheduler({spaces, getLimit, env, send=fetch, options={}}) {
-  const pending = new Set(), lastTurn = new Map();
-  let activeRoles=0, turn=0, timer, closed=false;
+  const pending = new Set();
+  let ring = [];
+  let activeRoles=0, timer, closed=false;
 
   function start(store, item) {
     const task = tryStartInvestigation(store,item,env,send,options);
@@ -37,16 +38,20 @@ export function createInvestigationScheduler({spaces, getLimit, env, send=fetch,
         groups.get(key).push({store,work});
       }
     }
-    const ring=[...groups.keys()].sort((a,b)=>(lastTurn.get(a) || 0)-(lastTurn.get(b) || 0));
+    // Keep waiting cases in order across completions. A stream of new signals joins at the tail.
+    ring = ring.filter(key => groups.has(key));
+    const waiting = new Set(ring);
+    for (const key of groups.keys()) {
+      if (!waiting.has(key)) ring.push(key);
+    }
     const limit=getLimit();
     while (activeRoles < limit && ring.length) {
       const key=ring.shift();
       const items=groups.get(key);
       const {store,work}=items.shift();
-      if (start(store,work)) lastTurn.set(key,++turn);
+      start(store,work);
       if (items.length) ring.push(key);
     }
-    if (!pending.size && !groups.size) lastTurn.clear();
   }
 
   function wake() {

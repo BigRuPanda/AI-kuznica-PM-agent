@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { providerCall } from '../server/agent.mjs';
 import { openStore } from '../server/store.mjs';
 import { initEvidence, importDocs } from '../server/evidence.mjs';
 import { captureInvestigation, runInvestigationStage } from '../server/investigation-engine.mjs';
@@ -169,4 +170,28 @@ test('unread evidence and out-of-scope transport are rejected',async t=>{
     await assert.rejects(runInvestigationStage({stage:'analyst',env:{...env,...overrides},send,run,capture,prior:[]}));
   assert.equal(sent,0);
   await assert.rejects(runInvestigationStage({stage:'analyst',env,send,run,capture,prior:[]}),/источник|свидетельств|основан/i);
+});
+
+test('model streaming body failures keep transport and invalid JSON categories',async ()=>{
+  const adapters=[env,{...env,LLM_BACKEND:'gemini',LLM_API_KEY:'fixture'}];
+  for(const model of adapters) {
+    const dropped=async()=>new Response(new ReadableStream({start(c){c.error(new TypeError('connection reset'));}}));
+    await assert.rejects(providerCall(model,[],[],'auto',dropped),error=>error.retryable===true && !error.timedOut);
+    await assert.rejects(providerCall(model,[],[],'auto',async()=>new Response('{')),error=>error.invalidModelResponse===true);
+    const slow=async(_url,{signal})=>new Response(new ReadableStream({start(c){
+      signal.addEventListener('abort',()=>c.error(signal.reason),{once:true});
+    }}));
+    const pin=setTimeout(()=>{},1000);
+    try {
+      await assert.rejects(providerCall(model,[],[],'auto',slow,{timeout:5}),error=>error.timedOut===true);
+    } finally { clearTimeout(pin); }
+  }
+});
+
+test('malformed provider tool calls are reported as an invalid model response',async t=>{
+  const {db,run}=setup(t), capture=captureInvestigation(db,run);
+  for(const calls of [[null],[{}],{length:1}]) {
+    await assert.rejects(runInvestigationStage({env,stage:'analyst',run,capture,send:async()=>response(calls)}),
+      error=>error.invalidModelResponse===true);
+  }
 });

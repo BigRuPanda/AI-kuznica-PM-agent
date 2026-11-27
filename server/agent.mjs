@@ -4,6 +4,7 @@ import {analysis,labels,runTool} from './analytics.mjs';
 import {operations} from './tools.mjs';
 import {profiles} from './config.mjs';
 import {name,hash} from './store.mjs';
+import {readModelResponse} from './model-response.mjs';
 import {geminiCall} from './gemini.mjs';
 import {chatAnswerFormat} from './answer-format.mjs';
 import {checkModelTransport,localData} from './data-profile.mjs';
@@ -56,7 +57,7 @@ export async function providerCall(env,messages,tools,choice='auto',send=fetch,l
   try{response=await send(target,{method:'POST',redirect:'error',signal,headers:{'Content-Type':'application/json',...(key?{Authorization:'Bearer '+key}:{})},
     body:JSON.stringify({model:env.LLM_MODEL,messages:history,...(tools.length?{tools,tool_choice:choice}:{}),...(limits.maxTokens?{max_tokens:limits.maxTokens}:{})})});}catch{if(signal.aborted)throw Object.assign(Error('Модель не успела ответить вовремя.'),{timedOut:true});throw Object.assign(Error('Модель недоступна. Проверьте подключение и параметры .env.'),{retryable:true});}
   if(!response.ok)throw Object.assign(Error('Провайдер модели вернул HTTP '+response.status+'.'),{status:response.status});
-  const data=await response.json(),reply=data.choices?.[0]?.message;
+  const data=await readModelResponse(response,signal),reply=data?.choices?.[0]?.message;
   if(!reply)throw Object.assign(Error('Модель вернула пустой ответ.'),{invalidModelResponse:true});return {...reply,usage:{input:data.usage?.prompt_tokens,output:data.usage?.completion_tokens}};
 }
 async function apiTurn(store,a,history,question,env,send){

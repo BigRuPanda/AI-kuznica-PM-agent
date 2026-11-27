@@ -538,7 +538,9 @@ export async function runInvestigationStage({env = process.env, send = fetch, st
       usage.calls++;
       usage.input += reply.usage?.input || 0;
       usage.output += reply.usage?.output || 0;
-      if (!reply.tool_calls?.length) throw invalidModelResponse('Модель не вернула результат проверки по источникам.');
+      if (!Array.isArray(reply.tool_calls) || !reply.tool_calls.length ||
+          reply.tool_calls.some(call => typeof call?.function?.name !== 'string' || typeof call.function.arguments !== 'string'))
+        throw invalidModelResponse('Модель не вернула корректный вызов инструмента проверки.');
       const terminal = reply.tool_calls.find(call => call.function.name === submit);
       if (terminal) return {...validatedResult(parsedCall(output, terminal.function.arguments), stage, capture, inspected), usage};
       messages.push({role:'assistant', content:reply.content ?? null, tool_calls:reply.tool_calls,

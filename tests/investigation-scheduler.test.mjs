@@ -76,3 +76,18 @@ test('a limit change affects admissions immediately',async t=>{
   assert.equal(x.held.length,1);
   assert.equal(x.peak(),4);
 });
+
+test('new arrivals join behind a case already waiting for its second role', async t=>{
+  const x=setup(t,1);
+  x.add('team','first'); x.scheduler.wake();
+  await until(()=>x.starts.length===1);
+  x.add('judge','arrival'); x.scheduler.wake();
+  const db=x.spaces.get('judge').db;
+  await until(()=>db.prepare("SELECT prepared FROM case_investigations WHERE case_id='arrival'").get()?.prepared===1);
+  x.held.shift().resolve();
+  await until(()=>x.starts.length===2);
+  assert.deepEqual(x.starts[1].slice(0,2),['first','researcher']);
+  x.held.shift().resolve();
+  await until(()=>x.starts.length===3);
+  assert.equal(x.starts[2][0],'arrival');
+});
