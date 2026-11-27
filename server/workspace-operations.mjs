@@ -195,6 +195,8 @@ export const operations = {
       issueKey: optional,
       sourceVersions: z.array(z.string().regex(/^[a-f0-9]{64}$/)).max(8).optional(),
       resultPage: id.optional(),
+      pageTarget: z.enum(['local','external']).optional(),
+      includeResultSources: z.boolean().optional(),
       baseVersion: z.number().int().positive().optional(),
     },
   ],
@@ -753,8 +755,15 @@ export function workspaceOperation(
     ].includes(op)
   ) {
     const service = op.startsWith('page_') ? 'confluence' : 'redmine';
-    const linkedPage = op === 'page_read' && b.issueKey;
-    const target = b.local || linkedPage ? { service, local: true } : targetFor(db, user, service, env);
+    if (op === 'page_read' && b.issueKey) {
+      return Promise.resolve().then(async () => {
+        const linked = pageByIssue(db, user, b.issueKey, sharedOnly);
+        const api = await trackerClient(store, user, linked.target, env, send, undefined, sharedOnly);
+        return publicPage(await api.read(linked.key));
+      });
+    }
+    const target = b.local || (op === 'page_draft' && b.pageTarget === 'local')
+      ? { service, local: true } : targetFor(db, user, service, env);
     if (
       sharedOnly &&
       (!target.local || (op === 'page_draft' && b.issueKey && !targetFor(db, user, 'redmine', env).local))
@@ -786,9 +795,8 @@ export function workspaceOperation(
         if (op.endsWith('_search')) return { local: !!target.local, items: await api.search(b.query, false, b.origin) };
         if (op === 'issue_options') return api.options();
         if (op === 'page_read') {
-          const key = linkedPage ? pageByIssue(db, user, b.issueKey, sharedOnly) : b.key;
-          if (!key) throw Error('Укажите ключ страницы или номер задачи Redmine');
-          return publicPage(await api.read(key));
+          if (!b.key) throw Error('Укажите ключ страницы или номер задачи Redmine');
+          return publicPage(await api.read(b.key));
         }
         const value = await api.read(b.key);
         return { ...value, ...issueClosure(db, user, value.url, sharedOnly), pages: issuePages(db, user, value.url, sharedOnly) };

@@ -2,6 +2,34 @@ import { digest } from './evidence.mjs';
 import { escapeXml } from './tracker-clients.mjs';
 import { localHref } from './tracker-demo.mjs';
 
+export function wikiPageOwner(db, key) {
+  return db.prepare(`
+    SELECT COALESCE(acl.user,json_extract(c.body,'$.owner')) AS owner
+    FROM demo_pages p JOIN cases c ON p.case_id=c.id
+    LEFT JOIN private_wiki_pages acl ON acl.page=p.key WHERE p.key=?
+  `).get(key)?.owner || undefined;
+}
+
+export function backfillKnowledgeOwners(db) {
+  db.exec(`
+    INSERT OR IGNORE INTO private_wiki_pages(page,user)
+    SELECT destination.key,COALESCE(acl.user,json_extract(c.body,'$.owner'))
+    FROM draft_actions d JOIN demo_pages destination ON destination.key=d.external
+    JOIN demo_pages origin ON origin.key=json_extract(d.body,'$.input.resultPage')
+    JOIN cases c ON c.id=origin.case_id LEFT JOIN private_wiki_pages acl ON acl.page=origin.key
+    WHERE json_extract(d.body,'$.target.local')=1 AND json_extract(d.body,'$.kind')='page'
+      AND COALESCE(acl.user,json_extract(c.body,'$.owner'),'')<>''
+  `);
+}
+
+export function initKnowledge(db) {
+  db.exec(`CREATE TABLE IF NOT EXISTS wiki_backlinks(
+    issue TEXT NOT NULL, page TEXT NOT NULL, draft TEXT NOT NULL, done INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY(issue,page)
+  )`);
+  backfillKnowledgeOwners(db);
+}
+
 export function issuePages(db, user, issueUrl, sharedOnly = false) {
   return db.prepare(`
     WITH linked(key) AS (
@@ -33,25 +61,43 @@ export function issueClosure(db, user, issueUrl, sharedOnly = false) {
 
 export function pageByIssue(db, user, issueKey, sharedOnly = false) {
   const number = String(issueKey).trim().replace(/^(?:Redmine\s*)?[#№]?\s*/i, '');
+  const keys = [issueKey, number, 'Redmine #' + number, '#' + number];
   const urls = db.prepare(`
     SELECT json_extract(body,'$.url') AS url FROM redmine_results
       WHERE CAST(json_extract(body,'$.issue') AS TEXT)=?
     UNION SELECT json_extract(body,'$.issue.url') AS url FROM draft_actions
       WHERE state IN ('done','partial') AND json_extract(body,'$.kind')='page'
       AND json_extract(body,'$.issue.key') IN (?,?,?,?)
-  `).all(number, issueKey, number, 'Redmine #' + number, '#' + number);
+  `).all(number, ...keys);
   const pages = new Map(urls.filter(row => row.url)
     .map(({ url }) => [url, issuePages(db, user, url, sharedOnly)]).filter(([, pages]) => pages.length));
-  if (pages.size !== 1) {
-    if (pages.size > 1) throw Error('Найдено несколько задач с таким номером. Укажите ключ страницы из поиска.');
+  const external = sharedOnly ? [] : db.prepare(`
+    SELECT d.body FROM draft_actions d JOIN cases c ON c.id=d.case_id
+    WHERE d.state='done' AND json_extract(d.body,'$.kind')='page'
+      AND json_extract(d.body,'$.target.service')='confluence'
+      AND COALESCE(json_extract(d.body,'$.target.local'),0)=0
+      AND json_extract(d.body,'$.receipt.key') IS NOT NULL
+      AND json_extract(d.body,'$.issue.key') IN (?,?,?,?)
+      AND COALESCE(json_extract(c.body,'$.owner'),'') IN ('',?)
+      AND COALESCE(json_extract(d.body,'$.pageOwner'),'') IN ('',?)
+    ORDER BY d.rowid DESC
+  `).all(...keys, user.id, user.id).map(({ body }) => JSON.parse(body)).filter(draft => {
+    const sourcePage = draft.input?.resultPage;
+    const owner = sourcePage && wikiPageOwner(db, sourcePage);
+    return !owner || owner === user.id;
+  });
+  const issueUrls = new Set([...pages.keys(), ...external.map(draft => draft.issue.url)]);
+  if (issueUrls.size !== 1) {
+    if (issueUrls.size > 1) throw Error('Найдено несколько задач с таким номером. Укажите ключ страницы из поиска.');
     throw Error('Страница по задаче недоступна.');
   }
+  if (external.length) return { key: external[0].receipt.key, target: external[0].target };
   const [url, linked] = pages.entries().next().value;
   const preferred = db.prepare(`
     SELECT rp.page FROM redmine_results r JOIN redmine_result_pages rp ON rp.result=r.id
     WHERE json_extract(r.body,'$.url')=? ORDER BY r.created DESC,r.id DESC
   `).all(url).find(row => linked.some(page => page.key === row.page));
-  return preferred?.page || linked[0].key;
+  return { key: preferred?.page || linked[0].key, target: { service:'confluence', local:true } };
 }
 
 export function knowledge(db, user) {
@@ -81,12 +127,21 @@ export function knowledge(db, user) {
   };
 }
 
-export function sourceLinks(db, versions, target, env) {
-  return [...new Set(versions)].map(version => {
+export function sourceLinks(db, versions, target, env, inherited = []) {
+  const references = new Map([...new Set(versions)].map(version => ['#knowledge-source/' + version, version]));
+  const appUrl = new URL(env.APP_BASE_URL || 'http://127.0.0.1:8090');
+  for (const {url} of inherited) {
+    const link = new URL(url, appUrl);
+    if (link.origin !== appUrl.origin) continue;
+    const match = link.hash.match(/^#knowledge-source\/([a-f0-9]{64})(?:\/(.+))?$/i);
+    if (!match) continue;
+    if (match[2]) sourceRows(db, match[1], 0, decodeURIComponent(match[2]));
+    references.set(link.hash, match[1]);
+  }
+  return [...references].map(([href,version]) => {
     const row = db.prepare("SELECT file FROM documents WHERE version=? AND lower(file) LIKE '%.xlsx'").get(version);
     if (!row) throw Error('Версия Excel недоступна в этом пространстве');
-    const href = '#knowledge-source/' + version;
-    return { file: row.file, version, url: target.local ? href : new URL(href, env.APP_BASE_URL || 'http://127.0.0.1:8090').href };
+    return { file: row.file, version, url: target.local ? href : new URL(href, appUrl).href };
   });
 }
 

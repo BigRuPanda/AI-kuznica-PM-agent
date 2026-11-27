@@ -26,7 +26,11 @@ export function demoClient(db, user, service, caseId, sharedOnly = false) {
     function read(key) {
       const r = db.prepare('SELECT * FROM demo_pages WHERE key=?').get(key);
       if (!r || !visiblePage(r)) throw Error('Страница недоступна');
-      return { ...r, url: localHref(service, key) };
+      const privatePage = db.prepare(`
+        SELECT 1 FROM cases c LEFT JOIN private_wiki_pages acl ON acl.page=?
+        WHERE c.id=? AND (acl.user IS NOT NULL OR COALESCE(json_extract(c.body,'$.owner'),'')<>'')
+      `).get(r.key, r.case_id);
+      return { ...r, private: Boolean(privatePage), url: localHref(service, key) };
     }
     return {
       read,
@@ -42,7 +46,7 @@ export function demoClient(db, user, service, caseId, sharedOnly = false) {
           .slice(0, 25)
           .map((r) => ({ key: r.key, title: r.title, url: localHref(service, r.key) }));
       },
-      save(key, title, storage, version) {
+      save(key, title, storage, version, personalOwner) {
         if (key) {
           read(key);
           if (
@@ -54,6 +58,8 @@ export function demoClient(db, user, service, caseId, sharedOnly = false) {
         } else {
           key = 'PAGE-' + randomUUID();
           db.prepare('INSERT INTO demo_pages VALUES(?,?,?,?,1)').run(key, caseId, title, storage);
+          if (personalOwner)
+            db.prepare('INSERT INTO private_wiki_pages VALUES(?,?)').run(key, personalOwner);
         }
         return { key, url: localHref(service, key) };
       },

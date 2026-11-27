@@ -1288,12 +1288,13 @@ test('Softline workspace, upgrade and browser journeys', async t => {
     const quote = 'Сверили вручную.\nДанные подтверждены.';
     const book = text => ({ file:'Документация 731.xlsx', facts: [{kind:'competitor', loc:'Итог!A2', text}] });
     try {
-      const { id } = await post(admin, 'create-case', {title:'Личный результат 731', product:'Kaspersky'});
+      const { id } = await post(admin, 'create-case', {title:'Закрытие в командном разборе 731', product:'Kaspersky'});
+      store.db.prepare("UPDATE cases SET body=json_remove(body,'$.owner') WHERE id=?").run(id);
       const draft = await post(admin, 'draft', {caseId:id, title:task.title, description:task.description});
       await post(admin, 'confirm', {id:draft.id,revision:draft.revision});
       store.tx(() => saveClosure(store.db, app.accounts, id, owner.id, {
         ...task, reference:bridgeReference, issue:731, episode:1, observed:'2026-05-25',
-        closing_note:{text:quote,author:'Автор'}, report,
+        closing_note:{text:quote,author:'Автор'}, report, personalOwner:owner.id,
       }, env, false));
       importDocs(store, [book('Исходная ячейка 731')], {notify:false});
       const {version} = (await post(admin,'knowledge-sources')).find(source => source.file === 'Документация 731.xlsx');

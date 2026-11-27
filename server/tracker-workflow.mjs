@@ -6,7 +6,7 @@ import { demoClient, initTrackerDemo, localHref } from './tracker-demo.mjs';
 import { requireActionableRun, visibleRun } from './case-investigations.mjs';
 import { initRedmine, bridgeTracker, draftReport } from './redmine-bridge.mjs';
 import { initWatches, watchIssue } from './redmine-watch.mjs';
-import { sourceLinks } from './knowledge.mjs';
+import { initKnowledge, sourceLinks, wikiPageOwner } from './knowledge.mjs';
 
 export function initTracking(db, env = process.env) {
   initConnections(db);
@@ -34,6 +34,7 @@ export function initTracking(db, env = process.env) {
     db.prepare('UPDATE draft_actions SET body=? WHERE id=?').run(JSON.stringify(b), row.id);
   }
   initWatches(db);
+  initKnowledge(db);
 }
 export function trackerClient(store, user, target, env, send, caseId, sharedOnly = false) {
   if (target.bridge) {
@@ -216,6 +217,10 @@ function pageDraft(input, current, target, issue, marker) {
     storage += '<p><a href="' + escapeXml(s.url) + '">' + escapeXml(s.file) + '</a></p>';
     diff.push({ field: 'Источник Excel · ' + s.file, before: '', after: s.url });
   }
+  if (input.reportLink && !storage.includes('href="' + escapeXml(input.reportLink) + '"')) {
+    storage += '<p><a href="' + escapeXml(input.reportLink) + '">Исходный отчёт Метрики</a></p>';
+    diff.push({ field: 'Исходный отчёт Метрики', before: '', after: input.reportLink });
+  }
   if (!diff.length && !issue) throw Error('Укажите изменение страницы');
   storage +=
     '<ac:structured-macro ac:name="anchor"><ac:parameter ac:name="">' +
@@ -231,6 +236,7 @@ function pageDraft(input, current, target, issue, marker) {
     storage,
     diff,
     input: { ...input, title: input.title === current?.title ? undefined : input.title },
+    pageOwner: input.pageOwner,
     issue,
     revision: randomUUID(),
   };
@@ -278,7 +284,14 @@ export async function prepareTracker(store, user, kind, input, env, send, reques
   const existing = select.get(id, user.id);
   if (existing && !binding?.selection && !(binding && existing.state === 'obsolete')) return preview(existing);
   const service = kind === 'page' ? 'confluence' : 'redmine';
-  const target = binding?.target || (input.local ? { service, local: true } : targetFor(db, user, service, env));
+  const configured = targetFor(db, user, service, env);
+  const origin = kind === 'page' && input.resultPage
+    ? demoClient(db, user, 'confluence', input.caseId, sharedOnly).read(input.resultPage) : null;
+  const pageOwner = origin ? wikiPageOwner(db, origin.key) : undefined;
+  const builtIn = kind === 'page' && (input.pageTarget === 'local' || (pageOwner && input.pageTarget !== 'external'));
+  if (kind === 'page' && input.pageTarget === 'external' && configured.local)
+    throw Error('Настройте корпоративный Confluence');
+  const target = binding?.target || (input.local || builtIn ? { service, local:true } : configured);
   const client = await trackerClient(store, user, target, env, send, input.caseId, sharedOnly);
   let body;
   if (kind === 'issue') {
@@ -316,25 +329,28 @@ export async function prepareTracker(store, user, kind, input, env, send, reques
       issue = { key: i.key, url: i.url, target: t };
     }
     const current = input.key ? await client.read(input.key) : null;
+    if (pageOwner && target.local && current && wikiPageOwner(db, current.key) !== pageOwner)
+      throw Error('Личный результат можно сохранить только на доступной личной странице');
     const originKey = input.resultPage || (target.local && input.key);
-    const versions = new Set(input.sourceVersions);
+    let inherited, reportLink;
     if (originKey) {
-      const origin = demoClient(db, user, 'confluence', input.caseId, sharedOnly).read(originKey);
+      const sourcePage = origin || demoClient(db, user, 'confluence', input.caseId, sharedOnly).read(originKey);
       const results = db.prepare(`
         SELECT r.body,r.case_id FROM redmine_results r JOIN redmine_result_pages rp ON rp.result=r.id
         WHERE rp.page=? ORDER BY r.created DESC,r.id DESC
       `).all(originKey);
-      if ((results.length || input.resultPage) &&
-          !results.some(result => result.case_id === input.caseId &&
-            (issue ? issue.url === JSON.parse(result.body).url : !input.resultPage)))
+      const result = results.find(result => result.case_id === input.caseId &&
+        (issue ? issue.url === JSON.parse(result.body).url : !input.resultPage));
+      if ((results.length || input.resultPage) && !result)
         throw Error('Страница закрытия относится к другой задаче или разбору');
-      if (input.resultPage && !target.local)
-        for (const link of publicPage(origin).links) {
-          const version = link.url.match(/^#knowledge-source\/([a-f0-9]{64})$/i)?.[1];
-          if (version) versions.add(version);
-        }
+      if (input.resultPage && (target.local || !pageOwner || input.includeResultSources)) {
+        inherited = publicPage(sourcePage).links;
+        const url = result && JSON.parse(result.body).report?.web;
+        if (/^https?:\/\//i.test(url || '')) reportLink = url;
+      }
     }
-    body = pageDraft({ ...input, sources: sourceLinks(db, versions, target, env) }, current, target, issue, 'pm-' + id);
+    const sources = sourceLinks(db, input.sourceVersions || [], target, env, inherited);
+    body = pageDraft({ ...input, pageOwner, sources, reportLink }, current, target, issue, 'pm-' + id);
     if (current && input.baseVersion !== undefined && input.baseVersion !== current.version)
       body.conflict = 'Страница изменилась. Сравните с версией ' + current.version;
   }
@@ -367,6 +383,15 @@ export async function confirmTracker(store, user, row, revision, env, send) {
     marker = 'pm-' + id;
   if (row.state === 'done')
     return { ...(b.receipt || {}), key: row.external, local: !!b.target.local, state: 'done' };
+  if (b.kind === 'page' && b.input?.resultPage) {
+    const origin = demoClient(db, user, 'confluence', row.case_id).read(b.input.resultPage);
+    b.pageOwner = wikiPageOwner(db, origin.key);
+    if (b.pageOwner && !b.target.local && b.input.pageTarget !== 'external')
+      throw Error('Выберите место публикации личного результата и заново откройте предпросмотр');
+    if (b.pageOwner && b.target.local && b.key && wikiPageOwner(db, b.key) !== b.pageOwner)
+      throw Error('Личный результат можно сохранить только на доступной личной странице');
+    b.input.pageOwner = b.pageOwner;
+  }
   b.signalRevision ??= legacySignalRevision(row, b);
   const versionBound = b.investigationId || b.signalRevision !== undefined;
   if (b.kind === 'page' && revision !== b.revision)
@@ -383,6 +408,7 @@ export async function confirmTracker(store, user, row, revision, env, send) {
   let attempted = false;
   let uncertain = !!b.uncertain || (row.state === 'uncertain' && !!b.inFlight);
   let obsolete = row.state === 'obsolete';
+  let backlinkClaim;
   function checkVersion() {
     if (!versionBound) return;
     try {
@@ -459,7 +485,11 @@ export async function confirmTracker(store, user, row, revision, env, send) {
         }
         if (b.kind === 'page') {
           try {
-            result = await api.save(b.key, b.title, b.storage, b.version, beforeWrite);
+            if (b.target.local) {
+              result = await api.save(b.key, b.title, b.storage, b.version, b.pageOwner, beforeWrite);
+            } else {
+              result = await api.save(b.key, b.title, b.storage, b.version, beforeWrite);
+            }
           } catch (e) {
             if (e.status === 409 && b.key) {
               attempted = false;
@@ -517,9 +547,17 @@ export async function confirmTracker(store, user, row, revision, env, send) {
         issue.comments.some(c => c.text.split(/\r?\n/).some(line =>
           [backlink, 'Confluence · ' + b.receipt.url, 'Confluence · ' + pageUrl, 'База знаний · ' + b.receipt.url].includes(line))) ||
         (uncertain && (await api.recover(b.issue.key, backMarker)));
-      if (!linked) {
+      backlinkClaim = [b.issue.url, b.receipt.url];
+      const claim = db.prepare(`
+        INSERT INTO wiki_backlinks VALUES(?,?,?,?)
+        ON CONFLICT(issue,page) DO UPDATE SET done=MAX(wiki_backlinks.done,excluded.done)
+        RETURNING draft,done
+      `).get(...backlinkClaim, id, linked ? 1 : 0);
+      if (!claim.done) {
+        if (claim.draft !== id) throw Error('Обратная ссылка уже сохраняется. Повторите подтверждение.');
         if (uncertain) throw Error('Проверьте обратную ссылку в задаче и повторите сверку');
         await api.save(b.issue.key, { comment: backlink }, backMarker, beforeWrite);
+        db.prepare('UPDATE wiki_backlinks SET done=1 WHERE issue=? AND page=?').run(...backlinkClaim);
       }
     }
     delete b.inFlight;
@@ -533,6 +571,8 @@ export async function confirmTracker(store, user, row, revision, env, send) {
   } catch (e) {
     const ambiguous = attempted && !(versionBound && b.target.local) && (!e.status || e.status >= 500 || e.status === 408);
     b.uncertain = uncertain || ambiguous;
+    if (backlinkClaim && !b.uncertain)
+      db.prepare('DELETE FROM wiki_backlinks WHERE issue=? AND page=? AND draft=? AND done=0').run(...backlinkClaim, id);
     if (!b.uncertain) delete b.inFlight;
     b.reason = e.message;
     const state =
@@ -578,6 +618,8 @@ export async function caseLinks(store, user, caseId, env, send, sharedOnly) {
   for (const row of rows) {
     const b = JSON.parse(row.body);
     if (!visible(b.investigationId)) continue;
+    const privateOwner = b.pageOwner || (b.input?.resultPage && wikiPageOwner(db, b.input.resultPage));
+    if (privateOwner && (sharedOnly || privateOwner !== user.id)) continue;
     if (b.receipt) candidates.set(b.receipt.url, { ...b.receipt, target: b.target, investigationId: b.investigationId });
     if (b.issue) candidates.set(b.issue.url, b.issue);
   }
@@ -609,6 +651,7 @@ export function publicPage(page) {
     title: page.title,
     version: page.version,
     url: page.url,
+    private: Boolean(page.private),
     text: plain(
       page.storage.replace(
         /<ac:structured-macro ac:name="anchor"><ac:parameter ac:name="">pm-[\w-]+<\/ac:parameter><\/ac:structured-macro>/g,
@@ -617,6 +660,6 @@ export function publicPage(page) {
     ),
     links: [...page.storage.matchAll(/<a\b[^>]*\bhref="([^"]+)"[^>]*>([\s\S]*?)<\/a>/gi)]
       .map((m) => ({ url: plain(m[1]), title: plain(m[2]) }))
-      .filter((l) => /^(https?:\/\/|#demo-(issue|page)\/|#knowledge-source\/[a-f0-9]{64}$)/i.test(l.url)),
+      .filter((l) => /^(https?:\/\/|#demo-(issue|page)\/|#knowledge-source\/[a-f0-9]{64}(?:\/[^\s<>]+)?$)/i.test(l.url)),
   };
 }

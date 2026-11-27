@@ -20,7 +20,7 @@ type Task = Hit & {
   statuses: Option[];
   comments: { author: string; text: string }[];
 };
-type Page = Hit & { version: number; text: string; links: { url: string; title: string }[] };
+type Page = Hit & { version: number; text: string; private?: boolean; links: { url: string; title: string }[] };
 export type Integration = {
   service: string;
   local?: boolean;
@@ -466,6 +466,7 @@ function PageForm({
   issueKey,
   startPage,
   internal,
+  externalAvailable,
   action,
   reload,
 }: {
@@ -475,15 +476,19 @@ function PageForm({
   issueKey: string;
   startPage?: string;
   internal: boolean;
+  externalAvailable: boolean;
   action: Action;
   reload: () => Promise<void>;
 }) {
   const [page, setPage] = useState<Page>();
+  const [externalCopy, chooseExternal] = useState(false);
   const [sources, setSources] = useState<Workbook[]>([]),
     [selected, choose] = useState<string[]>([]);
   const [sourceError, fail] = useState(''),
     [loading, setLoading] = useState(!!startPage),
     [seed, setSeed] = useState<Page>();
+  const builtIn = internal || (!externalCopy && Boolean(seed?.private));
+  const privateExport = Boolean(seed?.private && externalCopy);
   useEffect(() => {
     let live = true;
     post<Workbook[]>('knowledge-sources')
@@ -498,7 +503,7 @@ function PageForm({
         .then((r) => {
           if (live) {
             setSeed(r);
-            if (internal) setPage(r);
+            if (internal || r.private) setPage(r);
             setLoading(false);
           }
         })
@@ -511,12 +516,22 @@ function PageForm({
   }, [startPage, internal]);
   return (
     <>
-      <Search
+      {seed?.private && externalAvailable && (
+        <label>
+          <input type="checkbox" checked={externalCopy} onChange={e => {
+            chooseExternal(e.target.checked);
+            setPage(e.target.checked ? undefined : seed);
+            choose([]);
+          }} />
+          Опубликовать отдельный вывод в корпоративном Confluence
+        </label>
+      )}
+      {(!startPage || !builtIn) && <Search
         service="page"
         query=""
         action={action}
         onPick={async (key) => setPage(await post('page_read', { key }))}
-      />
+      />}
       {page && (
         <>
           <h4>{page.title}</h4>
@@ -527,7 +542,7 @@ function PageForm({
       {sourceError && <p role="alert">{sourceError}</p>}
       {!loading && (
         <form
-          key={page?.key || 'new'}
+          key={page?.key || (externalCopy ? 'external-copy' : 'new')}
           onSubmit={(e) => {
             e.preventDefault();
             const b = Object.fromEntries(new FormData(e.currentTarget));
@@ -540,6 +555,8 @@ function PageForm({
                 baseVersion: page?.version,
                 sourceVersions: selected,
                 resultPage: startPage,
+                pageTarget: seed?.private ? (externalCopy ? 'external' : 'local') : undefined,
+                includeResultSources: privateExport && b.includeResultSources === 'on',
               });
               await reload();
             });
@@ -547,7 +564,7 @@ function PageForm({
         >
           <label>
             Название страницы
-            <input name="title" defaultValue={page?.title || seed?.title || title} maxLength={255} required />
+            <input name="title" defaultValue={page?.title || (privateExport ? '' : seed?.title || title)} maxLength={255} required />
           </label>
           {page && (
             <label>
@@ -562,7 +579,7 @@ function PageForm({
             Текст публикации
             <textarea
               name="content"
-              defaultValue={page ? conclusion : [seed?.text, conclusion].filter(Boolean).join('\n\n')}
+              defaultValue={privateExport ? '' : page ? conclusion : [seed?.text, conclusion].filter(Boolean).join('\n\n')}
               maxLength={30000}
             />
           </label>
@@ -590,8 +607,13 @@ function PageForm({
               ))}
             </fieldset>
           )}
+          {privateExport && (
+            <label><input type="checkbox" name="includeResultSources" />
+              Добавить ссылки на исходный отчёт и версии Excel
+            </label>
+          )}
           <button>
-            {internal ? 'Подготовить страницу базы знаний' : 'Подготовить публикацию в Confluence'}
+            {builtIn ? 'Подготовить страницу базы знаний' : 'Подготовить публикацию в Confluence'}
           </button>
         </form>
       )}
@@ -661,7 +683,7 @@ export function Tracking({
         ))}
       </div>}
       <p className="muted">{site.local ? 'Локальное демо' : site.scope + ' · ' + site.url}</p>
-      {!site.local && !site.connected ? (
+      {!site.local && !site.connected && !(tab === 'confluence' && params.get('page')) ? (
         <a href="#settings/personal">Подключить личный доступ</a>
       ) : tab === 'redmine' ? (
         <IssueForm
@@ -679,6 +701,7 @@ export function Tracking({
           conclusion={conclusion}
           issueKey={picked || latest?.key || ''}
           internal={Boolean(site.local)}
+          externalAvailable={!site.local && site.connected}
           startPage={params.get('page') || undefined}
           action={action}
           reload={reload}

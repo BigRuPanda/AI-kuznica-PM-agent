@@ -73,17 +73,71 @@ test('publication pins the selected Excel version and makes the linked page read
     assert.deepEqual(task.closingNote, closure.closing_note);
     assert.deepEqual(task.originalReport, closure.report);
     assert.equal(task.pages[0].key, page.key);
+    const cell = '#knowledge-source/' + version + '/' + encodeURIComponent('Сводка!C4');
+    store.db.prepare('UPDATE demo_pages SET storage=storage||? WHERE key=?')
+      .run('<p><a href="' + cell + '">Исходная ячейка</a></p>', page.key);
+
+    const derived = await s.confirm(await s.draft('page_draft', {
+      title: 'Приватное продолжение', content: 'Личное замечание', resultPage: page.key, issueKey: issue.key,
+    }));
+    assert.ok(knowledge(store.db, owner).pages.some(row => row.key === derived.key));
+    const derivedPage = await s.run('page_read', {key:derived.key,local:true});
+    assert.ok(derivedPage.links.some(link => link.url === cell));
+    assert.ok(derivedPage.links.some(link => link.url === closure.report.web));
+    assert.ok(!knowledge(store.db, peer).pages.some(row => row.key === derived.key));
+    await assert.rejects(s.run('page_read', { key: derived.key, local: true }, peer), /недоступна/i);
+    await assert.rejects(s.run('page_read', { key: derived.key, local: true }, owner, true), /недоступна/i);
+    assert.deepEqual((await s.run('page_search', { query: 'Приватное продолжение' }, peer)).items, []);
+    store.db.prepare('DELETE FROM private_wiki_pages WHERE page=?').run(derived.key);
+    initTracking(store.db);
+    await assert.rejects(s.run('page_read', { key: derived.key, local: true }, peer), /недоступна/i);
 
     await s.connect('confluence');
-    const publication = await s.draft('page_draft', { title: 'Итог в Confluence', content: 'Опубликованный вывод',
+    const privateDraft = await s.draft('page_draft', { title: 'Встроенная копия по умолчанию', content: 'Лично',
       resultPage: page.key, issueKey: issue.key });
+    assert.match((await s.confirm(privateDraft)).url, /^#demo-page\//);
+    assert.equal(mock.pages.length, 0);
+    const publication = await s.draft('page_draft', { title: 'Итог в Confluence', content: 'Опубликованный вывод',
+      resultPage: page.key, issueKey: issue.key, pageTarget: 'external', includeResultSources:true, sourceVersions:[version] });
     await s.confirm(publication);
     await s.confirm(publication);
     assert.equal(mock.pages.length, 1);
     assert.match(mock.pages[0].body.storage.value, /bugs\.test\/pm\/issues\/1/);
     assert.ok(mock.pages[0].body.storage.value.includes('https://pm.test/#knowledge-source/' + version));
-    assert.equal(mock.issues[0].journals.length, 2);
+    assert.ok(mock.pages[0].body.storage.value.includes('https://pm.test/' + cell));
+    assert.ok(mock.pages[0].body.storage.value.includes(closure.report.web));
+    assert.equal(mock.issues[0].journals.length, 4);
+    mock.pages[0].version.number = 2;
+    assert.equal((await s.run('page_read', { issueKey: issue.key })).version, 2);
+    await assert.rejects(s.run('page_read', { issueKey: issue.key }, peer), /недоступна/i);
   } finally {
+    store.close();
+  }
+});
+
+test('two separately confirmed drafts append only one backlink to the same Redmine issue and page', async () => {
+  const store = dbAt();
+  let release;
+  try {
+    const mock = siteMock(), s = scenario(store, mock);
+    await s.connect('redmine');
+    const issue = await s.confirm(await s.draft('draft', { title:'Задача с документом', description:'Проверка' }));
+    const page = await s.confirm(await s.draft('page_draft', { title:'Общая страница', content:'Исходный вывод' }));
+    const first = await s.draft('page_draft', { key:page.key, issueKey:issue.key, content:'Первое уточнение' });
+    let entered;
+    const writing = new Promise(resolve => { entered = resolve; });
+    const unblock = new Promise(resolve => { release = resolve; });
+    mock.beforeBacklink = () => { entered(); return unblock; };
+    const firstConfirmation = s.confirm(first);
+    await writing;
+    const second = await s.draft('page_draft', { key:page.key, issueKey:issue.key, content:'Второе уточнение' });
+    assert.equal((await s.confirm(second)).state, 'partial');
+    release();
+    assert.equal((await firstConfirmation).state, 'done');
+    assert.equal((await s.confirm(second)).state, 'done');
+    assert.equal(mock.issues[0].journals.length, 1);
+  } finally {
+    release?.();
     store.close();
   }
 });
@@ -173,6 +227,7 @@ function siteMock() {
       if (b.issue.description !== undefined) issue.description = b.issue.description;
       if (b.issue.custom_fields && !remote.ignoreOrigin) issue.custom_fields = b.issue.custom_fields;
       if (b.issue.status_id) issue.status = { id: b.issue.status_id, name: 'В работе' };
+      if (b.issue.notes?.includes('База знаний ·')) await remote.beforeBacklink?.();
       if (b.issue.notes) issue.journals.push({ user: { name: 'Автор' }, notes: b.issue.notes });
       return committed('comment', new Response(''));
     }
