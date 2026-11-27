@@ -6,15 +6,13 @@ import {CalculationPage,SavedChart} from './calculations';
 import {DataForm} from './forms';
 import {Answer} from './answer';
 import {Icon} from './icons';
+import {ProfileAvatar} from './profile';
+import type {User} from './team-data';
 import './style.css';
 
 function stored(key:string){try{return localStorage.getItem('release-v1/'+key)||'';}catch{return '';}}
 function remember(key:string,value:string){try{localStorage.setItem('release-v1/'+key,value);}catch{}}
 const clock=new Intl.DateTimeFormat('ru-RU',{hour:'2-digit',minute:'2-digit',timeZone:'Europe/Moscow'});
-function Avatar({name,agent=false}:{name:string;agent?:boolean}){
-  const initials=name.trim().split(/\s+/).slice(0,2).map(word=>word[0]).join('');
-  return <span aria-hidden="true" className={'avatar '+(agent?'agent-avatar':name==='Дмитрий'?'second-avatar':'person-avatar')}>{agent?<Icon name="agent"/>:initials}</span>;
-}
 function Headline({report:r}:{report:Report}){
   const c=r.cards[r.release.target],{before,after}=c.series.all;
   if(c.status!=='ready'||before.value===null||after.value===null)return <p className="lead">{r.overview}</p>;
@@ -28,9 +26,10 @@ function Headline({report:r}:{report:Report}){
   const supportingFact=explanation.split(/(?<=[.!?])\s+(?=[А-ЯЁ])/u).at(-1);
   return <p className="lead">{subjects[c.metric]}{change}.{supportingFact&&<span>{supportingFact.replace(/\s+%/gu,'%')}</span>}</p>;
 }
-export function ReleaseAnalytics({ route, requestedId, author, admin }: {
-  route: string; requestedId?: string; author: string; admin: boolean;
+export function ReleaseAnalytics({ route, requestedId, user }: {
+  route: string; requestedId?: string; user: User;
 }) {
+  const admin = user.role === 'admin';
   const [journal, setJournal] = useState<Journal | null>(null);
   const [error, fail] = useState('');
   const [form, setForm] = useState<'import' | 'release' | null>(null);
@@ -50,17 +49,17 @@ export function ReleaseAnalytics({ route, requestedId, author, admin }: {
     <a className="crumb" href="#releases-list">← Журнал релизов</a>
     {error && <p role="alert">{error}</p>}
     {route === 'calc' ? <CalculationPage id={requestedId || ''}/> :
-      journal && id ? <Releases key={id} id={id} journal={journal} author={author}
+      journal && id ? <Releases key={id} id={id} journal={journal} user={user}
         generation={generation} onForm={admin ? setForm : undefined}/> :
       <p role="status">{journal ? 'В журнале пока нет релизов.' : 'Загрузка журнала…'}</p>}
     {admin && form && journal && <DataForm kind={form} journal={journal} close={() => setForm(null)}
       onDone={next => { setForm(null); bump(n => n + 1); if (next) location.hash = 'release/' + next; }}/>}
   </section>;
 }
-function Releases({id,journal,author,generation,onForm}:{id:string;journal:Journal;author:string;generation:number;onForm?:(s:'import'|'release')=>void}){
+function Releases({id,journal,user,generation,onForm}:{id:string;journal:Journal;user:User;generation:number;onForm?:(s:'import'|'release')=>void}){
   const [day,setDay]=useState<number|undefined>(stored(id+'/day')?Number(stored(id+'/day')):undefined),[seg,setSeg]=useState<Segment>((stored(id+'/seg')||'all') as Segment);
   const [r,setReport]=useState<Report|null>(null),[error,fail]=useState(''),[metric,select]=useState<number|null>(null);
-  const [messages,setMessages]=useState<Message[]>([]),[boards,setBoards]=useState<Board[]>([]),[board,setBoard]=useState(''),[question,write]=useState(''),[busy,wait]=useState(false);
+  const [messages,setMessages]=useState<Message[]|null>(null),[boards,setBoards]=useState<Board[]>([]),[board,setBoard]=useState(''),[question,write]=useState(''),[busy,wait]=useState(false);
   const [left,showLeft]=useState(stored('left')!=='false'),[right,showRight]=useState(stored('right')!=='false'),[pane,setPane]=useState('main');
   const [lw,setLw]=useState(()=>Number(stored('lw'))||Math.max(200,Math.min(280,Math.round(innerWidth*.18)))),[rw,setRw]=useState(()=>Number(stored('rw'))||Math.max(270,Math.min(420,Math.round(innerWidth*.26))));
   const [narrow,setNarrow]=useState(()=>matchMedia('(max-width: 850px)').matches);
@@ -68,7 +67,7 @@ function Releases({id,journal,author,generation,onForm}:{id:string;journal:Journ
   const [history,setHistory]=useState<{day:number;start:number}|null>(null);
   const lastActivity=useRef('');
   const [refresh,rerun]=useState(0);const initial=useRef(new Set<string>()),activitySeq=useRef(0),alive=useRef(true);
-  const requestId=useRef(''),chatBox=useRef<HTMLInputElement>(null);
+  const requestId=useRef(''),chatBox=useRef<HTMLTextAreaElement>(null);
   useEffect(()=>{alive.current=true;return()=>{alive.current=false;};},[]);
   useEffect(()=>{
     const media=matchMedia('(max-width: 850px)');
@@ -112,7 +111,7 @@ function Releases({id,journal,author,generation,onForm}:{id:string;journal:Journ
   async function ask(e:React.FormEvent){
     e.preventDefault();if(!r||busy||!question.trim())return;wait(true);fail('');
     if(!requestId.current)requestId.current=crypto.randomUUID();
-    try{await api('chat',{...r.context,metric:metric??r.release.target,author,question,requestId:requestId.current});write('');requestId.current='';await activity();if(alive.current)rerun(v=>v+1);}
+    try{await api('chat',{...r.context,metric:metric??r.release.target,author:user.name,question,requestId:requestId.current});write('');requestId.current='';followChat.current=true;await activity();if(alive.current)rerun(v=>v+1);}
     catch(ex){fail((ex as Error).message);}finally{if(alive.current)wait(false);}
   }
   function grip(side:'left'|'right'){
@@ -128,7 +127,7 @@ function Releases({id,journal,author,generation,onForm}:{id:string;journal:Journ
   }
   const rel=r?.release||journal.releases.find(e=>e.id===id),names=[...new Set(boards.map(b=>b.name))];
   const cutoff=r?.context.day??day;
-  const eligible=messages.filter(m=>cutoff!==undefined&&m.context.day<=cutoff);
+  const eligible=messages?.filter(m=>cutoff!==undefined&&m.context.day<=cutoff)??[];
   const latestQuestion=Math.max(0,eligible.map(m=>m.role).lastIndexOf('user'));
   const historyStart=history&&history.day===cutoff?history.start:latestQuestion;
   useEffect(()=>{
@@ -140,13 +139,13 @@ function Releases({id,journal,author,generation,onForm}:{id:string;journal:Journ
     requestAnimationFrame(()=>chatLog.current?.scrollTo(0,0));
   }
   const viewMetric=metric??rel?.target??0;
-  function sideHeading(side:'left'|'right',heading:string){
+  function foldButton(side:'left'|'right'){
     const open=narrow?pane===side:(side==='left'?left:right);
     const label=narrow?'К разбору':(open?'Свернуть ':'Открыть ')+(side==='left'?'список релизов':'обсуждение');
-    return <header className="side-heading"><h2>{heading}</h2><button type="button" className="icon-button fold-button" aria-label={label} title={label} aria-controls={side+'-content'} aria-expanded={open} onClick={()=>toggle(side)}><Icon name={(side==='left')===open?'left':'right'}/></button></header>;
+    return <button type="button" className="icon-button fold-button" aria-label={label} title={label} aria-controls={side+'-content'} aria-expanded={open} onClick={()=>toggle(side)}><Icon name={(side==='left')===open?'left':'right'}/></button>;
   }
   return <div className="layout" data-pane={pane} style={{'--lw':left?lw+'px':'44px','--rw':right?rw+'px':'44px','--lg':left?'6px':'1px','--rg':right?'6px':'1px'} as React.CSSProperties}>
-    <aside className={'sidebar'+(!left&&!narrow?' folded':'')} aria-label="Список релизов">{sideHeading('left','Релизы')}
+    <aside className={'sidebar'+(!left&&!narrow?' folded':'')} aria-label="Список релизов"><header className="side-heading"><h2>Релизы</h2>{foldButton('left')}</header>
     <div className="side-body" id="left-content"><div className="release-list">{journal.releases.map(v=><a href={'#release/'+v.id} key={v.id} aria-current={id===v.id?'page':undefined} className={'release-link '+(id===v.id?'chosen':'')} onClick={()=>setPane('main')}><small>{v.id} · {date(v.launch)}</small><strong>{v.title}</strong></a>)}</div>
     {onForm&&<div className="side-actions"><button onClick={()=>onForm('release')}><Icon name="plus"/>Добавить релиз</button><button onClick={()=>onForm('import')}><Icon name="download"/>Импорт CSV</button></div>}</div></aside>{left&&grip('left')}
     <section className="dashboard" aria-label="Аналитика релиза"><div className="report-head"><div className="mobile-switch"><button onClick={()=>toggle('left')}>‹ Список релизов</button><button onClick={()=>toggle('right')}>Обсуждение ›</button></div>
@@ -162,16 +161,58 @@ function Releases({id,journal,author,generation,onForm}:{id:string;journal:Journ
     {board?<section><h2>{board}</h2>{boards.filter(b=>b.name===board).map(b=><SavedChart key={b.calc} id={b.calc}/>)}</section>:<>
     <p className="period">Сравнение за семь суток до и после запуска. Границы периодов в {clock.format(r.release.launch)} МСК.</p>
     {r.cards.map(c=><MetricCard key={r.context.version+'/'+seg+'/'+r.context.day+'/'+c.metric} card={c} report={r} select={()=>select(c.metric)}/>)}</>}</>:!error&&<p>Загружаем расчёты…</p>}</section>
-    {right&&grip('right')}<aside className={'thread'+(!right&&!narrow?' folded':'')} aria-label="Обсуждение релиза">{sideHeading('right','Обсуждение релиза')}
-      <div className="thread-body" id="right-content"><small className="thread-id">{id} · общая ветка</small>
-      <div className="chat" ref={chatLog} onScroll={e=>{const el=e.currentTarget;followChat.current=el.scrollHeight-el.scrollTop-el.clientHeight<28;}}><div className="chat-flow" ref={chatFlow}>
-      {historyStart>0&&<button type="button" className="earlier" onClick={showHistory}>Предыдущие сообщения <span>{historyStart}</span></button>}
-      {eligible.slice(historyStart).map((m,j)=><article key={j+historyStart} className={'msg '+m.role}><header><Avatar name={m.author} agent={m.role==='assistant'}/><strong>{m.author}</strong><time dateTime={new Date(m.created).toISOString()} title={new Date(m.created).toLocaleString('ru-RU',{timeZone:'Europe/Moscow'})+' МСК'}>{clock.format(m.created)}</time></header><div className="message-body"><Answer text={m.text} compact={m.role==='assistant'&&m.refs?.some(ref=>ref.op==='build_chart')}/>
-      {m.refs?.filter(ref=>ref.op==='build_chart').map(ref=><SavedChart key={ref.id} id={ref.id} preview author={author} suggested={names} onSave={()=>void activity()}/>)}
-      {m.refs?.filter(ref=>ref.op!=='build_chart').map(ref=><a className="ref" href={calcHref(ref.id)} key={ref.id}>{ref.title} ↗</a>)}<small className="message-context">{segmentNames[m.context.segment]} · срез на {rel?dayDate(rel.launch,m.context.day):''}</small></div></article>)}</div></div>
-      <footer className="chat-footer">{journal.mode==='offline'&&<p className="hint">Для ответа подключите модель в серверном .env.</p>}{journal.mode==='local'&&<p className="hint">Локальный режим. В ответе доступны расчёт выбранной метрики и его источник.</p>}
-      <button className="suggest" onClick={()=>{write('Сколько дней обычно проходит от выставления счёта до оплаты? Построй график медианы.');requestId.current='';chatBox.current?.focus();}}>Исследовать скорость оплаты</button>
-      <form className="composer" onSubmit={ask}><small>{busy?'Агент проверяет данные…':metricNames[viewMetric]+' · '+segmentNames[seg]}</small><div className="compose-field"><input ref={chatBox} aria-label="Спросить агента" required maxLength={1500} value={question} placeholder="Спросить агента…" onChange={e=>{write(e.target.value);requestId.current='';}}/>
-      <button className="primary send" aria-label="Отправить вопрос" title="Отправить вопрос" disabled={!r||busy||!question.trim()}><Icon name="send"/></button></div></form></footer></div>
+    {right&&grip('right')}
+    <aside className={'thread'+(!right&&!narrow?' folded':'')} aria-label="Обсуждение релиза">
+      <header className="conversation-heading">
+        <span className="chat-avatar" aria-hidden="true"><Icon name="people"/></span>
+        <div className="conversation-title"><h2>Обсуждение релиза</h2><small>{id} · общая ветка</small></div>
+        {foldButton('right')}
+      </header>
+      <div className="thread-body" id="right-content">
+        <div className="conversation-body">
+          <div className="chat-history" ref={chatLog} onScroll={e=>{
+            const el=e.currentTarget;followChat.current=el.scrollHeight-el.scrollTop-el.clientHeight<28;
+          }}>
+            <div className="chat-flow" ref={chatFlow}>
+              {messages===null&&!error&&<p className="chat-loading muted" role="status">Загрузка переписки…</p>}
+              {messages&&r&&!eligible.length&&!error&&!busy&&<div className="chat-empty"><h4>Что проверить?</h4></div>}
+              {historyStart>0&&<button type="button" className="earlier" onClick={showHistory}>Предыдущие сообщения <span>{historyStart}</span></button>}
+              {eligible.slice(historyStart).map((m,j)=><article key={j+historyStart} className={'bubble '+m.role}>
+                <header className="message-author">
+                  {m.role==='assistant' ? <span className="chat-avatar" aria-hidden="true"><Icon name="agent"/></span> :
+                    <ProfileAvatar className="chat-avatar" name={m.author} avatar={m.own ? user.avatar : null}/>}
+                  <strong>{m.author}</strong>
+                  <time dateTime={new Date(m.created).toISOString()} title={new Date(m.created).toLocaleString('ru-RU',{timeZone:'Europe/Moscow'})+' МСК'}>{clock.format(m.created)}</time>
+                </header>
+                <Answer text={m.text} compact={m.role==='assistant'&&m.refs?.some(ref=>ref.op==='build_chart')}/>
+                {m.refs?.filter(ref=>ref.op==='build_chart').map(ref=><SavedChart key={ref.id} id={ref.id} preview author={user.name} suggested={names} onSave={()=>void activity()}/>)}
+                {m.refs?.filter(ref=>ref.op!=='build_chart').map(ref=><a href={calcHref(ref.id)} key={ref.id}>{ref.title} ↗</a>)}
+                <small className="message-context">{segmentNames[m.context.segment]} · срез на {rel?dayDate(rel.launch,m.context.day):''}</small>
+              </article>)}
+              {narrow&&error&&<p role="alert">{error}</p>}
+              {busy&&<p className="chat-typing" role="status"><span aria-hidden="true"><i/><i/><i/></span> Агент проверяет данные…</p>}
+            </div>
+          </div>
+        </div>
+        <form className="chat-composer" onSubmit={ask}>
+          {journal.mode==='offline'&&<p className="hint">Для ответа подключите модель в серверном .env.</p>}
+          {journal.mode==='local'&&<p className="hint">Локальный режим. В ответе доступны расчёт выбранной метрики и его источник.</p>}
+          <button type="button" className="text-action suggest" onClick={()=>{
+            write('Сколько дней обычно проходит от выставления счёта до оплаты? Построй график медианы.');
+            requestId.current='';chatBox.current?.focus();
+          }}>Исследовать скорость оплаты</button>
+          <small>{metricNames[viewMetric]} · {segmentNames[seg]}</small>
+          <div className="composer-row">
+            <textarea ref={chatBox} aria-label="Спросить агента" required maxLength={1500} rows={1} value={question}
+              placeholder="Спросить агента…" onChange={e=>{write(e.target.value);requestId.current='';}}
+              onKeyDown={e=>{
+                if(e.key!=='Enter'||e.shiftKey||e.ctrlKey||e.altKey||e.metaKey||e.nativeEvent.isComposing)return;
+                e.preventDefault();
+                if(r&&!busy&&question.trim())e.currentTarget.form?.requestSubmit();
+              }}/>
+            <button type="submit" className="primary chat-send" aria-label="Отправить вопрос" title="Отправить вопрос (Enter)" disabled={!r||busy||!question.trim()}><Icon name="arrowUp"/></button>
+          </div>
+        </form>
+      </div>
     </aside></div>;
 }

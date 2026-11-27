@@ -540,6 +540,7 @@ export function createTeamApp({
         if (method === 'POST' && ['/api/import', '/api/releases'].includes(p) && user.role !== 'admin')
           return reply(403, { error: 'Импорт архива доступен администратору' });
         req.pmActor = user.name;
+        req.pmActorId = user.id;
         if (!legacy.has(user.space)) legacy.set(user.space, application(space(user.space), { env, send }));
         req.headers.host = '127.0.0.1';
         if (req.headers.origin) req.headers.origin = 'http://127.0.0.1';

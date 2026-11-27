@@ -1043,6 +1043,83 @@ test('Softline workspace, upgrade and browser journeys', async t => {
     await visible(member.locator('.report-head h1'));
     assert.equal(await role(member,'Импорт CSV').count(),0);
   });
+  await journey('CSV release discussion shows the profile photo on confirmed own messages', async () => {
+    const route = 'release/R-001';
+    const profileRoute = 'profile';
+    const question = 'Моя реплика в обсуждении CSV';
+    const legacy = 'Старая реплика с такой же подписью';
+    const store = app.space('team');
+    const {context} = await (await member.request.get(base+'/api/report?releaseId=R-001')).json();
+    store.addMessage('R-001', 'profile-test-legacy/q', {
+      role:'user', author:'fixture-member', text:legacy, context, created:1,
+    });
+    const openDiscussion = async page => {
+      await go(page, route);
+      await role(page,'Обсуждение ›').click();
+      return page.getByRole('complementary',{name:'Обсуждение релиза'});
+    };
+    const sidebarPhoto = page => page.getByRole('link',{name:'Профиль',exact:true}).locator('img');
+    const locateMessage = (panel, text) => panel.getByRole('article').filter({hasText:text});
+    const panel = await openDiscussion(member);
+    await field(panel,'Спросить агента').fill(question);
+    await panel.locator('button[aria-label="Отправить вопрос"]:enabled').waitFor();
+    await Promise.all([
+      member.waitForResponse(r => r.url().endsWith('/api/chat') && r.ok()),
+      field(panel,'Спросить агента').press('Enter'),
+    ]);
+    await visible(locateMessage(panel, question));
+    await go(member, profileRoute);
+    await role(member,'Редактировать профиль').click();
+    const portrait = await member.evaluate(() => {
+      const canvas = document.createElement('canvas');
+      canvas.width = canvas.height = 8;
+      const drawing = canvas.getContext('2d');
+      drawing.fillStyle = '#236089';
+      drawing.fillRect(0,0,8,8);
+      return canvas.toDataURL().split(',')[1];
+    });
+    await member.getByLabel('Фото профиля',{exact:true}).setInputFiles({
+      name:'csv-portrait.png', mimeType:'image/png', buffer:Buffer.from(portrait,'base64'),
+    });
+    await visible(member.getByRole('region',{name:'Учётная запись'}).locator('.profile-avatar img'));
+    await role(member,'Сохранить профиль').click();
+    await visible(sidebarPhoto(member));
+    const photo = await sidebarPhoto(member).getAttribute('src');
+    async function checkHistory(page, hasPhoto) {
+      const discussion = await openDiscussion(page);
+      await discussion.getByRole('button',{name:/Предыдущие сообщения/}).click();
+      const own = locateMessage(discussion, question);
+      const earlier = locateMessage(discussion, legacy);
+      await visible(own.getByText('fixture-member',{exact:true}));
+      await visible(earlier.getByText('fixture-member',{exact:true}));
+      assert.equal(await earlier.locator('img').count(),0);
+      if (hasPhoto) {
+        await visible(own.locator('img'));
+        assert.equal(await own.locator('img').getAttribute('src'),photo);
+      } else {
+        assert.equal(await own.locator('img').count(),0);
+        assert.equal(await own.locator('.chat-avatar').textContent(),'FM');
+      }
+      assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
+    }
+    await checkHistory(member, true);
+    const loginMobile = () => login('member','#profile',{viewport:{width:390,height:844},colorScheme:'dark'});
+    const again = await loginMobile();
+    try {
+      await checkHistory(again, true);
+      await go(again, profileRoute);
+      await role(again,'Редактировать профиль').click();
+      await role(again,'Убрать фото').click();
+      await submit(again,'profile',()=>role(again,'Сохранить профиль').click());
+      await sidebarPhoto(again).waitFor({state:'hidden'});
+      await checkHistory(again, false);
+    } finally { await again.context().close(); }
+    const withoutPhoto = await loginMobile();
+    try { await checkHistory(withoutPhoto, false); }
+    finally { await withoutPhoto.context().close(); }
+    await member.reload();
+    await visible(member.getByRole('link',{name:'Профиль',exact:true}));
+  });
   await journey('judge writes in an isolated demo and mobile attachment returns to its conversation', async () => {
     await go(judge,'overview');
     await judge.getByRole('link',{name:'Открыть разбор'}).first().click();

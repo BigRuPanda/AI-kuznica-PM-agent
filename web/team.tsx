@@ -2169,7 +2169,7 @@ function Workspace({ user, onLogout, onUpdate }: { user: User; onLogout: () => v
             <MaterialDetail id={id} />
           </section>
         ) : ['releases', 'release', 'calc'].includes(route) ? (
-          <ReleaseAnalytics route={route} requestedId={id} author={user.name} admin={user.role === 'admin'} />
+          <ReleaseAnalytics route={route} requestedId={id} user={user} />
         ) : route === 'case' ? (
           <Investigation key={id} id={id} home={home} avatar={user.avatar} action={action} refresh={refresh} />
         ) : route === 'range' ? (

@@ -116,7 +116,7 @@ export function makeAgent(store,{env=process.env,send=fetch,alternate}={}){
     const reply=await providerCall(env,[{role:'user',content:prompt}],[tool],{type:'function',function:{name:'record_findings'}},send);
     return reportSpec.parse(JSON.parse(reply.tool_calls?.[0]?.function.arguments||'null'));
   }
-  function ask(body,trustedActor){return queue(body.releaseId,async()=>{
+  function ask(body,trustedActor,trustedActorId){return queue(body.releaseId,async()=>{
     const question=name(body.question,1500),request=name(body.requestId||randomUUID(),100);
     if(body.author!==trustedActor&&!profiles.includes(body.author)||!body.author)throw Error('Выберите профиль.');
     const existing=store.one('SELECT body FROM messages WHERE release=? AND request=?',body.releaseId,request+'/a');
@@ -133,7 +133,7 @@ export function makeAgent(store,{env=process.env,send=fetch,alternate}={}){
     let decision=turn.decision;
     if(!decision&&apiConfigured(env))decision=await review(a,turn.answer).catch(()=>null);
     const refs=turn.refs.map(c=>({id:c.id,op:c.op,title:c.result.title||({breakdown:'Разбивка по клиентам',funnel:'Шаги воронки'}[c.op])||'Расчёт'}));
-    const user={role:'user',author:body.author,text:question,context:ctx,created:Date.now()};
+    const user={role:'user',author:body.author,authorId:trustedActorId,text:question,context:ctx,created:Date.now()};
     const reply={role:'assistant',author:'Агент',text:turn.answer,context:ctx,refs,created:Date.now()};
     store.tx(()=>{if(decision)storeReview(a,decision,turn.answer);store.addMessage(ctx.releaseId,request+'/q',user);store.addMessage(ctx.releaseId,request+'/a',reply);});
     return reply;

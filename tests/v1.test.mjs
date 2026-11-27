@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {mkdtemp,readFile} from 'node:fs/promises';
+import {mkdtemp,readFile,rm} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {Client} from '@modelcontextprotocol/sdk/client/index.js';
@@ -8,6 +8,7 @@ import {StdioClientTransport} from '@modelcontextprotocol/sdk/client/stdio.js';
 import {openStore} from '../server/store.mjs';
 import {root} from '../server/config.mjs';
 import {application} from '../server/http.mjs';
+import {createTeamApp} from '../server/team-http.mjs';
 import {page,runTool} from '../server/analytics.mjs';
 import {geminiCall} from '../server/gemini.mjs';
 import {apiConfigured,makeAgent,providerCall} from '../server/agent.mjs';
@@ -193,4 +194,56 @@ test('connected HTTP tool loop, follow-up history, two profiles, chart publicati
     assert.equal(page(s,{...ctx,day:1}).notes.length,0);
   }finally{await new Promise(r=>app.close(r));s.close();}
   s=openStore(file);assert.equal(s.messages('R-001').length,4);assert.equal(s.boards('R-002').length,1);s.close();
+});
+
+test('release messages identify their signed-in author after rename', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'release-identity-'));
+  const env = {DATA_PROFILE: 'local', ADMIN_INVITE_KEY: 'fixture-admin'};
+  const app = createTeamApp({base: join(dir, 'releases.sqlite'), env, background: false});
+  t.after(async () => {
+    await app.close();
+    await rm(dir, {recursive:true, force:true});
+  });
+  await new Promise(resolve => app.server.listen(0, '127.0.0.1', resolve));
+  const base = `http://127.0.0.1:${app.server.address().port}/api/`;
+  const post = async (path, data, cookie) => {
+    const response = await fetch(base + path, {
+      method: 'POST', headers: {'content-type': 'application/json', ...(cookie && {cookie})},
+      body: JSON.stringify(data),
+    });
+    const body = await response.json();
+    assert.equal(response.status, 200, JSON.stringify(body));
+    return {body, cookie: response.headers.get('set-cookie')?.split(';')[0]};
+  };
+  const name = 'Дмитрий Орлов';
+  const password = 'fixture-password';
+  const ownerAccount = {login: 'csv-owner', password};
+  const owner = await post('team/register', {...ownerAccount, name, code: env.ADMIN_INVITE_KEY});
+  const other = await post('team/register', {login: 'csv-peer', password, name, code: app.accounts.invite('team')});
+  const store = app.space('team');
+  const context = page(store, {releaseId: 'R-001', day: 14}).context;
+  store.addMessage(context.releaseId, 'legacy/q', {
+    role: 'user', author: name, text: 'Старая реплика', context, created: 1,
+  });
+  await post('chat', {...context, question: 'Новая реплика', requestId: 'own',
+    author: 'Подставная подпись', authorId: other.body.id, own: false}, owner.cookie);
+  await post('chat', {...context, question: 'Реплика коллеги', requestId: 'peer',
+    authorId: owner.body.id, own: true}, other.cookie);
+  assert.deepEqual(await post('team/profile', {name: 'Дмитрий Петров', avatar: null}, owner.cookie)
+    .then(({body}) => [body.id, body.name, body.avatar]), [owner.body.id, 'Дмитрий Петров', null]);
+  const signedIn = await post('team/login', ownerAccount);
+  async function activity(cookie) {
+    const response = await fetch(base + 'activity?releaseId=R-001', {headers: {cookie}});
+    assert.equal(response.status, 200);
+    return (await response.json()).messages;
+  }
+  const identify = messages => ['Новая реплика', 'Реплика коллеги', 'Старая реплика']
+    .map(text => messages.find(message => message.text === text));
+  const messages = await activity(signedIn.cookie);
+  const [newOwn, peer, legacy] = identify(messages);
+  assert.deepEqual([newOwn.own, peer.own, legacy.own], [true, false, false]);
+  assert.deepEqual([newOwn.author, peer.author, legacy.author], [name, name, name]);
+  assert.ok(messages.filter(message => message.role === 'assistant').every(message => message.own === false));
+  assert.deepEqual(identify(await activity(other.cookie)).map(message => [message.own, message.author]),
+    [[false, name], [true, name], [false, name]]);
 });

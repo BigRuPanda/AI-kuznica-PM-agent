@@ -24,7 +24,10 @@ export function application(store,{env=liveModelEnv,send=fetch}={}){
           if(p==='/api/report')return json(200,page(store,q));
           if(p==='/api/activity'){
             store.release(q.releaseId);
-            return json(200,{messages:store.messages(q.releaseId),boards:store.boards(q.releaseId)});
+            const messages=store.messages(q.releaseId).map(({authorId,...message})=>({
+              ...message,own:Boolean(req.pmActorId&&message.role==='user'&&authorId===req.pmActorId),
+            }));
+            return json(200,{messages,boards:store.boards(q.releaseId)});
           }
           if(p.startsWith('/api/calculations/'))return json(200,store.getCalc(p.split('/').at(-1)));
           return json(404,{error:'Маршрут не найден.'});
@@ -39,7 +42,7 @@ export function application(store,{env=liveModelEnv,send=fetch}={}){
         if(p==='/api/import')return json(200,store.importCSV(b));
         if(p==='/api/releases')return json(201,store.create(b));
         if(p==='/api/compare')return json(200,runTool(store,'compare_metric',b));
-        if(p==='/api/chat')return json(200,await agent.ask(b,req.pmActor));
+        if(p==='/api/chat')return json(200,await agent.ask(b,req.pmActor,req.pmActorId));
         if(p==='/api/initial'){if(mode()!=='offline')await agent.initial(b);return json(200,{ok:true});}
         if(p==='/api/boards'){
           const calc=store.getCalc(b.calc),title=name(b.name,100);

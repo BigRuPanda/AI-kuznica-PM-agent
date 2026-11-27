@@ -4,16 +4,17 @@ import { post } from './team-data';
 import type { User } from './team-data';
 import './profile.css';
 
-function ProfileAvatar({ user, avatar = user.avatar }: { user: User; avatar?: User['avatar'] }) {
-  const name = user.name.trim() || user.login;
-  const initials = name.split(/[\s_-]+/).filter(Boolean).slice(0, 2)
+export function ProfileAvatar({ name, avatar, className = 'profile-avatar' }: {
+  name: string; avatar?: User['avatar']; className?: string;
+}) {
+  const initials = name.trim().split(/[\s_-]+/).filter(Boolean).slice(0, 2)
     .map(part => Array.from(part)[0]).join('').toLocaleUpperCase('ru-RU');
-  return <span className="profile-avatar" aria-hidden="true">{avatar ? <img src={avatar} alt="" /> : initials || '•'}</span>;
+  return <span className={className} aria-hidden="true">{avatar ? <img src={avatar} alt="" /> : initials || '•'}</span>;
 }
 
 export function ProfileEntry({ user, active }: { user: User; active: boolean }) {
   return <a className="profile-entry" href="#profile" aria-label="Профиль" title="Профиль" aria-current={active ? 'page' : undefined}>
-    <ProfileAvatar user={user} />
+    <ProfileAvatar name={user.name.trim() || user.login} avatar={user.avatar} />
     <span className="profile-entry-label">Профиль</span>
     <Icon name="right" />
   </a>;
@@ -100,7 +101,7 @@ export function ProfilePage({ user, onLogout, onUpdate }: {
       <div className="page-head"><h1>Профиль</h1></div>
       <section className="paper profile-identity" aria-label="Учётная запись">
         <div className="profile-overview">
-          <ProfileAvatar user={user} avatar={draft ? draft.avatar : avatar} />
+          <ProfileAvatar name={user.name.trim() || user.login} avatar={draft ? draft.avatar : avatar} />
           <div className="profile-details">
             <div className="profile-name">
               <h2>{name}</h2>
