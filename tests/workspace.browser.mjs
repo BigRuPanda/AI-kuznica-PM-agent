@@ -286,6 +286,8 @@ test('release decisions preserve the historical cutoff, cited cells and manual i
     release('R-50', '2026-10-04', 'Карусель рекомендаций ЛК', 5, { affected_metrics: 'lk_reco_click_visits', related_task_ids: 'T-9' }),
     release('MIX-1', '2026-10-03', 'Изменения для Astra и Kaspersky', 6),
     release('OLD-1', '2026-10-01', 'Обновление Astra', 7),
+    release('DEC-TECH', '2026-10-10', 'Обновление сбора событий для семейств Astra и Kaspersky', 8, { release_type: 'analytics' }),
+    release('DEC K/1', '2026-10-01', 'Изменение поставки Astra', 9),
     { kind: 'interview', loc: 'Интервью!L9', text: 'Темы ответа: Kaspersky · сложность выбора\nФрагмент записи: Неясно, какую лицензию выбрать' },
     { kind: 'backlog', loc: 'Задачи!A8', row: { task_id: 'DEC-T', title: 'Kaspersky: проверить сбор событий',
       created_date: '2026-09-20', status: 'New', description_short: 'Проверить передачу событий', linked_metric_ids: 'cfg_add_to_cart_rate' } },
@@ -373,9 +375,50 @@ test('release decisions preserve the historical cutoff, cited cells and manual i
   await field(page, 'Логин').fill('fixture-admin');
   await field(page, 'Пароль').fill('fixture-password');
   await field(page, 'Пароль').press('Enter');
-  await page.getByRole('link', { name: 'Решение по релизу', exact: true }).click();
-  await visible(page.getByRole('heading', { name: 'Решение по релизу' }));
+  await visible(page.getByRole('heading', { name: 'Обзор', exact: true }));
+  assert.equal(await page.locator('a[href^="#release-decision"]').count(), 0);
+  const journalLink = page.getByRole('navigation', { name: 'Основные разделы' })
+    .getByRole('link', { name: 'Релизы', exact: true });
+  const journalHeading = page.getByRole('heading', { name: 'Журнал релизов', exact: true });
+  const assessmentHeading = page.getByRole('heading', { name: 'Оценка релиза', exact: true });
+  const releaseLink = page.getByRole('link', { name: /DEC-2 · .*Поздний релиз Kaspersky/ });
+  await journalLink.click();
+  await releaseLink.click();
+  await page.waitForURL('**/#release-decision/DEC-2');
+  await visible(assessmentHeading);
   const releaseSelect = field(page.locator('.decision-filters'), 'Релиз');
+  assert.equal(await releaseSelect.inputValue(), 'DEC-2');
+  await page.getByRole('link', { name: '← Журнал релизов', exact: true }).click();
+  await visible(journalHeading);
+
+  const compoundId = page.locator('.decision-hero').getByText('DEC K/1 · 01.10.2026', { exact: true });
+  await page.getByRole('link', { name: /^DEC K\/1 ·/ }).click();
+  await compoundId.waitFor({ state: 'visible', timeout: 5000 });
+  assert.equal(await releaseSelect.inputValue(), 'DEC K/1');
+  await page.goto(base + '/#release-detail/DEC%20K/1');
+  await page.waitForURL('**/#release-decision/DEC%20K%2F1', { timeout: 5000 });
+  await visible(compoundId);
+
+  imported[0].facts.push(release('DEC-LATE', '2026-10-01', 'Дополнение к выпуску Astra', 10));
+  importDocs(store, imported, { notify: false });
+  await page.goto(base + '/#release-detail/DEC-LATE');
+  await page.waitForURL('**/#release-decision/DEC-LATE', { timeout: 5000 });
+  await visible(page.locator('.decision-hero').getByText('DEC-LATE · 01.10.2026', { exact: true }));
+
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto(base + '/#release-detail/DEC-TECH');
+  await page.waitForURL('**/#releases-list');
+  await visible(journalHeading);
+  const technicalRow = page.locator('.release-row').filter({ hasText: 'DEC-TECH ·' });
+  assert.equal(await technicalRow.getByRole('link').count(), 0);
+  assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
+  await technicalRow.getByRole('button', { name: /^Запланировать оценку/ }).click();
+  assert.equal(await field(page, 'Связанный релиз').inputValue(), 'DEC-TECH');
+  await role(page, 'Новый разбор').click();
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await journalLink.click();
+  await releaseLink.click();
+
   await field(page, 'Семейство или раздел').selectOption('Kaspersky');
   await visible(page.getByText('«Неясно, какую лицензию выбрать»'));
   await page.getByRole('link', { name: /Интервью!L9/ }).click();
@@ -411,8 +454,8 @@ test('release decisions preserve the historical cutoff, cited cells and manual i
   assert.equal(await page.getByText('Частные выводы Astra', { exact: true }).count(), 0);
 
   await page.goto(base + '/#release-detail/DEC-2');
-  await page.getByRole('link', { name: 'Решение по релизу', exact: true }).click();
-  assert.equal(new URL(page.url()).hash, '#release-decision/DEC-2');
+  await page.waitForURL('**/#release-decision/DEC-2');
+  await visible(assessmentHeading);
   await role(page, 'Открыть чат разбора').click();
   await visible(page.getByRole('heading', { name: 'Чат разбора · DEC-2' }));
   await role(page, 'Найти задачу и проверить дубли').click();
@@ -480,6 +523,45 @@ test('release decisions preserve the historical cutoff, cited cells and manual i
   assert.equal(store.db.prepare("SELECT count(*) AS n FROM local_issues WHERE key='DEC-ASTRA'").get().n, 0);
   assert.equal((await call('confirm', { id: astraDraft.id })).key, 'DEC-ASTRA');
   assert.equal(store.db.prepare("SELECT count(*) AS n FROM local_issues WHERE key='DEC-ASTRA'").get().n, 1);
+
+  const releaseSignalId = 'fixture-release-signal';
+  store.db.prepare('INSERT INTO cases VALUES(?,?,?,?,?)').run(releaseSignalId, 'Kaspersky',
+    'Снижение после выкладки DEC-20', 'Завершено', JSON.stringify({
+      signal: { rule: 'absolute', week: '2026-10-05', value: 33, releaseId: 'DEC-2' },
+    }));
+  await page.getByRole('navigation', { name: 'Основные разделы' })
+    .getByRole('link', { name: 'Разборы', exact: true }).click();
+  const releaseCard = page.locator('a[href="#case/' + linked.id + '"]');
+  const standaloneCard = page.locator('a[href="#case/' + unrelated.id + '"]');
+  const signalCard = page.locator('a[href="#case/' + releaseSignalId + '"]');
+  await visible(releaseCard);
+  assert.equal(await releaseCard.getByText('релиз', { exact: true }).count(), 1);
+  assert.equal(await releaseCard.getByText('сигнал', { exact: true }).count(), 0);
+  await visible(signalCard.getByText('сигнал', { exact: true }));
+  await visible(signalCard.getByText('релиз', { exact: true }));
+  assert.equal(await signalCard.getByText(/ · DEC-2$/).count(), 1);
+  assert.deepEqual(await standaloneCard.locator('.state').allTextContents(), ['Исследуем']);
+
+  const typeFilter = field(page, 'Тип');
+  await typeFilter.selectOption({ label: 'Сигналы' });
+  await visible(signalCard);
+  await releaseCard.waitFor({ state: 'hidden' });
+  await standaloneCard.waitFor({ state: 'hidden' });
+  await typeFilter.selectOption({ label: 'Релизы' });
+  await visible(releaseCard);
+  await visible(signalCard);
+  const stateFilter = field(page, 'Состояние');
+  await stateFilter.selectOption('Завершено');
+  await releaseCard.waitFor({ state: 'hidden' });
+  await visible(signalCard);
+  await typeFilter.selectOption({ label: 'Самостоятельные' });
+  await visible(page.getByText('По выбранным фильтрам разборов нет.', { exact: true }));
+  await stateFilter.selectOption('');
+  await visible(standaloneCard);
+  await signalCard.waitFor({ state: 'hidden' });
+  await typeFilter.selectOption({ label: 'Все' });
+  await visible(releaseCard);
+  await visible(signalCard);
   assert.deepEqual(errors, []);
 });
 
@@ -768,8 +850,8 @@ test('Softline workspace, upgrade and browser journeys', async t => {
   await journey('a new case started from the case list does not inherit a previous release', async () => {
     try {
       await admin.getByRole('navigation',{name:'Основные разделы'}).getByRole('link',{name:'Релизы',exact:true}).click();
-      await admin.getByRole('link',{name:/DEMO-R/}).click();
-      await role(admin,'Запланировать оценку').click();
+      const releaseRow = admin.locator('.release-row').filter({ hasText: 'DEMO-R ·' });
+      await releaseRow.getByRole('button', { name: /^Запланировать оценку/ }).click();
       const releaseSelect = field(admin,'Связанный релиз');
       assert.equal(await releaseSelect.inputValue(), 'DEMO-R');
       await field(admin,'Вопрос или гипотеза').fill('Оценить новый релиз');

@@ -254,7 +254,7 @@ export function saveReleaseDecisionContext(db, user, decision) {
 }
 export function readReleaseDecisionContext(db, user, id) {
   const row = typeof id === 'string' && db.prepare('SELECT body FROM release_decision_context WHERE id=? AND owner=?').get(id, user.id);
-  if (!row) throw Error('Срез релиза недоступен. Откройте решение по релизу снова.');
+  if (!row) throw Error('Срез релиза недоступен. Откройте оценку релиза снова.');
   const context = JSON.parse(row.body);
   if (context.decision.caseId) visibleCase(db, user, context.decision.caseId);
   return context;

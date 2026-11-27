@@ -262,7 +262,8 @@ test('decision chat leads to manual confirmation, using the same case and actual
   await page.getByLabel('Логин').fill('release-admin');
   await page.getByLabel('Пароль').fill(adminPassword);
   await page.getByRole('button', { name: 'Войти', exact: true }).click();
-  await page.getByRole('link', { name: 'Решение по релизу', exact: true }).click();
+  await page.getByRole('navigation', { name: 'Основные разделы' }).getByRole('link', { name: 'Релизы', exact: true }).click();
+  await page.getByRole('link', { name: /^R-09 ·/ }).click();
   await page.getByRole('heading', { name: 'Kaspersky Endpoint Security', exact: true }).waitFor();
   await page.getByText('−31,39%', { exact: true }).waitFor();
   await page.getByRole('link', { name: /03_Цена!A86/ }).waitFor();

@@ -375,6 +375,20 @@ p {
 }
 .releases-head { flex-wrap: wrap; margin-block: 0 16px; }
 .release-calendar > h2 { margin-block-start: 0; }
+.release-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--border);
+}
+.release-summary {
+  display: grid;
+  gap: 3px;
+  flex: 1 1 18rem;
+  min-width: 0;
+}
 .page-head small {
   display: block;
   margin-bottom: 0.4rem;
@@ -421,6 +435,11 @@ p {
   background: var(--surface-hover);
   text-decoration: none;
 }
+.case-badges {
+  display: flex;
+  flex-wrap: wrap;
+  column-gap: 4px;
+}
 .case-value,
 .big-number {
   color: var(--fg);
@@ -457,6 +476,7 @@ p {
   margin-bottom: 15px;
   font-size: 0.83rem;
 }
+.case-filters { justify-content: flex-start; }
 .toolbar label {
   display: flex;
   align-items: center;
@@ -527,8 +547,7 @@ p {
   margin-right: 5px;
 }
 .event-row,
-.excerpt,
-.release-row {
+.excerpt {
   display: grid;
   gap: 3px;
   padding: 10px 0;

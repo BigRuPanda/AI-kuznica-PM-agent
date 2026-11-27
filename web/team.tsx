@@ -64,6 +64,8 @@ import './chat.css';
 
 type Action = (fn: () => Promise<void>) => void;
 type ThreadTitle = Pick<Thread, 'id' | 'title'>;
+const releaseAssessmentHref = (releaseId: string) => '#release-decision/' + encodeURIComponent(releaseId);
+
 function currentRoute() {
   if (location.hash.length > 1) return location.hash.slice(1);
   const params = new URLSearchParams(location.search);
@@ -77,7 +79,13 @@ function useRoute() {
     window.addEventListener('hashchange', change);
     return () => window.removeEventListener('hashchange', change);
   }, []);
-  return route.split('/');
+  const [page, ...segments] = route.split('/');
+  if (segments.length && (page === 'release-detail' || page === 'release-decision')) {
+    const releaseId = segments.join('/');
+    try { return [page, decodeURIComponent(releaseId)]; }
+    catch { return [page, releaseId]; }
+  }
+  return [page, ...segments];
 }
 function Login({ onLogin, joinCode }: { onLogin: (user: User) => void; joinCode?: string }) {
   const [register, mode] = useState(joinCode !== undefined),
@@ -147,29 +155,62 @@ function Login({ onLogin, joinCode }: { onLogin: (user: User) => void; joinCode?
     </main>
   );
 }
-function CaseList({ items }: { items: Case[] }) {
+const caseTypeLabels = {
+  all: 'Все',
+  signal: 'Сигналы',
+  release: 'Релизы',
+  standalone: 'Самостоятельные',
+} as const;
+type CaseType = keyof typeof caseTypeLabels;
+
+function caseReleaseId(item: Case) {
+  return item.body.release || item.body.signal?.releaseId;
+}
+
+function matchesCaseType(item: Case, type: CaseType) {
+  switch (type) {
+    case 'signal': return Boolean(item.body.signal);
+    case 'release': return Boolean(caseReleaseId(item));
+    case 'standalone': return !item.body.signal && !caseReleaseId(item);
+    case 'all': return true;
+  }
+}
+
+function CaseList({
+  items, showTypes = false, emptyMessage = 'Разборы появятся после загрузки данных или нового поручения.',
+}: { items: Case[]; showTypes?: boolean; emptyMessage?: string }) {
   return (
     <div className="case-list">
       {items.length ? (
-        items.map((c) => (
-          <a key={c.id} href={'#case/' + c.id}>
-            <div>
-              <span className="state">{c.state}</span>
-              {c.body.signal?.status === 'withdrawn' && <span className="state">Сигнал отозван</span>}
-              <h3>{c.title}</h3>
-              <small>{c.body.signal?.week || c.product}</small>
-            </div>
-            <div className="case-value" data-negative={(c.body.signal?.change ?? 0) < 0}>
-              {c.body.signal?.status === 'withdrawn' ? '—' : c.body.signal?.rule === 'relative'
-                ? changeLabel(c.body.signal.change)
-                : c.body.signal
-                  ? num(c.body.signal.value) + (c.body.signal.metric ? '%' : ' п.')
-                  : <Icon name="arrow" />}
-            </div>
-          </a>
-        ))
+        items.map((c) => {
+          const releaseId = showTypes ? caseReleaseId(c) : undefined;
+          return (
+            <a key={c.id} href={'#case/' + c.id}>
+              <div>
+                <div className="case-badges">
+                  <span className="state">{c.state}</span>
+                  {showTypes && c.body.signal && <span className="state">сигнал</span>}
+                  {releaseId && <span className="state">релиз</span>}
+                  {c.body.signal?.status === 'withdrawn' && <span className="state">Сигнал отозван</span>}
+                </div>
+                <h3>{c.title}</h3>
+                <small>
+                  {c.body.signal?.week || c.product}
+                  {releaseId && ' · ' + releaseId}
+                </small>
+              </div>
+              <div className="case-value" data-negative={(c.body.signal?.change ?? 0) < 0}>
+                {c.body.signal?.status === 'withdrawn' ? '—' : c.body.signal?.rule === 'relative'
+                  ? changeLabel(c.body.signal.change)
+                  : c.body.signal
+                    ? num(c.body.signal.value) + (c.body.signal.metric ? '%' : ' п.')
+                    : <Icon name="arrow" />}
+              </div>
+            </a>
+          );
+        })
       ) : (
-        <p className="empty">Разборы появятся после загрузки данных или нового поручения.</p>
+        <p className="empty">{emptyMessage}</p>
       )}
     </div>
   );
@@ -230,8 +271,6 @@ function Overview({ home, onAsk }: { home: Home; onAsk: () => void }) {
           {home.user.role === 'judge' && <span className="state">Демо</span>}
         </div>
         <div className="overview-actions">
-          {(home.products.length > 0 || home.releases.some(release => release.decisionAvailable)) &&
-            <a className="primary arrow-action" href="#release-decision">Решение по релизу <Icon name="arrow" /></a>}
           <button onClick={onAsk}>Спросить помощника</button>
         </div>
       </div>
@@ -2216,6 +2255,7 @@ function Workspace({ user, onLogout, onUpdate }: { user: User; onLogout: () => v
     [home, setHome] = useState<Home | null>(null),
     [err, fail] = useState(''),
     [filter, setFilter] = useState(''),
+    [caseType, setCaseType] = useState<CaseType>('all'),
     [newCaseRelease, showCaseForm] = useState<string | null>(null),
     [menu, setMenu] = useState(readMenuLayout);
   const sidebar = useSidebarWidth();
@@ -2226,10 +2266,12 @@ function Workspace({ user, onLogout, onUpdate }: { user: User; onLogout: () => v
   const settings = route === 'settings' || (route === 'cases' && id === 'settings');
   const settingsScope = route === 'settings' && id === 'personal' ? 'personal' : 'team';
   const homeVersion = useRef(0);
-  const refresh = useCallback(async () => {
+  const refresh = useCallback(async (onLoad?: (data: Home) => void) => {
     const version = ++homeVersion.current;
     const next = await post<Home>('overview');
-    if (homeVersion.current === version) setHome(next);
+    if (homeVersion.current !== version) return;
+    setHome(next);
+    onLoad?.(next);
   }, []);
   function updateThreads(update: (threads: Thread[]) => Thread[]) {
     homeVersion.current++;
@@ -2239,7 +2281,15 @@ function Workspace({ user, onLogout, onUpdate }: { user: User; onLogout: () => v
     }));
   }
   useEffect(() => {
-    refresh().catch((e) => fail(e.message));
+    let active = true;
+    refresh((next) => {
+      if (!active || route !== 'release-detail') return;
+      const release = next.releases.find((entry) => entry.release_id === id);
+      location.replace(release?.decisionAvailable ? releaseAssessmentHref(id) : '#releases-list');
+    }).catch((e) => {
+      if (active) fail(e.message);
+    });
+    return () => { active = false; };
   }, [refresh, route, id]);
   useLayoutEffect(() => {
     window.scrollTo(0, 0);
@@ -2315,7 +2365,7 @@ function Workspace({ user, onLogout, onUpdate }: { user: User; onLogout: () => v
             await post('logout');
             onLogout();
           })} />
-        ) : !home ? (
+        ) : !home || route === 'release-detail' ? (
           <p className="empty" role="status">Загрузка…</p>
         ) : route === 'demo-page' || route === 'demo-issue' ? (
           <DemoObject key={route+id} service={route} id={id}/>
@@ -2367,42 +2417,33 @@ function Workspace({ user, onLogout, onUpdate }: { user: User; onLogout: () => v
             <section className="paper release-calendar">
               <h2>Календарь из источников</h2>
               {!home.releases.length && <p>В загруженных источниках пока нет релизов.</p>}
-              {home.releases.map((r) => (
-                <a className="release-row" href={'#release-detail/' + r.release_id} key={r.release_id}>
-                  <small>
-                    {r.release_id} · {r.release_date}
-                  </small>
-                  {r.description}
-                </a>
-              ))}
+              {home.releases.map((release) => {
+                const summary = <>
+                  <small>{release.release_id} · {release.release_date}</small>
+                  <span>{release.description}</span>
+                </>;
+                return (
+                  <div className="release-row" key={release.release_id}>
+                    {release.decisionAvailable ? (
+                      <a className="release-summary" href={releaseAssessmentHref(release.release_id)}>{summary}</a>
+                    ) : (
+                      <div className="release-summary">{summary}</div>
+                    )}
+                    <button
+                      type="button"
+                      aria-label={'Запланировать оценку ' + release.release_id}
+                      onClick={() => {
+                        showCaseForm(release.release_id);
+                        jump('cases');
+                      }}
+                    >
+                      Запланировать оценку
+                    </button>
+                  </div>
+                );
+              })}
             </section>
           </>
-        ) : route === 'release-detail' ? (
-          (() => {
-            const r = home.releases.find((x) => x.release_id === id);
-            if (!r) return <p role="alert">Запись календаря не найдена. <a href="#releases-list">Журнал релизов</a></p>;
-            return (
-              <>
-                <a href="#releases-list">← Журнал релизов</a>
-                <h1>{r?.release_id}</h1>
-                <section className="paper">
-                  <small>{r?.release_date}</small>
-                  <p>{r?.description}</p>
-                  <p>Связанные задачи: {r?.related_task_ids}</p>
-                  {r.decisionAvailable && <a href={'#release-decision/' + r.release_id}>Решение по релизу</a>}
-                  <button
-                    onClick={() => {
-                      showCaseForm(id);
-                      jump('cases');
-                    }}
-                  >
-                    Запланировать оценку
-                  </button>
-                </section>
-                <CaseList items={home.cases.filter((c) => c.body.release === id)} />
-              </>
-            );
-          })()
         ) : route === 'cases' ? (
           <>
             <div className="page-head">
@@ -2467,7 +2508,15 @@ function Workspace({ user, onLogout, onUpdate }: { user: User; onLogout: () => v
                 <button>Создать личный разбор</button>
               </form>
             )}
-            <div className="toolbar">
+            <div className="toolbar case-filters">
+              <label>
+                Тип{' '}
+                <select value={caseType} onChange={(e) => setCaseType(e.target.value as CaseType)}>
+                  {Object.entries(caseTypeLabels).map(([value, label]) => (
+                    <option value={value} key={value}>{label}</option>
+                  ))}
+                </select>
+              </label>
               <label>
                 Состояние{' '}
                 <select value={filter} onChange={(e) => setFilter(e.target.value)}>
@@ -2479,7 +2528,11 @@ function Workspace({ user, onLogout, onUpdate }: { user: User; onLogout: () => v
                 </select>
               </label>
             </div>
-            <CaseList items={home.cases.filter((c) => !filter || c.state === filter)} />
+            <CaseList
+              items={home.cases.filter((c) => (!filter || c.state === filter) && matchesCaseType(c, caseType))}
+              showTypes
+              emptyMessage={filter || caseType !== 'all' ? 'По выбранным фильтрам разборов нет.' : undefined}
+            />
           </>
         ) : (
           <Overview
