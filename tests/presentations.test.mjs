@@ -202,6 +202,12 @@ test('new decks bound the release, table, checks and sources on distinct slides'
   const deck=assembleDeck(input,input.candidates.map((_,index)=>({index})));
   assert.equal(deck.slides.length,8);
   assert.equal(deck.slides.filter(slide=>slide.kind==='quote').length,1);
+  const quoteScene=composeSlide(deck,deck.slides.findIndex(slide=>slide.kind==='quote'));
+  const opening=quoteScene.find(object=>object.lines?.[0]==='«');
+  const closing=quoteScene.find(object=>object.lines?.[0]==='»');
+  assert.ok(opening && closing,'the quote has a matched pair of marks');
+  assert.ok(closing.x>opening.x);
+  assert.equal(closing.color,opening.color);
   assert.equal(deck.slides.filter(slide=>slide.kind==='sources').length,1);
   assert.ok(!deck.slides.some(slide=>slide.continuation || slide.kind==='log'));
   const table=deck.slides.find(slide=>slide.kind==='table');
