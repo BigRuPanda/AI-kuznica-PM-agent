@@ -1,5 +1,6 @@
 import { Fragment, useEffect, useRef, useState, type ReactNode } from 'react';
 import { DataForm } from './forms';
+import { Icon } from './icons';
 import type { Release } from './team-data';
 import { api, type Journal } from './types';
 import './releases.css';
@@ -50,6 +51,7 @@ export function ReleaseJournal({ calendar, initialFilter, admin, archiveOnly, on
   ];
   const visible = rows.filter(row => filter === 'all' || row.source === filter)
     .sort((a, b) => b.date.localeCompare(a.date) || a.title.localeCompare(b.title, 'ru') || a.id.localeCompare(b.id));
+  const showActions = visible.some(row => row.source === 'calendar');
   const loading = !journal && !error && filter !== 'calendar';
   const canImport = admin && !archiveOnly;
   const canCreate = admin && Boolean(journal?.datasets.length);
@@ -61,7 +63,7 @@ export function ReleaseJournal({ calendar, initialFilter, admin, archiveOnly, on
     setForm(kind);
   }
   return <section className="release-journal">
-    <div className="page-head release-page-head">
+    <header className="release-page-head">
       <h1 id="release-journal-title">Журнал релизов</h1>
       {journal && (canImport || canCreate) && <details className="release-management" ref={menu}>
         <summary>Управление</summary>
@@ -70,56 +72,72 @@ export function ReleaseJournal({ calendar, initialFilter, admin, archiveOnly, on
           {canImport && <button type="button" onClick={() => openForm('import')}>Импорт CSV</button>}
         </div>
       </details>}
-    </div>
-    <div className="release-filters" role="group" aria-label="Источник релизов">
-      {filters.map(([key, label]) => <button key={key} type="button" aria-pressed={filter === key}
-        onClick={() => setFilter(key)}>{label}</button>)}
-    </div>
-    {error && filter !== 'calendar' && <div className="actions release-list-status">
-      <p role="alert" className="error">Не удалось загрузить релизы с метриками. {error}</p>
-      <button type="button" onClick={() => refresh(n => n + 1)}>Повторить</button>
-    </div>}
-    {loading && <p role="status" className="muted">Загружаем релизы с метриками…</p>}
-    {visible.length > 0 ? <div className="release-table-card">
-      <table className="release-table release-journal-table" aria-labelledby="release-journal-title">
-        <thead><tr><th scope="col">Релиз</th><th scope="col">Дата выпуска</th><th scope="col">Источник</th></tr></thead>
-        <tbody>{visible.map(row => {
+    </header>
+    <div className="release-table-card">
+      <div className="release-journal-toolbar">
+        <div className="release-filters" role="group" aria-label="Источник релизов">
+          {filters.map(([key, label]) => <button key={key} type="button" aria-pressed={filter === key}
+            onClick={() => setFilter(key)}>{label}</button>)}
+        </div>
+      </div>
+      {error && filter !== 'calendar' && <div className="release-list-status">
+        <p role="alert" className="error">Не удалось загрузить релизы с метриками. {error}</p>
+        <button type="button" onClick={() => refresh(n => n + 1)}>Повторить</button>
+      </div>}
+      {loading && <p role="status" className="release-list-note">Загружаем релизы с метриками…</p>}
+      {visible.length > 0 ? <table role="table" className="release-table release-journal-table" aria-labelledby="release-journal-title">
+        <colgroup>
+          <col /><col className="release-date-col" /><col className="release-source-col" />
+          {showActions && <col className="release-actions-col" />}
+        </colgroup>
+        <thead role="rowgroup"><tr role="row">
+          <th role="columnheader" scope="col">Релиз</th>
+          <th role="columnheader" scope="col">Дата выпуска</th>
+          <th role="columnheader" scope="col">Источник</th>
+          {showActions && <th role="columnheader" scope="col">Действия</th>}
+        </tr></thead>
+        <tbody role="rowgroup">{visible.map(row => {
           const release = row.source === 'calendar' ? row.release : undefined;
           const href = release ? release.decisionAvailable && releaseAssessmentHref(row.id) : metricReleaseHref(row.id);
           const linkedTasks = release && releaseTasks(release);
           const linkedCases = release && renderCases(row.id);
           const hasTasks = Boolean(linkedTasks?.detailed.length || linkedTasks?.otherIds.length);
           const detailsLabel = hasTasks
-            ? linkedCases ? 'Связанные задачи и разборы' : 'Связанные задачи'
-            : linkedCases ? 'Связанные разборы' : '';
+            ? linkedCases ? 'Задачи и разборы' : 'Задачи'
+            : linkedCases ? 'Разборы' : '';
           const expanded = Boolean(detailsLabel && expandedRelease === row.id);
           const detailsId = 'release-links-' + encodeURIComponent(row.id);
           return <Fragment key={row.source + '/' + row.id}>
-            <tr className="release-row">
-              <th scope="row">
-                {href ? <a href={href}>{row.title}</a> : <span>{row.title}</span>}
-                {row.title !== row.id && <small>{row.id}</small>}
-                {release && <div className="actions release-row-actions">
-                  <button type="button" className="text-action" aria-label={'Запланировать разбор ' + row.id}
-                    onClick={() => onPlan(row.id)}>Запланировать разбор</button>
-                  {detailsLabel && <button type="button" className="text-action" aria-expanded={expanded}
-                    aria-controls={expanded ? detailsId : undefined} aria-label={detailsLabel + ' ' + row.id}
-                    onClick={() => setExpandedRelease(expanded ? null : row.id)}>{detailsLabel}</button>}
-                </div>}
+            <tr role="row" className="release-row">
+              <th role="rowheader" scope="row" className="release-name">
+                {row.title !== row.id && <small className="release-id">{row.id}</small>}
+                {href ? <a href={href}>{row.title}<Icon name="arrow" /></a> : <span>{row.title}</span>}
               </th>
-              <td>{row.date ? <time dateTime={row.date}>{displayDate(row.date)}</time> : 'Не указана'}</td>
-              <td>{sourceNames[row.source]}</td>
+              <td role="cell" className="release-date">{row.date ? <time dateTime={row.date}>{displayDate(row.date)}</time> : 'Не указана'}</td>
+              <td role="cell" className="release-source">{sourceNames[row.source]}</td>
+              {showActions && <td role="cell" className="release-actions">
+                {release && <div className="release-row-actions">
+                  <button type="button" className="release-row-action" aria-label={'Запланировать разбор ' + row.id}
+                    onClick={() => onPlan(row.id)}>Запланировать разбор</button>
+                  {detailsLabel && <button type="button" className="release-row-action" aria-expanded={expanded}
+                    aria-controls={expanded ? detailsId : undefined}
+                    aria-label={'Связанные ' + detailsLabel.toLowerCase() + ' ' + row.id}
+                    onClick={() => setExpandedRelease(expanded ? null : row.id)}>{detailsLabel}<Icon name="down" /></button>}
+                </div>}
+              </td>}
             </tr>
-            {expanded && linkedTasks && <tr className="release-related-row">
-              <td colSpan={3} id={detailsId}>
+            {expanded && linkedTasks && <tr role="row" className="release-related-row">
+              <td role="cell" colSpan={showActions ? 4 : 3} id={detailsId}>
                 {hasTasks && <RelatedTasks {...linkedTasks} />}
                 {linkedCases && <section><h3>Связанные разборы</h3>{linkedCases}</section>}
               </td>
             </tr>}
           </Fragment>;
         })}</tbody>
-      </table>
-    </div> : !loading && !(error && filter === 'metrics') && <p className="paper muted">Релизов пока нет.</p>}
+      </table> : !loading && (!error || filter === 'calendar') && <p role="status" className="release-list-note">
+        {filter === 'metrics' ? 'Релизов с метриками пока нет.' : 'Релизов пока нет.'}
+      </p>}
+    </div>
     {journal && form && <DataForm kind={form} journal={journal} close={() => setForm(null)}
       onDone={id => {
         setForm(null);

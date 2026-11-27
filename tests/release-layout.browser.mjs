@@ -47,12 +47,27 @@ test('the release journal sorts both sources and keeps their routes distinct', a
   assert.equal(await rows.last().getByRole('link').count(), 0);
   await page.getByRole('button', { name: 'Из календаря', exact: true }).click();
   assert.equal(await rows.count(), 3);
-  await rows.first().getByRole('button', { name: 'Связанные задачи и разборы R-001' }).click();
+  await page.setViewportSize({ width: 390, height: 844 });
+  const fit = await rows.first().evaluate(row => {
+    const title = row.querySelector('th').getBoundingClientRect();
+    const date = row.querySelector('time').getBoundingClientRect();
+    const actions = row.querySelector('button').getBoundingClientRect();
+    return {
+      fullWidth: title.width >= row.getBoundingClientRect().width - 40,
+      dateBelowTitle: date.top >= title.bottom,
+      actionsBelowDate: actions.top >= date.bottom,
+      horizontalScroll: document.documentElement.scrollWidth > innerWidth,
+    };
+  });
+  assert.deepEqual(fit, { fullWidth: true, dateBelowTitle: true, actionsBelowDate: true, horizontalScroll: false });
+  assert.equal(await table.getByRole('columnheader', { name: 'Дата выпуска', exact: true }).count(), 1);
+  await rows.first().getByRole('button', { name: 'Связанные задачи и разборы R-001' }).press('Enter');
   const tasks = page.getByRole('table', { name: 'Связанные задачи' });
   await tasks.getByRole('cell', { name: 'Обновить документацию' }).waitFor();
   await tasks.getByRole('cell', { name: 'Проверить публикацию' }).waitFor();
   await page.getByRole('listitem').filter({ hasText: 'DOC-3' }).waitFor();
   await page.getByRole('link', { name: /Проверка календарного релиза/ }).waitFor();
+  await page.setViewportSize({ width: 1440, height: 900 });
   await rows.first().getByRole('link', { name: calendarTitle, exact: true }).click();
   await page.getByRole('heading', { name: 'Разбор релиза', exact: true }).waitFor();
   await page.waitForURL('**/#release-decision/R-001');
