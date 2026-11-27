@@ -20,8 +20,6 @@ const ids = s => String(s || '').split(',').map(x => x.trim()).filter(Boolean);
 const sameFamily = (s, product) => productFamily(s || '') === productFamily(product);
 const countUnits = { visits: 'визитов', views: 'просмотров', count: 'событий', events: 'событий' };
 const cartMetric = 'cfg_add_to_cart_rate';
-const cartCheck = 'После подтверждённой выкладки сверить тестовое добавление из конфигуратора Kaspersky с событием электронной торговли в Метрике и проверить знаменатель. Затем собрать 4 полные недели с корректным учётом.';
-const cartBaseline = 'Четыре недели до выкладки проверяются по справочнику. В архиве событие добавления в корзину у Kaspersky почти не фиксировалось. Первые 4 недели корректного учёта могут стать базой для следующих сравнений.';
 
 export function observationOptions(db, c) {
   const definitions = facts(db, 'dictionary');
@@ -45,8 +43,7 @@ export function observationOptions(db, c) {
     id: 'orders_index', title: 'Индекс самостоятельных заказов', segments: ['all'],
     note: salesDef?.data.comment, source: salesDef && ref(salesDef),
   }];
-  const cartTask = backlog.find(row => row.data.task_id === 'T-08' &&
-    ids(row.data.linked_metric_ids).includes(cartMetric));
+  const cartTask = backlog.find(row => ids(row.data.linked_metric_ids).includes(cartMetric));
   for (const row of definitions) {
     const d = row.data;
     if (d.metric_id === 'family_orders_idx') continue;
@@ -68,9 +65,9 @@ export function observationOptions(db, c) {
     };
   });
   const examples = {};
-  if (cartTask && tasks.some(t => t.id === 'T-08' && !t.releaseIds.length) &&
+  if (cartTask && tasks.some(t => t.id === cartTask.data.task_id && !t.releaseIds.length) &&
       metrics.some(m => m.id === cartMetric && m.segments.includes('desktop'))) {
-    examples.cart = { taskId: 'T-08', metric: cartMetric, segment: 'desktop', condition: cartCheck };
+    examples.cart = { taskId:cartTask.data.task_id, metric:cartMetric, segment:'desktop' };
   }
   const astraRelease = releases.find(r => r.data.release_id === 'R-02' && ids(r.data.affected_metrics).includes('cfg_family_views'));
   if (astraRelease && tasks.some(t => t.id === 'T-02' && t.releaseIds.includes('R-02')) &&
@@ -117,7 +114,6 @@ export function makeObservationPlan(db, c, input) {
   const comparison = control ? {
     control, controlTolerance: setting(db, 'rules', defaultRules).controlTolerance ?? defaultRules.controlTolerance,
   } : {};
-  const cartRepair = task?.id === 'T-08' && metric.id === cartMetric;
   let scheduling = {};
   if (task && !deployed) {
     const previous = c.body.watch;
@@ -131,13 +127,13 @@ export function makeObservationPlan(db, c, input) {
     metric:metric.id, segment, deployed, releaseId:release?.id || null, taskId:task?.id || null,
     baselineWeeks:input.baselineWeeks ?? 4, observationWeeks:input.observationWeeks ?? 4,
     target:input.target ?? null, direction:input.direction || 'at-least',
-    condition:input.condition?.trim() || (cartRepair ? cartCheck : null),
+    condition:input.condition?.trim() || null,
     ...comparison,
   };
   return { version:2, kind:'archive-observation', ...criteria, title:metric.title, ...scheduling,
     request:digest(JSON.stringify(criteria)),
     sources:[task?.source,release?.source,metric.source].filter(Boolean),
-    metricNote:metric.note || null, baselineNote:cartRepair ? cartBaseline : null };
+    metricNote:metric.note || null };
 }
 
 function confirmsFamily(product, fields) {
@@ -185,11 +181,10 @@ function resolveRollout(db, product, plan, cutoff) {
   return {rollout:{id:r.release_id, date:r.release_date, title:r.description, sources:[ref(task),ref(release)]}};
 }
 
-function period(db, product, plan, start, end, asOf, step) {
+function period(read, product, plan, start, end, asOf, step) {
   const sales = plan.metric === 'orders_index';
-  const records = (sales ? facts(db,'sales') : db.prepare(
-    "SELECT file,loc,version,body FROM facts WHERE kind='metrics' AND json_extract(body,'$.metric_id')=? AND json_extract(body,'$.segment')=?",
-  ).all(plan.metric,plan.segment).map(r => ({...r,data:JSON.parse(r.body)})))
+  const records = (sales ? read('sales') : read('metrics').filter(r =>
+    r.data.metric_id === plan.metric && r.data.segment === plan.segment))
     .filter(({data:d}) => {
       const sourceDate = sales ? d.week_start : d.date;
       const at = time(sourceDate), value = sales ? d.orders_index : d.value;
@@ -243,7 +238,7 @@ function comparePeriods(before, after) {
     return 'До и после выкладки использованы разные ряды.';
 }
 
-export function observedEffect(db, c, cutoff = today()) {
+export function observedEffect(db, c, cutoff = today(), read = kind => facts(db, kind)) {
   const plan = c.body.watch;
   validateEffectCutoff(cutoff);
   const asOf = time(cutoff);
@@ -257,14 +252,14 @@ export function observedEffect(db, c, cutoff = today()) {
   const beforeEnd = step === 7 ? deployed-weekday*day : deployed;
   const afterStart = step === 7 ? deployed+(7-weekday)*day : deployed+day;
   const start = beforeEnd-plan.baselineWeeks*7*day, end = afterStart+plan.observationWeeks*7*day;
-  const before = period(db,c.product,plan,start,beforeEnd,asOf,step);
-  const after = period(db,c.product,plan,afterStart,end,asOf,step);
+  const before = period(read,c.product,plan,start,beforeEnd,asOf,step);
+  const after = period(read,c.product,plan,afterStart,end,asOf,step);
   const baseline = before.result, observed = after.result;
   const reason = comparePeriods(before,after);
   let control, controlReason;
   if (plan.control) {
-    const controlBefore = period(db,plan.control,plan,start,beforeEnd,asOf,step);
-    const controlAfter = period(db,plan.control,plan,afterStart,end,asOf,step);
+    const controlBefore = period(read,plan.control,plan,start,beforeEnd,asOf,step);
+    const controlAfter = period(read,plan.control,plan,afterStart,end,asOf,step);
     const controlBaseline = controlBefore.result, controlObserved = controlAfter.result;
     controlReason = comparePeriods(controlBefore,controlAfter);
     const complete = !controlReason && Number.isFinite(controlBaseline.value) && Number.isFinite(controlObserved.value);
@@ -278,7 +273,7 @@ export function observedEffect(db, c, cutoff = today()) {
       tolerance: plan.controlTolerance ?? defaultRules.controlTolerance,
     };
   }
-  const accounting = facts(db,'releases').filter(({data:r}) => {
+  const accounting = read('releases').filter(({data:r}) => {
     const t = time(r.release_date);
     return t >= start && t < end && t <= asOf && r.status === 'выпущен' &&
       ['analytics','infrastructure'].includes(r.release_type);

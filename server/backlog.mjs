@@ -1,5 +1,5 @@
 const ids = (value) => String(value || '').split(/[,;|\s]+/u).filter(Boolean);
-const source = (fact) => fact.file + ' · ' + fact.loc;
+const source = ({file,loc,version}) => ({file,loc,version,source:file+' · '+loc});
 const unknownImpact = 'Охват и ожидаемый финансовый эффект задачи не оценены.';
 const trackingWork = /разметк|отслеживан|(?:передач|сбор|регистраци|уч[её]т|отправк|полнот).{0,45}событи|событи.{0,45}(?:теря|потер|переда|не фикс|регистрац)/iu;
 
@@ -29,10 +29,10 @@ function measurementLimit(definition, family) {
     /не (?:фиксиру|счита|собира|регистрир)|не измеря|недоступ|нет (?:метрик|событи|данных)/iu.test(s));
 }
 
-const tier = (entry) => entry.category === 'Проверить сейчас' ? 0 : 1;
+const tier = entry => entry.category === 'Ограничение измерения' ? 0 : 1;
 
 export function backlogRecommendations(tasks, definitions, releases, {
-  product, through, historical, releaseId, metricId, signal,
+  product, through, historical, releaseId, metricId,
 }) {
   const family = familyWords(product);
   const definitionsById = new Map(definitions.map((f) => [f.data.metric_id, f]));
@@ -53,7 +53,7 @@ export function backlogRecommendations(tasks, definitions, releases, {
     const sources = [source(f)];
     if (byRelease) sources.push(source(release));
     let reason = byRelease ? 'Задача связана с релизом ' + releaseId + '.' : 'В задаче указан продукт ' + product + '.';
-    let category = 'Требует проверки';
+    let category = 'Связанная задача';
     const matching = links.filter((id) => affectedMetrics.has(id));
     if (matching.length) reason += ' Общие показатели: ' + matching.join(', ') + '.';
     else if (links.length) reason += ' Показатели задачи: ' + links.join(', ') + '.';
@@ -65,25 +65,15 @@ export function backlogRecommendations(tasks, definitions, releases, {
       const limit = measurementLimit(def, family);
       if (!limit) continue;
       sources.push(source(def));
-      category = 'Проверить сейчас';
-      reason += ' Ограничение измерения (' + id + '): ' + limit.trim() +
-        '. Проверить регистрацию событий перед выводом об эффекте.';
+      category = 'Ограничение измерения';
+      reason += ' Ограничение измерения (' + id + '): ' + limit.trim() + '.';
       break;
     }
-    if (category === 'Требует проверки') reason += ' Нужна проверка гипотезы и критерия успеха.';
     recommendations.push({ key: t.task_id, title: t.title, category, relatedMetrics: matching,
-      linkedRelease: byRelease ? releaseId : null, reason: reason + ' ' + unknownImpact, source: sources.join(' / ') });
-  }
-  if (signal?.rule === 'relative' && signal.status !== 'withdrawn' && (!through || signal.week <= through)) {
-    recommendations.push({
-      key: 'Предложение', title: 'Проверить путь от выбора до самостоятельного заказа · ' + product,
-      category: 'Проверить сейчас',
-      reason: 'Снижение индекса заказов. Сверить путь покупки по устройствам и качество регистрации шагов. ' + unknownImpact,
-      source: signal.source,
-    });
+      linkedRelease: byRelease ? releaseId : null, reason: reason + ' ' + unknownImpact,
+      source:sources.map(row=>row.source).join(' / '), sourceRefs:sources });
   }
   return recommendations.sort((a, b) => tier(a) - tier(b) ||
-    Number(a.key === 'Предложение') - Number(b.key === 'Предложение') ||
     Number(Boolean(b.linkedRelease)) - Number(Boolean(a.linkedRelease)) ||
     (b.relatedMetrics?.length || 0) - (a.relatedMetrics?.length || 0) ||
     a.key.localeCompare(b.key, 'ru', { numeric: true }));

@@ -2,6 +2,7 @@ import { digest, effect, facts, fmt, listSales } from './evidence.mjs';
 import { visibleCase } from './workbench.mjs';
 import { readMaterial } from './materials.mjs';
 import { access,readSnapshot,readRange } from './chart-ranges.mjs';
+import { releaseEvidence } from './release-decision.mjs';
 
 const clean = v => String(v ?? '').replace(/\*\*|\x00/g, '').trim();
 const source = (label, url) => ({ label: clean(label), url });
@@ -15,6 +16,39 @@ const allowed=(db,user,id,shared=false)=>{try {access(db,user,id,shared);return 
 const archiveRef = r => source(r.file + ' · ' + r.loc, '#knowledge-source/' + r.version + '/' + encodeURIComponent(r.loc));
 const salesRef = r => source(r.source,'#knowledge-source/'+r.version+'/'+encodeURIComponent(r.source.split(' · ').at(-1)));
 const titleOf = (s, fallback) => clean(s).split(/\n/u)[0] || fallback;
+
+export function releasePresentationInput(db, user, caseId, created, decision) {
+  const c = visibleCase(db,user,caseId);
+  if ((c.body.release || c.body.signal?.releaseId) !== decision.release.id || c.product !== decision.product)
+    throw Error('Срез относится к другому разбору.');
+  const {scope,evidence} = releaseEvidence(db,decision);
+  const checks = [], candidates = [];
+  const missing = 'Решение по этому срезу не зафиксировано.';
+  for (const {kind,data,sources} of evidence) {
+    const refs = sources.map(archiveRef);
+    if (kind === 'orders-index') {
+      const title = 'Недельный индекс самостоятельных заказов';
+      candidates.push({kind:'chart',title,unit:'п. индекса',series:[{name:c.product,
+        points:[...data.baseline.rows,...data.current.rows].map(row=>({label:row.date,value:row.value}))}],refs});
+      checks.push({date:scope.through,stage:title,result:fmt(data.baseline.mean)+' → '+fmt(data.current.mean)+' п.',refs});
+    } else if (kind === 'interview' && data.excerpt) {
+      candidates.push({kind:'quote',title:'Интервью',body:clean(data.excerpt),refs});
+    } else if (kind === 'release' || kind === 'backlog') {
+      checks.push({date:data.date,stage:kind==='release'?'Релиз':'Бэклог',
+        result:[data.id,data.title || data.description].filter(Boolean).join(' · '),refs});
+    } else if (kind === 'account-metrics') {
+      const rows = data.comparisons.map(row=>[row.segment,fmt(row.baseline.total),fmt(row.observation.total),row.state]);
+      if (rows.length) candidates.push({kind:'table',title:'Визиты с кликом',refs,
+        columns:['Сегмент','До','После','Состояние измерения'],rows});
+    }
+  }
+  const title = decision.product+' · '+decision.release.id;
+  const period = (scope.from ? scope.from+' — ' : 'По ')+scope.through;
+  const card = source('Карточка разбора',caseLink(caseId));
+  return {caseId,product:c.product,title,state:'Исторический срез',created,personal:true,checks,candidates,savedDecision:false,
+    cover:{kind:'cover',title,body:'Срез данных · '+period,decision:missing,decisionTitle:'Статус решения',refs:[card]},
+    decision:{kind:'decision',title:'Статус решения',body:missing,rows:[],refs:[]}};
+}
 
 // Collect a coherent version while the caller holds its SQLite transaction.
 export function casePresentationInput(db, user, caseId, created) {
@@ -267,21 +301,17 @@ export function casePresentationInput(db, user, caseId, created) {
   }
   checks.sort((a,b)=>(a.date || '9999').localeCompare(b.date || '9999'));
   const latestNote=notes.at(-1)?.text;
-  const decision=watch ? 'Проверить результат за согласованный период' : c.state==='Завершено' ?
-    (publishedConclusion || 'Разбор завершён. Отдельное решение в карточке не зафиксировано.') :
-    plan.success ? 'Сопоставить результат проверки с критерием успеха.' : withdrawn ?
-      'Сверить выводы разбора с пересчитанными данными.' : signal ?
-      'Проверить, сохраняется ли изменение в следующем полном периоде, и сопоставить его с событиями продукта.' :
-      !checks.length ? 'Собрать исходные наблюдения и сформулировать проверяемую гипотезу.' :
-      'Зафиксировать решение по результатам проверки';
+  const savedDecision = checks.findLast(row=>row.stage==='Публикация в команду' && row.result===clean(publishedConclusion));
+  const decision = savedDecision?.result || 'Решение в разборе пока не зафиксировано.';
   const supporting=candidates.find(s=>s.kind==='finding' || s.kind==='quote');
   const planOnly=plan.hypothesis && checks.every(row=>row.stage==='Исходная гипотеза') && candidates.every(s=>s.kind==='table');
-  return {caseId,product:c.product,title:c.title,state:c.state,created,personal,checks,candidates,
+  return {caseId,product:c.product,title:c.title,state:c.state,created,personal,checks,candidates,savedDecision:Boolean(savedDecision),
     cover:{kind:'cover',title:titleOf(withdrawn ? headline : publishedConclusion || latestNote || headline || supporting?.body,c.title),
       body:planOnly ? 'Гипотеза сформулирована. Результат проверки пока не зафиксирован.' :
         checks.length || candidates.length ? c.title : 'Подтверждённых результатов в разборе пока нет.',
-      keyValue,keyLabel,decision,refs:unique([card,...leadRefs,...(supporting?.refs || [])])},
-    decision:{kind:'decision',title:c.state==='Завершено'?'Итог разбора':'Следующий шаг',body:decision,
+      keyValue,keyLabel,decision,decisionTitle:savedDecision?'Сохранённое решение':'Статус решения',
+      refs:unique([card,...leadRefs,...(supporting?.refs || [])])},
+    decision:{kind:'decision',title:savedDecision?'Сохранённое решение':'Статус решения',body:decision,
       rows:[['Ответственный',b.responsible],['Критерий успеха',plan.success || watch?.condition],['Контроль',plan.control],
-        ['Проверить',observed?.checkAfter || observed?.end]].filter(r=>r[1]),refs:[card]}};
+        ['Дата проверки',observed?.checkAfter || observed?.end]].filter(r=>r[1]),refs:savedDecision?.refs || [card]}};
 }

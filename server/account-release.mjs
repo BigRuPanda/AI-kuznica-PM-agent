@@ -23,23 +23,23 @@ export function accountDataDate(db, releases) {
 
 export function recommendationEvidence(db, release, calendar, asOf, {
   segment, baselineWeeks = 2, observationWeeks = 2, from, metricVersions, releaseVersions, dictionaryVersions,
+  read = kind => facts(db, kind),
 } = {}) {
   if (!release || !ids(release.data.affected_metrics).includes(clicks)) return;
   const sources = new Map();
   const cite = row => { if (row) sources.set(row.version + '/' + row.loc, source(row)); };
-  const definitions = facts(db, 'dictionary').filter(row => !dictionaryVersions || dictionaryVersions.includes(row.version));
+  const definitions = read('dictionary').filter(row => !dictionaryVersions || dictionaryVersions.includes(row.version));
   cite(definitions.find(row => row.data.metric_id === clicks));
   const deployed = release.data.release_date;
-  const available = db.prepare(`SELECT DISTINCT json_extract(body,'$.segment') AS segment FROM facts
-    WHERE kind='metrics' AND json_extract(body,'$.product')='ЛК' AND json_extract(body,'$.metric_id')=?
-    AND json_extract(body,'$.date')<=? ORDER BY segment`).all(clicks, asOf).map(row => row.segment);
+  const available = [...new Set(read('metrics').filter(({data}) => data.product === 'ЛК' &&
+    data.metric_id === clicks && data.date <= asOf).map(({data}) => data.segment))].sort();
   const segments = !segment || segment === 'all' && !available.includes('all') ? available : [segment];
-  const lines = [];
+  const lines = [], comparisons = [];
   let unchanged = segments.length > 0;
   let period;
   for (const id of segments) {
     const watch = { deployed, metric: clicks, segment: id, baselineWeeks, observationWeeks };
-    const effect = observedEffect(db, { product: 'ЛК', body: { watch } }, asOf);
+    const effect = observedEffect(db, { product: 'ЛК', body: { watch } }, asOf, read);
     const before = effect.baseline, after = effect.observed;
     if (!before || !after) {
       unchanged = false;
@@ -60,6 +60,8 @@ export function recommendationEvidence(db, release, calendar, asOf, {
     period = 'До релиза сравниваем ' + before.from + ' — ' + before.through + ', после — ' + after.from + ' — ' + after.through + '. День выкладки исключён.';
     for (const row of used) cite(row);
     for (const row of effect.breaks || []) cite(row);
+    const values = ({sources, ...period}) => period;
+    comparisons.push({segment:id, baseline:values(before), observation:values(after), state:effect.state});
     unchanged &&= effect.actual != null && before.value === after.value;
     const change = effect.actual == null
       ? effect.state + '. Покрытие в днях до и после — ' +
@@ -83,5 +85,6 @@ export function recommendationEvidence(db, release, calendar, asOf, {
   } else conclusion += ' В доступном на эту дату календаре нет подтверждения начала учёта просмотров блока.';
   const summary = unchanged ? 'Среднее число визитов с кликом в день осталось прежним по каждому из указанных устройств.' : null;
   return { lines: [summary, period, ...lines, !lines.length && 'В срезе ещё нет данных о визитах с кликом.', limitation, conclusion].filter(Boolean),
+    measurements:{metric:clicks, comparisons, ctrTracking:tracking && {date:tracking.data.release_date, releaseId:tracking.data.release_id}},
     sources: [...sources.values()] };
 }

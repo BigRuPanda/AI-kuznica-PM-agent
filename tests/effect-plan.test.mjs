@@ -103,7 +103,8 @@ test('effect preview requires full comparable coverage and a linked rollout whil
     assert.equal(pending.checkAfter, undefined);
     assert.equal(pending.baseline, undefined);
     assert.match(pending.state, /Ожидаем/);
-    assert.match(pending.plan.condition, /событием электронной торговли/);
+    assert.equal(pending.plan.condition, null);
+    assert.equal(pending.plan.baselineNote, undefined);
     const savedPending = store.one("SELECT body FROM cases WHERE id='kaspersky'").body;
     call('watch', plan);
     assert.equal(store.one("SELECT body FROM cases WHERE id='kaspersky'").body, savedPending);

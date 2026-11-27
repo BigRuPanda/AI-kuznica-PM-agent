@@ -1,5 +1,6 @@
 import { access, neighboring, readRange, readSnapshot, grant } from './chart-ranges.mjs';
 import { analysisView, digest, fmt, listSales, productFamily as family } from './evidence.mjs';
+import { releaseEvidence, releaseScopedView } from './release-decision.mjs';
 import { materialForResult, readMaterial, sourceSection } from './materials.mjs';
 import { DAY } from './import.mjs';
 import { chartFindings, chartObservations } from './chart-focus.mjs';
@@ -336,9 +337,16 @@ export function prepareResearch(store, user, b, history, job, intent = researchI
     (sales.length === 1 && sales[0]);
   if (!product) return null;
   if (!view || (b.analysisPeriod && !range && !attached && !b.screen?.requested)) {
-    view = analysisView(db, { product, caseId: b.caseId, full: b.screen?.full, ...b.analysisPeriod });
+    view = analysisView(db, { product, caseId: b.caseId, full: b.screen?.full, ...b.analysisPeriod,
+      ...(b.decisionThrough && {control:b.screen?.control || false}) });
     grant(db, view.id, 'thread', b.thread);
     sourceId = view.id;
+  }
+  const decision = b.decisionThrough && b.releaseDecisionSnapshot?.decision;
+  if (decision && Array.isArray(view.summary)) {
+    view = releaseScopedView(db,view,releaseEvidence(db,decision).evidence);
+    sourceId = view.id;
+    grant(db,view.id,'thread',b.thread);
   }
   const periods =
     range?.ranges ||

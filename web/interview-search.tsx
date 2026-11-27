@@ -10,7 +10,7 @@ export function InterviewSearch({ caseId, asOf }: { caseId: string; asOf?: strin
 
   return (
     <details className="paper interview-search">
-      <summary>Поиск по интервью</summary>
+      <summary data-ui-hint="Ищет обезличенные выдержки по теме или цитате.">Поиск по интервью</summary>
       <form onSubmit={async (event) => {
         event.preventDefault();
         if (!query.trim() || pending) return;

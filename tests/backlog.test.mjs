@@ -6,7 +6,7 @@ import { initWorkbench } from '../server/workbench.mjs';
 import { workspaceOperation } from '../server/workspace-operations.mjs';
 import { teamTools } from '../server/team-mcp.mjs';
 
-test('backlog recommendations use product, measurement limits and the selected cutoff across tools and saved views', async () => {
+test('backlog evidence uses product, measurement limits and the selected cutoff across tools and saved views', async () => {
   const store = openStore(':memory:');
   const user = { id: 'pm', name: 'PM', role: 'admin' };
   const product = 'Kaspersky Endpoint Security';
@@ -41,11 +41,12 @@ test('backlog recommendations use product, measurement limits and the selected c
     const result = read('2026-10-23');
     assert.deepEqual(result.backlog, result.view.backlog);
     assert.deepEqual(result.backlog.map((r) => r.key), ['T-08', 'T-03', 'T-02', 'T-22', 'T-30']);
-    assert.equal(result.backlog[0].category, 'Проверить сейчас');
+    assert.equal(result.backlog[0].category, 'Ограничение измерения');
     assert.match(result.backlog[0].reason, /cfg_add_to_cart_rate.*не фиксируется/s);
     assert.match(result.backlog[0].source, /definitions!A9/);
+    assert.ok(result.backlog[0].sourceRefs.some(row=>row.loc === 'definitions!A9' && /^[a-f0-9]{64}$/.test(row.version)));
     assert.equal(result.backlog[1].linkedRelease, 'R-09');
-    assert.ok(result.backlog.slice(1).every((r) => r.category === 'Требует проверки'));
+    assert.ok(result.backlog.slice(1).every((r) => r.category === 'Связанная задача'));
     assert.ok(!before.backlog.some((r) => r.key === 'T-08'));
     assert.ok(!read('2026-10-25').backlog.some((r) => r.key === 'T-30'));
     const tools = new Map();

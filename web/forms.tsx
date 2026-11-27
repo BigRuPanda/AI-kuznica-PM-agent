@@ -13,9 +13,9 @@ export function DataForm({kind,journal,onDone,close}:{kind:'release'|'import';jo
         await api('import',{name:get('name')||file.name,dataset:dataset||undefined,completeThrough:get('complete')?localTime(get('complete')):undefined,csv:await file.text()});onDone();}
     }catch(ex){setError((ex as Error).message);}finally{setPending(false);}
   }}>
-  <label>Набор данных<select required={kind==='release'} value={dataset} onChange={e=>setDataset(e.target.value)}>{kind==='import'&&<option value="">Новый набор</option>}{journal.datasets.map(d=><option key={d.id} value={d.id}>{d.name}</option>)}</select></label>
+  <label>Набор данных<select required={kind==='release'} data-ui-hint={kind==='release' ? 'Выберите события, по которым считать метрики релиза.' : undefined} value={dataset} onChange={e=>setDataset(e.target.value)}>{kind==='import'&&<option value="">Новый набор</option>}{journal.datasets.map(d=><option key={d.id} value={d.id}>{d.name}</option>)}</select></label>
   {kind==='import'?<>{!dataset&&<label>Название набора<input name="name" required maxLength={180}/></label>}<label>CSV с событиями<input required type="file" accept=".csv,text/csv" onChange={e=>setFile(e.target.files?.[0]||null)}/></label>
-  <label>Данные полны по дату и время, МСК<input name="complete" type="datetime-local"/></label><small>Обязательны event_type, event_at и order_id или invoice_id. Каждый импорт сохраняет версию. Для неполной выгрузки дату можно оставить пустой.</small></>:
+  <label>Данные полны по дату и время, МСК<input name="complete" type="datetime-local" data-ui-hint="До какого момента выгрузка содержит все события."/></label><small>Обязательны event_type, event_at и order_id или invoice_id. Каждый импорт сохраняет версию. Для неполной выгрузки дату можно оставить пустой.</small></>:
   <><label>Название<input name="title" required maxLength={180}/></label><label>Что изменилось<textarea name="description" required maxLength={1500}/></label>
   <label>Включение для пользователей, МСК<input type="datetime-local" required name="launch"/></label><label>Аудитория<input required name="audience"/></label>
   <label>Главный вопрос<input required name="question"/></label><label>Целевая метрика<select name="target">{metricNames.map((m,i)=><option value={i} key={m}>{m}</option>)}</select></label>

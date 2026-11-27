@@ -4,6 +4,7 @@ import type {Context,Derived,Series} from './types';
 import {ChartSummary,Comparisons,CustomChart} from './charts';
 import {metricSample} from './metric-values';
 import {Dialog} from './dialog';
+import {HelpMarker} from './ui-hints';
 import {seriesPath} from './trend';
 import {Icon} from './icons';
 type Comparison={title:string;unit:string;reason:string;formula:string;series:Record<string,Series>};
@@ -46,12 +47,19 @@ export function SavedChart({id,author,suggested,onSave,preview=false}:{id:string
   return <div className="release-chart"><button className="chart-preview" type="button" aria-haspopup="dialog" aria-label={'Раскрыть график: '+calc.result.title} aria-describedby={listId+'-summary'} onClick={()=>setOpen(true)}>
     <span className="preview-line"><span>{calc.result.title}</span><Icon name="expand"/></span>
     <span id={listId+'-summary'}><ChartSummary chart={calc.result} launch={calc.launch} day={calc.context.day}/></span><Sparkline chart={calc.result} launch={calc.launch}/>
-  </button>{open&&<Dialog title={calc.result.title} wide close={()=>setOpen(false)}><div className="release-chart">{content}</div></Dialog>}</div>;
+  </button>{open&&<Dialog title={calc.result.title} wide close={()=>setOpen(false)}><div className="release-chart">
+    <HelpMarker label="О графике релиза" hint="График построен по сохранённому расчёту."/>
+    {content}
+  </div></Dialog>}</div>;
 }
 export function CalculationPage({id}:{id:string}){
   const {calc,error}=useCalculation(id);
   if(!calc)return <section className="page"><a href="#releases">Журнал релизов</a><p>{error||'Открываем расчёт…'}</p></section>;
-  return <section className="proof-page"><a href={'#release/'+calc.context.releaseId}>← К релизу {calc.context.releaseId}</a><h1>Сохранённый расчёт</h1>
+  return <section className="proof-page"><a href={'#release/'+calc.context.releaseId}>← К релизу {calc.context.releaseId}</a>
+    <div className="ui-hint-heading">
+      <h1>Сохранённый расчёт</h1>
+      <HelpMarker label="О расчёте релиза" hint="Здесь видны данные сохранённого расчёта релиза."/>
+    </div>
     <p>{segmentNames[calc.context.segment]} · срез на {dayDate(calc.launch,calc.context.day)} · версия данных {calc.context.version.slice(0,10)}</p>
     {calc.op!=='interval'&&<p className="muted">До запуска {dayDate(calc.launch,-7)} – {dayDate(calc.launch,0)} · {calc.context.day?'после запуска '+dayDate(calc.launch,0)+' – '+dayDate(calc.launch,Math.min(calc.context.day,7)):'срез на момент запуска'}</p>}
     {calc.op==='build_chart'&&<CustomChart calcId={calc.id} version={calc.context.version} chart={calc.result} launch={calc.launch} day={calc.context.day}/>}

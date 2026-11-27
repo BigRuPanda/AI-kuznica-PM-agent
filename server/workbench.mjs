@@ -1,6 +1,6 @@
 import { externalAnswer } from './source-chat.mjs';
 import { archiveEvidence, archiveInquiry, archiveAnswer, archiveIdStatus, asksArchiveTask } from './archive-search.mjs';
-import { briefConversation, caseBrief, caseBriefKind } from './chat-brief.mjs';
+import { briefConversation, caseBriefKind } from './chat-brief.mjs';
 import { weeklySourceAnswer } from './weekly-source-chat.mjs';
 import { checkReleaseReferencePeriod, checkReleaseSourceVersions } from './release-chat-scope.mjs';
 import { initRanges, access, grant, compareRanges, readRange, readSnapshot } from './chart-ranges.mjs';
@@ -47,7 +47,9 @@ import {
 } from './agent-research.mjs';
 import { asksToDraw, chartFindings, chartObservations, resolveChartFocus } from './chart-focus.mjs';
 import { dayComparison, explicitDayWindow, investigationPeriod } from './day-comparison.mjs';
-import { canDecideRelease, legacyReleaseProduct } from './release-decision.mjs';
+import { canDecideRelease, legacyReleaseProduct, releaseDecision, releaseEvidence, restrictReleaseDecision } from './release-decision.mjs';
+import { analysisEvidence, analysisSources, analysisText, composeAnalysis, markdownSource, rowLink, uniqueRows } from './analysis-composer.mjs';
+import { sourceReader } from './source-reader.mjs';
 
 const chatItemColumns = '(seq INTEGER PRIMARY KEY AUTOINCREMENT,thread TEXT,author TEXT,role TEXT,body TEXT,created INTEGER);';
 
@@ -240,10 +242,12 @@ export function bindReleaseThreadCase(db, user, releaseId, caseId, product) {
 }
 
 function freezeReleaseDecision(db, decision) {
-  const versions = kind => db.prepare('SELECT DISTINCT version FROM facts WHERE kind=? ORDER BY version').all(kind).map(row => row.version);
+  const read = sourceReader(db, decision.historical && decision.asOf);
+  const versions = kind => [...new Set(read(kind).map(row => row.version))].sort();
   return { releaseId: decision.release.id, through: decision.asOf, product: decision.product, decision,
     metricVersions: versions('metrics'), releaseVersions: versions('releases'), salesVersions: versions('sales'),
-    dictionaryVersions: versions('dictionary'), backlogVersions: versions('backlog'), competitorVersions: versions('competitor') };
+    dictionaryVersions: versions('dictionary'), backlogVersions: versions('backlog'), competitorVersions: versions('competitor'),
+    interviewVersions:versions('interview') };
 }
 export function saveReleaseDecisionContext(db, user, decision) {
   if (!decision.release) return undefined;
@@ -257,6 +261,8 @@ export function readReleaseDecisionContext(db, user, id) {
   if (!row) throw Error('Срез релиза недоступен. Откройте решение по релизу снова.');
   const context = JSON.parse(row.body);
   if (context.decision.caseId) visibleCase(db, user, context.decision.caseId);
+  delete context.decision.recommendation;
+  delete context.decision.measurementIssue;
   return context;
 }
 export function createThread(db, user, title, group = false) {
@@ -325,6 +331,12 @@ function presentationCase(db, user, body, scope) {
   return caseForThread(db, user, chat, release)?.id ?? null;
 }
 
+function presentationReleaseSlice(db, user, body, period) {
+  const snapshot = body.releaseDecisionSnapshot;
+  if (!snapshot || !snapshot.decision.historical && !period) return;
+  return restrictReleaseDecision(db, user, snapshot, period);
+}
+
 function presentationRecovery(db, user, job, reply, scope) {
   if (!job || job.user !== user.id) return;
   const caseId = presentationCase(db, user, JSON.parse(job.body), scope);
@@ -369,7 +381,7 @@ export function enqueue(store, user, b, { telegramReply } = {}) {
       if (snapshot.releaseId !== releaseId || snapshot.product !== product ||
           (release.case_id && snapshotCase && snapshotCase !== release.case_id))
         throw Error('Срез относится к другой переписке.');
-      b = { ...b, caseId: snapshotCase || undefined, decisionReleaseId: releaseId,
+      b = { ...b, caseId: snapshotCase || (!snapshot.decision.historical && release.case_id) || undefined, decisionReleaseId: releaseId,
         decisionThrough: snapshot.through, product, releaseDecisionSnapshot: snapshot };
     } else if (releaseId) {
       b = { ...b, caseId: b.caseId || caseForThread(store.db, user, t, release)?.id, decisionReleaseId: releaseId, product };
@@ -432,10 +444,12 @@ export function enqueue(store, user, b, { telegramReply } = {}) {
     if (range) grant(store.db, range.id, 'thread', t.id);
     const askedAt = Date.now();
     const requestedPeriod = explicitDayWindow(q, askedAt);
+    const analysisPeriod = investigationPeriod(q, askedAt);
     const questionSeq = addUserMessage(store.db, user, t.id,
       { text: q, ...attachment, materials, contextReset: resetsChartTopic(q) }, askedAt);
     const presentation = presentationCase(store.db, user, { ...b, question: q }, t.scope);
-    if (presentation) queueChatPresentation(store.db, user, presentation, id);
+    if (presentation) queueChatPresentation(store.db, user, presentation, id,
+      {releaseSlice:presentationReleaseSlice(store.db,user,b,analysisPeriod)});
     store.db
       .prepare('INSERT INTO jobs VALUES(?,?,?,?,?,?,?)')
       .run(
@@ -443,7 +457,7 @@ export function enqueue(store, user, b, { telegramReply } = {}) {
         t.id,
         user.id,
         JSON.stringify({ ...b, telegramChat: undefined, telegramReply: undefined, screen, ...attachment, question: q, questionSeq, requestedPeriod,
-          analysisPeriod: investigationPeriod(q, askedAt) }),
+          analysisPeriod }),
         'queued',
         null,
         Date.now(),
@@ -679,7 +693,7 @@ function factsForCards(view, cards, backlog) {
       ),
     );
   if (cards.includes('gap'))
-    lines.push(view.gap || 'Для причинного вывода нужна проверка следующего шага и качества измерения.');
+    lines.push(view.gap || 'Отдельного примечания к измерению в источниках среза нет.');
   if (cards.includes('evidence'))
     lines.push(
       ...view.evidence
@@ -695,6 +709,51 @@ function factsForCards(view, cards, backlog) {
     lines.push(...view.corrections.map((x) => 'Поправка PM к ' + x.source + ': ' + x.comment));
   return lines;
 }
+const analysisRequest = /почему|причин|гипотез|(?:дай|предложи|сформулируй|подготовь).*рекоменд|следующ(?:ий|его) шаг|что .*?проверить|подготовь.*разбор/iu;
+const separateAction = /(?:создай|заведи|сохрани|закрепи|опубликуй|отправь|комментар|черновик|презентац|диаграмм|построй|график)/iu;
+
+async function answerFromEvidence(db, user, b, activeCase, decision, env, send) {
+  const product = decision?.product || activeCase.product;
+  let context, fallback, material;
+  if (decision) {
+    context = releaseEvidence(db, decision);
+    const trend = decision.trend;
+    fallback = [decision.release && decision.release.id + ' · ' + decision.release.description,
+      trend?.available && 'Недельный индекс заказов: ' + fmt(trend.baseline.mean) + ' → ' + fmt(trend.current.mean) + '.',
+      ...(!trend?.available && trend ? [trend.reason] : []), ...(decision.accountEvidence?.lines || [])].filter(Boolean);
+  } else {
+    const view = b.screen?.calc ? {...readSnapshot(db,user,b.screen.calc), id:b.screen.calc} :
+      analysisView(db, {product, caseId:activeCase.id, control:false});
+    grant(db, view.id, 'thread', b.thread);
+    const cards = ['summary', 'trend'];
+    material = {calc:view.id, cards};
+    fallback = factsForCards({...view, corrections:[]}, cards, []);
+    const scope = {product, caseId:activeCase.id, from:view.base, through:view.cut};
+    const summary = view.summary.find(row => row.product === product);
+    const items = [];
+    if (summary) {
+      const {rows, ...data} = summary;
+      items.push({kind:'orders-index', data, sources:rows.map(({file,loc,version}) => ({file,loc,version}))});
+    }
+    for (const row of view.evidence) {
+      if (row.metadata?.product ? row.metadata.product !== product : !JSON.stringify(row.data).toLowerCase().includes(product.toLowerCase())) continue;
+      items.push({kind:row.kind, data:row.data, sources:[{file:row.file,loc:row.loc,version:row.version}]});
+    }
+    context = {scope, evidence:analysisEvidence(scope, items)};
+  }
+  const response = {mode:'analysis', caseId:b.caseId, product, ...material};
+  const source = row => ({label:row.file + ' · ' + row.loc, url:rowLink(row)});
+  try {
+    const report = await composeAnalysis({...context, request:b.question}, env, send);
+    return {...response, text:analysisText(report, markdownSource),
+      readSources:analysisSources(report).map(source),
+      outcome:report.missing.length ? 'partial' : 'done'};
+  } catch (error) {
+    const rows = uniqueRows(context.evidence.flatMap(item => item.sources));
+    return {...response, text:fallback.join('\n'), warning:error.message, outcome:'partial', readSources:rows.map(source)};
+  }
+}
+
 export async function answer(store, user, b, env = process.env, send = fetch, job = randomUUID(), pageOptions) {
   const db = store.db;
   const { scope } = thread(db, user, b.thread);
@@ -714,7 +773,8 @@ export async function answer(store, user, b, env = process.env, send = fetch, jo
   };
   if (presentation) {
     const previous = JSON.parse(db.prepare('SELECT result FROM jobs WHERE id=? AND user=?').get(job,user.id)?.result || 'null');
-    const version = store.tx(() => queueChatPresentation(db, user, presentation, job, {previousId:previous?.presentationId}));
+    const version = store.tx(() => queueChatPresentation(db, user, presentation, job,
+      {previousId:previous?.presentationId, releaseSlice:presentationReleaseSlice(db,user,b,b.analysisPeriod)}));
     return { mode: 'presentation', caseId: presentation, presentationId: version.id,
       text: version.unavailable ? lostPresentationNotice : 'Презентация добавлена в материалы разбора.', outcome: 'done' };
   }
@@ -731,7 +791,7 @@ export async function answer(store, user, b, env = process.env, send = fetch, jo
   const decisionSnapshot = b.decisionReleaseId && b.releaseDecisionSnapshot?.releaseId === b.decisionReleaseId
     ? b.releaseDecisionSnapshot : undefined;
   const requested = b.analysisPeriod || (decisionSnapshot && investigationPeriod(b.question,Date.now()));
-  const from = [requested?.from,selected?.requested?.from || selected?.base].filter(Boolean).sort().at(-1);
+  const from = [requested?.from,selected?.requested?.from || selected?.base,decisionSnapshot?.decision?.from].filter(Boolean).sort().at(-1);
   const through = [requested?.through,selected?.cut || selected?.requested?.through,
     decisionSnapshot?.through || b.decisionThrough].filter(Boolean).sort()[0];
   const fixedPeriod = (decisionSnapshot || b.decisionThrough) && {from,through};
@@ -743,17 +803,22 @@ export async function answer(store, user, b, env = process.env, send = fetch, jo
   const last = history.at(-1)?.body;
   const previous = last && (!b.caseId || last.caseId===b.caseId) && (!b.decisionReleaseId || last.decisionReleaseId===b.decisionReleaseId)
     ? last : undefined;
-  const archiveScope = { product:activeCase?.product || selected?.product || decisionSnapshot?.product || b.product,
-    from,through,full:selected?.full,snapshot:selected || decisionSnapshot,fixedPeriod,
-    competitorVersions:decisionSnapshot?.competitorVersions };
+  let scopedSnapshot = decisionSnapshot;
   if (fixedPeriod) {
     if (from && through && from > through)
       return {mode:'archive',outcome:'clarification',readSources:[],
         text:'Запрошенные даты не пересекаются с выбранным периодом. Выберите даты в пределах этого экрана.'};
+    for (const ref of [selected,range,...attachments].filter(Boolean)) {
+      if (decisionSnapshot && ref.product && ref.product !== decisionSnapshot.product)
+        throw Error('Выбранный материал относится к другому продукту.');
+    }
     for (const ref of [range,...attachments].filter(Boolean)) checkReleaseReferencePeriod(ref,fixedPeriod);
     const screenFits = selected && selected.cut===through && (!from || (selected.requested?.from || selected.base)===from);
     b = {...b,analysisPeriod:fixedPeriod,screen:screenFits ? b.screen : undefined};
   }
+  const archiveScope = { product:activeCase?.product || selected?.product || scopedSnapshot?.product || b.product,
+    from,through,full:selected?.full,snapshot:scopedSnapshot || selected,fixedPeriod,
+    competitorVersions:scopedSnapshot?.competitorVersions };
   const comparisonContext=fixedPeriod ? [] : [
     ...(range?[{label:'Выделенный период',url:'#range/'+range.id,text:rangeComparisonText(range)}]:[]),
     ...attachments.map(m=>({label:m.title,url:'#material/'+m.id,text:(m.summary||m.title).slice(0,1400)})),
@@ -766,6 +831,15 @@ export async function answer(store, user, b, env = process.env, send = fetch, jo
     const readSources=[...(external.readSources||[]),...comparisonContext.map(({label,url})=>({label,url}))];
     return {...external,readSources,text:[external.text,...comparisonContext.map(r=>r.label+' · '+r.text)].join('\n\n'),
       ...(range && {rangeId:range.id}),...(activeCase && {caseId:activeCase.id})};
+  }
+  if (fixedPeriod && decisionSnapshot?.decision?.release?.date) {
+    if (decisionSnapshot.decision.release.date > through)
+      return { mode:'archive', outcome:'clarification', readSources:[],
+        text:'Дата среза раньше выпуска выбранного релиза.' };
+    const scoped = restrictReleaseDecision(db,user,decisionSnapshot,fixedPeriod,shared);
+    scopedSnapshot = scoped.asOf === decisionSnapshot.through ? {...decisionSnapshot,decision:scoped} : freezeReleaseDecision(db,scoped);
+    archiveScope.snapshot = b.releaseDecisionSnapshot = scopedSnapshot;
+    archiveScope.competitorVersions = scopedSnapshot.competitorVersions;
   }
   if (focus?.choices)
     return {
@@ -795,19 +869,23 @@ export async function answer(store, user, b, env = process.env, send = fetch, jo
     const release = releaseObservationAnswer(store,user,b,env,shared,previous ? [history.at(-1)] : [],archiveScope);
     if (release) return {...release,...decisionContext};
     const weekly = weeklySourceAnswer(db,b.question,previous,
-      {...archiveScope,snapshot:selected,versions:decisionSnapshot?.salesVersions});
+      {...archiveScope,snapshot:selected,versions:scopedSnapshot?.salesVersions});
     if (weekly) return {...weekly,caseId:b.caseId,...decisionContext};
-    if (!b.decisionReleaseId && !b.analysisPeriod && env.LLM_DATA_MODE==='analysis') {
-      const brief = await briefConversation(store,job,b.question,activeCase,env,send,history);
-      if (brief) return {...brief,caseId:b.caseId};
-      const kind = activeCase?.body.signal && caseBriefKind(b.question,activeCase.product);
+    const kind = activeCase && caseBriefKind(b.question, activeCase.product);
+    if (scopedSnapshot?.decision && (kind || analysisRequest.test(b.question)) && !separateAction.test(b.question)) {
+      return {...await answerFromEvidence(db, user, b, activeCase, scopedSnapshot.decision, env, send), ...decisionContext};
+    }
+    if (!b.decisionReleaseId && !b.analysisPeriod) {
       if (kind) {
-        const research = store.tx(()=>prepareResearch(store,user,b,[],job,{analytical:true,report:kind==='report'}));
-        if (research?.contextCalc) {
-          access(db,user,research.contextCalc,shared);
-          const view = readSnapshot(db,user,research.contextCalc);
-          if (view.summary) return caseBrief(activeCase,{...view,id:research.contextCalc});
-        }
+        const releaseId = activeCase.body.release;
+        const decision = !b.screen?.calc && releaseId && canDecideRelease(
+          facts(db, 'releases').find(row => row.data.release_id === releaseId) || {data:{}}, [activeCase.product],
+        ) ? releaseDecision(db, user, {caseId:activeCase.id,releaseId}, shared) : null;
+        return answerFromEvidence(db, user, b, activeCase, decision, env, send);
+      }
+      if (env.LLM_DATA_MODE === 'analysis') {
+        const brief = await briefConversation(store,job,b.question,activeCase,env,send,history);
+        if (brief) return {...brief,caseId:b.caseId};
       }
     }
   }
@@ -837,7 +915,8 @@ export async function answer(store, user, b, env = process.env, send = fetch, jo
     const releaseId = b.decisionReleaseId || (contextualTask ? activeCase?.body.release : undefined);
     const evidence = archiveEvidence(db, query, {...archiveScope,releaseId});
     if (evidence.length && (!activeCase && !b.decisionReleaseId || explicitArchive || evidence.some(row=>row.kind==='task-link'))) {
-      return { ...await archiveAnswer(store, query, evidence, env, send, job), archiveQuestion: b.question,
+      return { ...await archiveAnswer(store, query, evidence, env, send, job,
+        {caseId:b.caseId,product:archiveScope.product,releaseId,from,through}), archiveQuestion: b.question,
         ...decisionContext,
         ...(activeCase ? {caseId:activeCase.id,product:activeCase.product} : {}) };
     }
@@ -863,6 +942,8 @@ async function answerTurn(store, user, b, env, send, job, history, intent) {
   const db = store.db,
     c = b.caseId ? visibleCase(db, user, b.caseId) : null;
   const analyticalModel = env.LLM_DATA_MODE === 'analysis' && apiConfigured(env);
+  const analysisWarning = !analyticalModel && (analysisRequest.test(b.question) || separateAction.test(b.question) && !intent.chart)
+    ? 'Модель анализа недоступна. Можно повторить запрос после подключения.' : undefined;
   const fixedRelease = b.decisionThrough && b.releaseDecisionSnapshot;
   if (fixedRelease && !b.screen?.calc && !b.rangeId && !b.materialIds?.length && (intent.chart || intent.report || intent.funnel))
     checkReleaseSourceVersions(db,fixedRelease,b.analysisPeriod.through);
@@ -905,6 +986,7 @@ async function answerTurn(store, user, b, env, send, job, history, intent) {
       rangeId: b.rangeId,
       mode: 'calculation',
       outcome: research.intent.chart && !research.requestedChart ? 'partial' : 'done',
+      warning:analysisWarning,
       caseId: b.caseId,
     };
   if (b.materialIds?.length && !b.rangeId) {
@@ -914,6 +996,7 @@ async function answerTurn(store, user, b, env, send, job, history, intent) {
       product: m.product,
       materials: [{ id: m.id, title: m.title, kind: m.kind }],
       mode: 'calculation',
+      warning:analysisWarning,
     };
   }
   const rangeId =
@@ -925,6 +1008,7 @@ async function answerTurn(store, user, b, env, send, job, history, intent) {
       text: rangeComparisonText(range),
       rangeId,
       mode: 'calculation',
+      warning:analysisWarning,
     };
   }
   const previous = history.findLast((m) => m.role === 'assistant' && m.body.calc)?.body;
@@ -932,7 +1016,7 @@ async function answerTurn(store, user, b, env, send, job, history, intent) {
     context = { product: c?.product || b.product || previous?.product, full: b.full ?? b.screen?.full ?? previous?.full };
   let plan,
     model = false,
-    warning = '';
+    warning = analysisWarning || '';
   const tally = async (messages, tools, choice) => {
     const start = Date.now(),
       r = await providerCall(env, messages, tools, choice, send);
@@ -1036,6 +1120,8 @@ function completeMaterials(store, user, job, b, result) {
   const db = store.db;
   const r = JSON.parse(db.prepare('SELECT body FROM job_research WHERE job=?').get(job)?.body || 'null');
   const intent = r?.intent || researchIntent(b.question);
+  if (result.mode === 'analysis' && result.product && caseBriefKind(b.question,result.product) === 'report')
+    intent.report = true;
   if (result.focusMaterialId && !asksToDraw(b.question)) intent.chart = false;
   const refs = materialsFromReply(db, user, b.thread, { ...result, text: '' });
   const children = new Map(
@@ -1122,7 +1208,7 @@ function completeMaterials(store, user, job, b, result) {
       analysis: result.mode === 'analysis' ? result.text : undefined,
       question: b.question,
       ranges: r?.periods,
-      contextCalc: r?.contextCalc,
+      contextCalc: r?.contextCalc || result.calc,
       findings: r?.findings,
       sections: r?.sections || [],
       children: [...children.values()],

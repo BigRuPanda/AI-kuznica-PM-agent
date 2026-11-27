@@ -267,7 +267,21 @@ test('archive settings diagnose Reports API and sources show the protected ZIP i
 test('release decisions preserve the historical cutoff, cited cells and manual issue write', async t => {
   const dir = await mkdtemp(join(tmpdir(), 'release-decision-browser-'));
   await seedWorkspace(dir);
-  const app = createTeamApp({ base: join(dir, 'releases.sqlite'), background: false, env: fixtureEnv, send: transport });
+  const env = {...fixtureEnv, LLM_DATA_MODE:'analysis', LLM_MODEL:'release-fixture', LLM_BASE_URL:'http://127.0.0.1:8889/v1'};
+  let offline = false;
+  const send = (url, options) => {
+    if (url.port !== '8889') return transport(url, options);
+    if (offline) return Promise.resolve(new Response('', {status:503}));
+    const context = JSON.parse(JSON.parse(options.body).messages.at(-1).content);
+    const metric = context.evidence.find(item => item.kind === 'dictionary') || context.evidence.find(item => item.kind === 'release');
+    const index = context.evidence.find(item => item.kind === 'orders-index');
+    const account = context.evidence.find(item => item.kind === 'account-metrics');
+    const result = {title:'Проверка релиза', observations:[{text:index ?
+      'Индекс заказов: ' + index.data.baseline.mean + ' → ' + index.data.current.mean : 'Дата выпуска зафиксирована.',
+      sources:[metric.id, index?.id, account?.id].filter(Boolean)}], hypotheses:[], recommendations:[], missing:[]};
+    return Promise.resolve(Response.json({choices:[{message:{content:JSON.stringify(result)}}]}));
+  };
+  const app = createTeamApp({ base: join(dir, 'releases.sqlite'), background: false, env, send });
   let browser;
   t.after(async () => {
     await browser?.close();
@@ -280,13 +294,13 @@ test('release decisions preserve the historical cutoff, cited cells and manual i
     row: { release_id: id, release_date: date, description, release_type: 'major', status: 'released', ...extra } });
   const imported = [{ file: 'Решения.xlsx', facts: [
     release('DEC-1', '2026-10-01', 'Изменение Kaspersky', 2),
-    release('DEC-2', '2026-11-24', 'Поздний релиз Kaspersky', 3),
+    release('R-09', '2026-11-24', 'Поздний релиз Kaspersky', 3),
     release('DEC-3', '2026-10-02', 'Изменение Astra', 4, { related_task_ids: 'DEC-ASTRA' }),
     release('R-50', '2026-10-04', 'Карусель рекомендаций ЛК', 5, { affected_metrics: 'lk_reco_click_visits', related_task_ids: 'T-9' }),
     release('MIX-1', '2026-10-03', 'Изменения для Astra и Kaspersky', 6),
     release('OLD-1', '2026-10-01', 'Обновление Astra', 7),
     { kind: 'interview', loc: 'Интервью!L9', text: 'Темы ответа: Kaspersky · сложность выбора\nФрагмент записи: Неясно, какую лицензию выбрать' },
-    { kind: 'backlog', loc: 'Задачи!A8', row: { task_id: 'DEC-T', title: 'Kaspersky: проверить сбор событий',
+    { kind: 'backlog', loc: 'Задачи!A8', row: { task_id: 'T-07', title: 'Kaspersky: проверить сбор событий',
       created_date: '2026-09-20', status: 'New', description_short: 'Проверить передачу событий', linked_metric_ids: 'cfg_add_to_cart_rate' } },
     { kind: 'backlog', loc: 'Задачи!A9', row: { task_id: 'DEC-ASTRA', title: 'Уточнить состав поставки',
       created_date: '2026-09-20', status: 'Closed' } },
@@ -312,8 +326,8 @@ test('release decisions preserve the historical cutoff, cited cells and manual i
     addUserMessage(store.db, user, id, { text: 'Сообщение исходного чата ' + releaseId });
   }
   initWorkbench(store.db);
-  const call = (op, body) => workspaceOperation(store, user, op, body, fixtureEnv, transport);
-  const linked = call('create-case', { title: 'Связанный разбор Kaspersky', product: 'Kaspersky', release: 'DEC-2' });
+  const call = (op, body) => workspaceOperation(store, user, op, body, env, send);
+  const linked = call('create-case', { title: 'Связанный разбор Kaspersky', product: 'Kaspersky', release: 'R-09' });
   const unrelated = call('create-case', { title: 'Обычный разбор Astra', product: 'Astra' });
   const astraMixed = call('create-case', { title: 'Разбор Astra', product: 'Astra', release: 'MIX-1' });
   const kasperskyMixed = call('create-case', { title: 'Разбор Kaspersky', product: 'Kaspersky', release: 'MIX-1' });
@@ -335,9 +349,10 @@ test('release decisions preserve the historical cutoff, cited cells and manual i
   assert.equal(store.db.prepare('SELECT product FROM release_threads WHERE thread=?').get(legacy).product, 'Astra');
   assert.throws(() => call('release-tracker-draft', { caseId: linked.id, releaseId: 'DEC-1' }), /другому релизу/);
   assert.equal(call('release_decision', { releaseId: 'DEC-1' }).caseId, null);
-  assert.equal(call('release_decision', { releaseId: 'DEC-2' }).asOf, '2026-11-24');
-  assert.throws(() => call('release_decision', { releaseId: 'DEC-2', through: '2026-11-23' }), /нет такого релиза/);
+  assert.equal(call('release_decision', { releaseId: 'R-09' }).asOf, '2026-11-24');
+  assert.throws(() => call('release_decision', { releaseId: 'R-09', through: '2026-11-23' }), /нет такого релиза/);
   const account = call('release_decision', { releaseId: 'R-50' });
+  assert.equal(call('release_decision', { product:'Kaspersky' }).customer?.excerpt, 'Неясно, какую лицензию выбрать');
   assert.equal(account.accountEvidence.sources.filter(row => row.loc.startsWith('Клики!')).length, 28);
   const caseCount = () => store.db.prepare('SELECT count(*) AS n FROM cases').get().n;
   const countBeforeSearch = caseCount();
@@ -364,7 +379,8 @@ test('release decisions preserve the historical cutoff, cited cells and manual i
   const base = 'http://127.0.0.1:' + app.server.address().port;
   const edge = 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe';
   browser = await chromium.launch({ executablePath: process.env.PM_BROWSER_PATH || (existsSync(edge) ? edge : undefined) });
-  const page = await browser.newPage({ locale: 'ru-RU', viewport: { width: 1440, height: 900 }, reducedMotion: 'reduce' });
+  const context = await browser.newContext({ locale: 'ru-RU', viewport: { width: 1440, height: 900 }, reducedMotion: 'reduce' });
+  const page = await context.newPage();
   page.setDefaultTimeout(20000);
   const errors = [];
   page.on('pageerror', error => errors.push(error.message));
@@ -383,7 +399,7 @@ test('release decisions preserve the historical cutoff, cited cells and manual i
   await field(page, 'Дата среза').fill('2026-11-08');
   await role(page, 'Показать на дату').click();
   await visible(page.getByText('Исторический срез · 08.11.2026', { exact: true }));
-  assert.equal(await field(page, 'Релиз').locator('option[value="DEC-2"]').count(), 0);
+  assert.equal(await field(page, 'Релиз').locator('option[value="R-09"]').count(), 0);
   assert.equal(await page.getByText('«Неясно, какую лицензию выбрать»').count(), 0);
   await page.getByText('16 недель и исходные строки').click();
   await page.getByRole('link', { name: /Kaspersky!A20/ }).click();
@@ -408,21 +424,36 @@ test('release decisions preserve the historical cutoff, cited cells and manual i
   await visible(page.getByText('Частные выводы Kaspersky', { exact: true }));
   assert.equal(await page.getByText('Частные выводы Astra', { exact: true }).count(), 0);
 
-  await page.goto(base + '/#release-detail/DEC-2');
+  await page.goto(base + '/#release-detail/R-09');
   await page.getByRole('link', { name: 'Решение по релизу', exact: true }).click();
-  assert.equal(new URL(page.url()).hash, '#release-decision/DEC-2');
+  assert.equal(new URL(page.url()).hash, '#release-decision/R-09');
   await role(page, 'Открыть чат разбора').click();
-  await visible(page.getByRole('heading', { name: 'Чат разбора · DEC-2' }));
+  await visible(page.getByRole('heading', { name: 'Чат разбора · R-09' }));
   await role(page, 'Найти задачу и проверить дубли').click();
-  await visible(page.getByRole('link', { name: /^DEC-T ·/ }));
+  await visible(page.getByRole('link', { name: /^T-07 ·/ }));
   assert.equal(await role(page, 'Подготовить черновик задачи').count(), 0);
+  offline = true;
   await role(page, 'Подготовить комментарий').click();
-  await visible(page.locator('.tracker-preview').getByText(/Метрики!A4/));
+  await visible(page.getByRole('alert').filter({hasText:'Модель анализа недоступна'}));
+  assert.equal(await page.locator('.tracker-preview').count(), 0);
+  assert.equal(store.db.prepare('SELECT count(*) AS n FROM local_issues').get().n, 0);
+  offline = false;
+  await role(page, 'Подготовить комментарий').click();
+  const preview = page.locator('.tracker-preview');
+  await visible(preview.getByText(/Индекс заказов:/));
+  await visible(preview.getByText(/Задача T-07/));
+  const source = preview.getByRole('link', {name:/Метрики!A4/});
+  const href = await source.getAttribute('href');
+  assert.match(href, /^#knowledge-source\/[a-f0-9]{64}\/.*A4$/);
+  const sourcePage = await context.newPage();
+  await sourcePage.goto(base + '/' + href);
+  await visible(sourcePage.getByText('Метрики!A4', {exact:true}));
+  await sourcePage.close();
   assert.equal(store.db.prepare('SELECT count(*) AS n FROM local_issues').get().n, 0);
   assert.equal(store.db.prepare('SELECT state FROM draft_actions WHERE case_id=?').get(linked.id).state, 'draft');
   await role(page, 'Подтвердить запись').click();
-  await visible(page.getByRole('link', { name: 'Открыть задачу · DEC-T' }));
-  assert.equal(store.db.prepare("SELECT count(*) AS n FROM local_issues WHERE key='DEC-T'").get().n, 1);
+  await visible(page.getByRole('link', { name: 'Открыть задачу · T-07' }));
+  assert.equal(store.db.prepare("SELECT count(*) AS n FROM local_issues WHERE key='T-07'").get().n, 1);
 
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto(base + '/#release-decision/R-50');
@@ -443,7 +474,7 @@ test('release decisions preserve the historical cutoff, cited cells and manual i
   assert.equal(await role(page, 'Подготовить черновик задачи').count(), 0);
   await role(page, 'Создать связанный разбор').click();
   await role(page, 'Подготовить комментарий').click();
-  await visible(page.locator('.tracker-preview').getByText(/Клики!A2/));
+  await visible(page.locator('.tracker-preview').getByRole('link', {name:/Клики!A2$/}));
   const accountCase = JSON.parse(store.db.prepare("SELECT body FROM cases WHERE product='ЛК'").get().body);
   assert.equal(accountCase.release, 'R-50');
   assert.equal(store.db.prepare("SELECT count(*) AS n FROM local_issues WHERE key='T-9'").get().n, 0);
@@ -476,7 +507,7 @@ test('release decisions preserve the historical cutoff, cited cells and manual i
   await workJobs(store, app.accounts, fixtureEnv, transport);
   await visible(conversation.getByText(/14\/14 и 6\/14/));
   assert.equal(store.db.prepare("SELECT count(*) AS n FROM local_issues WHERE key='DEC-ASTRA'").get().n, 0);
-  assert.equal((await call('confirm', { id: astraDraft.id })).key, 'DEC-ASTRA');
+  assert.equal((await call('confirm', { id: astraDraft.id, revision: astraDraft.revision })).key, 'DEC-ASTRA');
   assert.equal(store.db.prepare("SELECT count(*) AS n FROM local_issues WHERE key='DEC-ASTRA'").get().n, 1);
   assert.deepEqual(errors, []);
 });
@@ -741,7 +772,7 @@ test('Softline workspace, upgrade and browser journeys', async t => {
       await visible(guest.getByRole('heading', {name:'Вход', exact:true}));
       const codeA = app.accounts.invite('team');
       const codeB = app.accounts.invite('team');
-      const codeInput = field(guest,'Код приглашения');
+      const codeInput = guest.getByRole('textbox', {name:'Код приглашения', exact:true});
       await guest.goto(base + '/#join/' + codeA);
       await visible(guest.getByRole('heading', {name:'Создать аккаунт', exact:true}));
       assert.equal(await codeInput.inputValue(), codeA);
@@ -1910,6 +1941,9 @@ test('Softline workspace, upgrade and browser journeys', async t => {
     assert.ok((await reply.json()).refs.some(ref => ref.op === 'build_chart'));
     await admin.getByRole('button',{name:/Раскрыть график/}).first().click();
     dlg=admin.getByRole('dialog');
+    await role(dlg,'О графике релиза').hover();
+    await visible(dlg.locator('.ui-hint-tooltip').getByText('График построен по сохранённому расчёту.',{exact:true}));
+    await admin.keyboard.press('Escape');
     await field(dlg,'Дашборд релиза').fill('Проверенные расчёты');
     await role(dlg,'Сохранить в релиз').click();
     await visible(dlg.getByText('Сохранено',{exact:true}));
@@ -1920,6 +1954,8 @@ test('Softline workspace, upgrade and browser journeys', async t => {
     await visible(admin.getByRole('heading',{name:'Проверенные расчёты'}));
     await go(admin,calc.slice(1));
     await visible(admin.getByRole('heading',{name:'Сохранённый расчёт'}));
+    await role(admin,'О расчёте релиза').hover();
+    await visible(admin.locator('.ui-hint-tooltip').getByText('Здесь видны данные сохранённого расчёта релиза.',{exact:true}));
     await visible(admin.locator('#workspace-sidebar'));
     await member.goto(base+'/?legacy=1#release/R-001');
     await visible(member.locator('.report-head h1'));
@@ -2058,14 +2094,20 @@ test('Softline workspace, upgrade and browser journeys', async t => {
     await go(judge,'overview');
     await judge.getByRole('link',{name:'Открыть разбор'}).first().click();
     await field(judge,'Заголовок').fill('Задача из пространства жюри');
+    await role(judge,'Подготовить черновик задачи').hover();
+    await visible(judge.locator('.ui-hint-tooltip').getByText('Покажет черновик перед записью в Redmine.',{exact:true}));
     await submit(judge,'draft',()=>role(judge,'Подготовить черновик задачи').click());
     const draft = judge.locator('.tracker-preview').filter({hasText:'Задача из пространства жюри'});
+    await role(draft,'Подтвердить запись').hover();
+    await visible(judge.locator('.ui-hint-tooltip').getByText('Запишет показанные изменения в выбранный сервис.',{exact:true}));
     await submit(judge,'confirm',()=>role(draft,'Подтвердить запись').click());
     const link = draft.getByRole('link',{name:/Открыть задачу/});
     await visible(link);
     const href = await link.getAttribute('href');
     await link.click();
     await visible(judge.getByRole('heading',{name:'Задача из пространства жюри'}));
+    await role(judge,'О демонстрационной задаче').hover();
+    await visible(judge.locator('.ui-hint-tooltip').getByText('Здесь видны статус, описание и комментарии задачи.',{exact:true}));
     await go(member,caseRoute);
     await role(member,'Обсудить').click();
     await visible(field(member,'Вопрос агенту'));

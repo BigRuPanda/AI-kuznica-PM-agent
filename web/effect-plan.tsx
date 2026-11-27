@@ -134,7 +134,7 @@ export function EffectPlan({caseId, saved, reload, archiveOnly, readOnly}:{
   return <>
     {saved && <ObservationResult value={saved}/>}
     {error && <p className="error" role="alert">{error}</p>}
-    {cart && <button type="button" disabled={busy} onClick={()=>applyExample(cart,true)}>Подготовить наблюдение по T-08</button>}
+    {cart && <button type="button" disabled={busy} onClick={()=>applyExample(cart,true)}>Пример настройки · {cart.taskId}</button>}
     {retro && <button type="button" disabled={busy} onClick={()=>applyExample(retro,true)}>Рассчитать пример Astra · R-02</button>}
     {result && <><h4>{result.plan?.deployed || result.rollout ? 'Расчёт на ' + result.asOf : 'План проверки'}</h4><ObservationResult value={result}/></>}
     {!readOnly && choices && <form onSubmit={submit} onChange={()=>preview(null)}>

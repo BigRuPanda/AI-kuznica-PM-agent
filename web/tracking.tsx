@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { post } from './team-data';
+import { HelpMarker } from './ui-hints';
 import type { Home } from './team-data';
 import { useTrackingVisibility } from './tracking-visibility';
 import type { Workbook } from './knowledge-source';
@@ -51,6 +52,7 @@ export type TrackerPreview = {
   receipt?: Link;
   issue?: Link;
   external?: string;
+  sources?: { file: string; loc: string; version: string }[];
 };
 
 function Value({ text }: { text: string }) {
@@ -126,7 +128,11 @@ export function DemoObject({ id, service }: { id: string; service: string }) {
     <section className="paper">
       {showConfluence && service === 'demo-page' && <p><a href="#knowledge">База знаний</a></p>}
       <small>{service === 'demo-page' ? 'Встроенная база знаний' : 'Локальное демо · Redmine'}</small>
-      <h1>{page?.title || task?.title || 'Загрузка'}</h1>
+      <div className="ui-hint-heading">
+        <h1>{page?.title || task?.title || 'Загрузка'}</h1>
+        {page && <HelpMarker label="О демонстрационной странице" hint="Здесь видны текст страницы, версия и ссылки." />}
+        {task && <HelpMarker label="О демонстрационной задаче" hint="Здесь видны статус, описание и комментарии задачи." />}
+      </div>
       {error && <p role="alert">{error}</p>}
       {task && <TaskContents task={task} />} {page && <PageContents page={page} />}
     </section>
@@ -188,6 +194,13 @@ export function PreviewCard({
               <ins>{d.after || 'Очистить'}</ins>
             </div>
           ))}
+          {!!p.sources?.length && <ul>
+            {p.sources.map(source => <li key={source.version + '/' + source.loc}>
+              <a href={'#knowledge-source/' + source.version + '/' + encodeURIComponent(source.loc)}>
+                {source.file} · {source.loc}
+              </a>
+            </li>)}
+          </ul>}
         </>
       )}
       {p.receipt && (
@@ -211,6 +224,7 @@ export function PreviewCard({
         <button
           className="primary"
           disabled={busy}
+          data-ui-hint={p.state !== 'uncertain' && !p.receipt ? 'Запишет показанные изменения в выбранный сервис.' : undefined}
           onClick={() =>
             action(async () => {
               setBusy(true);
@@ -408,7 +422,7 @@ function IssueForm({
             Заголовок
             <input
               name="title"
-              defaultValue={task?.title || 'Проверить путь покупки · ' + product}
+              defaultValue={task?.title}
               required
               maxLength={240}
             />
@@ -453,7 +467,7 @@ function IssueForm({
               </label>
             </>
           )}
-          <button>Подготовить черновик задачи</button>
+          <button data-ui-hint="Покажет черновик перед записью в Redmine.">Подготовить черновик задачи</button>
         </form>
       )}
     </>
@@ -612,7 +626,7 @@ function PageForm({
               Добавить ссылки на исходный отчёт и версии Excel
             </label>
           )}
-          <button>
+          <button data-ui-hint="Покажет черновик перед публикацией страницы.">
             {builtIn ? 'Подготовить страницу базы знаний' : 'Подготовить публикацию в Confluence'}
           </button>
         </form>

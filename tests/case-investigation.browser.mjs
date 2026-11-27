@@ -89,7 +89,14 @@ test('PM reads a progressing investigation, traces its evidence and publishes a 
   bundle.current = ready;
   const plan = page.getByText('Посмотреть план проверки', { exact: true });
   await plan.waitFor();
+  const tooltip = page.locator('.ui-hint-tooltip');
+  await plan.hover();
+  await tooltip.getByText('Здесь можно уточнить шаги и выбрать задачу.', { exact: true }).waitFor();
+  await page.keyboard.press('Escape');
   assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
+  await page.getByText('Как проверяли', { exact: true }).hover();
+  await tooltip.getByText('Откроет шаги проверки и подтверждающие расчёты.', { exact: true }).waitFor();
+  await page.keyboard.press('Escape');
   await page.getByText('Как проверяли', { exact: true }).click();
   await page.getByText(check.question, { exact: true }).click();
   await page.getByText(check.impact, { exact: true }).waitFor();
@@ -98,10 +105,14 @@ test('PM reads a progressing investigation, traces its evidence and publishes a 
   await page.getByRole('link', { name: check.sources[0].label, exact: true }).click();
   assert.ok(page.url().endsWith('#snapshot/test-calc/control'));
   await page.getByText('Продажи!B3', { exact: true }).waitFor();
+  await page.getByRole('button', { name: 'О сохранённом расчёте' }).hover();
+  await tooltip.getByText('Здесь сохранено, по каким данным получен результат.', { exact: true }).waitFor();
   await visit();
   await page.getByRole('button', { name: 'Проверить другую версию' }).click();
   const dialog = page.getByRole('dialog');
   await dialog.getByLabel('Вопрос для проверки').fill('Влияет ли устройство?');
+  await dialog.getByRole('button', { name: 'Начать проверку' }).hover();
+  await tooltip.getByText('Запустит отдельное личное исследование.', { exact: true }).waitFor();
   await dialog.getByRole('button', { name: 'Начать проверку' }).click();
   await page.getByText('Сверить путь на телефоне.', { exact: true }).waitFor();
   await page.getByRole('button', { name: 'Опубликовать для команды' }).click();
@@ -111,4 +122,14 @@ test('PM reads a progressing investigation, traces its evidence and publishes a 
   await archive.locator('details > summary').last().click();
   await archive.getByText('Вывод по предыдущему сигналу.', { exact: true }).waitFor();
   assert.equal(await archive.getByRole('button').count(), 0);
+
+  await page.route('**/api/team/overview', async route => {
+    const response = await route.fetch();
+    const home = await response.json();
+    home.integrations.redmine = { ...home.integrations.redmine, local: false, connected: false };
+    await route.fulfill({ json: home });
+  });
+  await page.reload();
+  await page.getByRole('region', { name: 'Исследование' }).getByText('Посмотреть план проверки', { exact: true }).hover();
+  await tooltip.filter({ hasText: 'Откроет шаги проверки и ожидаемые результаты.' }).waitFor();
 });

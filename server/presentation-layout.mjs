@@ -122,7 +122,7 @@ export function composeSlide(deck, index) {
     }
     if(s.body!==s.title) text(s.body,64,425,1070,23,{limit:2,color:muted});
     rect(64,511,1152,123,pale);
-    text(deck.state==='Завершено'?'Решение':'Следующий шаг',86,526,225,17,{color:accent,bold:true});
+    text(s.decisionTitle || 'Решение',86,526,225,17,{color:accent,bold:true});
     text(s.decision,86,558,1095,23,{limit:2});
   } else {
     text(s.title+(s.continuation?' · продолжение':''),64,105,1152,37,{bold:true,limit:2});

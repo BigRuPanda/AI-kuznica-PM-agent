@@ -124,7 +124,17 @@ test('case advice uses the selected figures, a requested report is saved, and an
     s.db.prepare("UPDATE cases SET body=json_set(body,'$.signal',json('{}')) WHERE id=?").run(caseId);
     const ask=async(question,screen)=>{
       enqueue(s,user,{thread,caseId,question,screen});
-      await workJobs(s,accounts,api,()=>assert.fail('these case facts are already available'));
+      await workJobs(s,accounts,api,(_url,init)=>{
+        const context=JSON.parse(JSON.parse(init.body).messages.at(-1).content);
+        const series=context.evidence.find(item=>item.kind==='orders-index');
+        assert.ok(series);
+        assert.equal(context.scope.through,view.cut);
+        return say(JSON.stringify({
+          observations:[{text:'Ряд относится к выбранному периоду.',sources:[series.id]}],
+          hypotheses:[], recommendations:[{text:'Проверить полноту данных по выбранному периоду.',sources:[series.id]}],
+          missing:[],
+        }));
+      });
       return messages(s.db,user,thread).items.at(-1).body;
     };
     const report=await ask('Собери разбор',{calc:view.id});
@@ -135,9 +145,8 @@ test('case advice uses the selected figures, a requested report is saved, and an
     const advice=await ask('Что нужно проверить в текущем разборе?',{calc:view.id});
     assert.equal(advice.outcome,'done');
     assert.equal(advice.calc,view.id);
-    const measured=view.summary.find(s=>s.product===view.product);
-    if(Number.isFinite(measured?.before) && Number.isFinite(measured?.after)) assert.ok(advice.text.includes(view.pivot));
-    else assert.match(advice.text,/нет двух сопоставимых значений/);
+    assert.match(advice.text,/Проверить полноту данных по выбранному периоду/);
+    assert.ok(advice.readSources.length);
     s.db.prepare('UPDATE cases SET product=? WHERE id=?').run('Орион Desktop',caseId);
     const clarification=await ask('Кто такой Орион?');
     assert.equal(clarification.outcome,'clarification');

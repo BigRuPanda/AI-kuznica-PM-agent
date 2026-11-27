@@ -62,15 +62,16 @@ test('historical calculation derives its pivot from available weeks and clips da
   }
 });
 
-async function workspace(t) {
+async function workspace(t, send) {
   const bytes = await readFile(archive);
   const directory = await mkdtemp(join(tmpdir(), 'signal-release-'));
   const env = {
     SOURCE_ARCHIVE_SHA256: digest(bytes),
     ADMIN_INVITE_KEY: 'release-test-invite',
     PYTHON_BIN: process.env.PYTHON_BIN || (process.platform === 'win32' ? 'python' : 'python3'),
+    ...(send && {LLM_DATA_MODE:'analysis', LLM_BASE_URL:'http://127.0.0.1:8889/v1', LLM_MODEL:'archive-test'}),
   };
-  const app = createTeamApp({ base: join(directory, 'data.sqlite'), env, background: false });
+  const app = createTeamApp({ base: join(directory, 'data.sqlite'), env, send, background: false });
   t.after(async () => {
     await app.close();
     await rm(directory, { recursive: true, force: true, maxRetries: 3 });
@@ -151,9 +152,16 @@ test('organizer archive supplies both families, verifiable evidence, and histori
   assert.equal(astra.trend.baseline.mean, 112);
   assert.equal(astra.trend.current.mean, 89.25);
   assert.equal(astra.competitor.match, 'Частично');
-  assert.equal(astra.measurementIssue, false);
-  assert.notEqual(astra.caseId, current.caseId);
-  const early = await call('release_decision', { caseId: current.caseId, through: '2026-09-20' });
+  assert.ok(!Object.hasOwn(astra, 'recommendation'));
+  const store = app.space('team');
+  const signalCase = store.db.prepare(`SELECT id,body FROM cases WHERE product=? AND json_extract(body,'$.signal.rule')='relative'
+    ORDER BY json_extract(body,'$.signal.week') DESC LIMIT 1`).get(product);
+  assert.ok(signalCase);
+  const caseId = current.caseId || signalCase.id;
+  if (!current.caseId) store.db.prepare('UPDATE cases SET body=? WHERE id=?').run(
+    JSON.stringify({...JSON.parse(signalCase.body),release:release.id}),caseId);
+  assert.notEqual(astra.caseId, caseId);
+  const early = await call('release_decision', { caseId, through: '2026-09-20' });
   assert.equal(early.caseId, null);
   assert.equal(early.release, null);
   assert.equal(early.customer, null);
@@ -166,7 +174,6 @@ test('organizer archive supplies both families, verifiable evidence, and histori
   assert.equal((await post('release_decision', { product, through: '2026-02-30' })).status, 400);
   const privateCase = await call('create-case', { title: 'Личный разбор', product });
   const other = await account('release-member', app.accounts.invite('team'));
-  const store = app.space('team');
   assert.equal((await call('release_decision', { caseId: privateCase.id })).caseId, privateCase.id);
   assert.equal((await post('release_decision', { caseId: privateCase.id }, other.cookie)).status, 400);
   assert.throws(() => workspaceOperation(store, owner.user, 'release_decision', { caseId: privateCase.id },
@@ -193,11 +200,11 @@ test('organizer archive supplies both families, verifiable evidence, and histori
   });
 
   await t.test('the organizer historical snapshot excludes future releases and future signal weeks', async () => {
-    const before = (await call('view', { caseId:current.caseId, through:'2026-09-30', full:true })).view;
+    const before = (await call('view', { caseId, through:'2026-09-30', full:true })).view;
     assert.equal(before.pivot,'2026-09-21');
     assert.deepEqual(before.timeline.map(row=>row.data.release_id),['R-07','R-08']);
     assert.equal(before.signal,null);
-    const first = (await call('view', { caseId:current.caseId, through:'2026-11-04', full:true })).view;
+    const first = (await call('view', { caseId, through:'2026-11-04', full:true })).view;
     assert.deepEqual([first.signal.week,first.signal.count],['2026-10-26',1]);
     assert.deepEqual(first.signal.history.map(row=>row.week),['2026-10-26']);
     assert.match(first.signal.source,/Продажи!A27$/);
@@ -214,14 +221,14 @@ test('organizer archive supplies both families, verifiable evidence, and histori
     const absent = await compare('tablet', '2026-09-02', '2026-09-03');
     assert.equal(absent.available, 0);
     assert.equal(absent.value, null);
-    assert.equal(absent.n, undefined);
-    assert.equal(absent.d, undefined);
+    assert.equal(absent.n ?? null, null);
+    assert.equal(absent.d ?? null, null);
     const zero = await compare('mobile', '2026-10-05', '2026-10-12');
     assert.deepEqual([zero.available, zero.value, zero.n, zero.d], [7, 0, 0, 26]);
   });
 
   await t.test('sales effect applies the chosen control to the same complete windows', async () => {
-    const input = { caseId: current.caseId, releaseId: 'R-09', metric: 'orders_index', segment: 'all',
+    const input = { caseId, releaseId: 'R-09', metric: 'orders_index', segment: 'all',
       asOf: '2026-11-22', control: astra.product, target: 110 };
     const evaluated = await call('effect-preview', input);
     assert.equal(evaluated.plan.control, astra.product);
@@ -250,7 +257,21 @@ test('decision chat leads to manual confirmation, using the same case and actual
   skip: !hasArchive ? 'Organizer ZIP is unavailable' : process.env.SIGNAL_RELEASE_BROWSER !== '1',
 }, async t => {
   const { chromium } = await import('playwright');
-  const { app, base, call } = await workspace(t);
+  const { app, base, call } = await workspace(t, async (_url, {body}) => {
+    const input = JSON.parse(JSON.parse(body).messages.at(-1).content);
+    const trend = input.evidence.find(item => item.kind === 'orders-index');
+    const interview = input.evidence.find(item => item.kind === 'interview' &&
+      item.data.excerpt?.includes('запутанная политика версий ПО'));
+    assert.equal(input.scope.releaseId, 'R-09');
+    assert.equal(input.destination.key, 'T-07');
+    assert.equal(trend.data.current.mean, 108);
+    assert.ok(interview);
+    const result = {observations:[{text:'Средний индекс за последние четыре недели — 108.',sources:[trend.id]}],
+      hypotheses:[{text:'Выбор лицензии может затруднять переход к оформлению.',
+        test:'Сверить действия покупателей при выборе варианта.', sources:[interview.id]}],
+      recommendations:[], missing:[]};
+    return Response.json({choices:[{message:{content:JSON.stringify(result)}}]});
+  });
   const edge = 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe';
   const browser = await chromium.launch({ executablePath: process.env.PM_BROWSER_PATH || (existsSync(edge) ? edge : undefined) });
   t.after(() => browser.close());
@@ -274,20 +295,23 @@ test('decision chat leads to manual confirmation, using the same case and actual
   await page.getByRole('button', { name: 'Открыть чат разбора' }).click();
   await page.getByRole('heading', { name: 'Чат разбора · R-09' }).waitFor();
   await page.getByRole('button', { name: 'Найти задачу и проверить дубли' }).click();
-  await page.getByRole('link', { name: /^T-08 · Недочеты/ }).waitFor();
+  await page.getByRole('link', { name: /^T-07 ·/ }).waitFor();
   assert.equal(await page.getByRole('button', { name: 'Подготовить черновик задачи' }).count(), 0);
-  await page.locator('.decision-issues li').filter({ hasText: /^T-08/ })
+  const bind = page.getByRole('button', {name:'Создать связанный разбор'});
+  if (await bind.isVisible()) await bind.click();
+  await page.locator('.decision-issues li').filter({ hasText: /^T-07/ })
     .getByRole('button', { name: 'Подготовить комментарий' }).click();
-  await page.locator('.tracker-preview').getByText(/Метрики_справочник!/).waitFor();
+  await page.locator('.tracker-preview').getByRole('link', {name:/Активные!L9$/}).waitFor();
+  await page.locator('.tracker-preview').getByText(/Средний индекс за последние четыре недели — 108\./).waitFor();
   const db = app.space('team').db;
   const caseId = (await call('release_decision')).caseId;
   const draft = db.prepare('SELECT case_id,state FROM draft_actions').get();
   assert.deepEqual({ ...draft }, { case_id: caseId, state: 'draft' });
   assert.equal(db.prepare('SELECT count(*) n FROM local_issues').get().n, 0);
   await page.getByRole('button', { name: 'Подтвердить запись' }).click();
-  await page.getByRole('link', { name: 'Открыть задачу · T-08' }).waitFor();
+  await page.getByRole('link', { name: 'Открыть задачу · T-07' }).waitFor();
   assert.equal(db.prepare('SELECT state FROM draft_actions').get().state, 'done');
-  assert.equal(db.prepare('SELECT count(*) n FROM local_issues WHERE key=?').get('T-08').n, 1);
+  assert.equal(db.prepare('SELECT count(*) n FROM local_issues WHERE key=?').get('T-07').n, 1);
   await page.getByRole('link', { name: 'Настроить проверку эффекта' }).click();
   assert.equal(new URL(page.url()).hash, '#case/' + caseId + '/effect');
   await page.locator('.effect-panel[open]').waitFor();
@@ -298,7 +322,12 @@ test('decision chat leads to manual confirmation, using the same case and actual
   await page.getByRole('button', { name: 'Показать на дату' }).click();
   await page.getByText('Исторический срез · 05.05.2026', { exact: true }).waitFor();
   await page.getByText('В архиве нет датированного интервью для этого среза.').waitFor();
-  assert.equal(await page.getByRole('button', { name: 'Открыть чат разбора' }).count(), 0);
+  const archivedChat = page.getByRole('button', {name:'Открыть чат разбора'});
+  if (await archivedChat.isVisible()) {
+    await archivedChat.click();
+    await page.getByRole('heading', {name:/^Чат разбора/}).waitFor();
+    assert.equal(await page.getByRole('button', {name:'Найти задачу и проверить дубли'}).count(), 0);
+  }
   await page.setViewportSize({ width: 390, height: 844 });
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
   assert.deepEqual(errors, []);

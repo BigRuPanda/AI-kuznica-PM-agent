@@ -4,7 +4,7 @@ import {analysis,labels,runTool} from './analytics.mjs';
 import {operations} from './tools.mjs';
 import {profiles} from './config.mjs';
 import {name,hash} from './store.mjs';
-import {readModelResponse} from './model-response.mjs';
+import {modelDispatcher,modelTimeout,readModelResponse} from './model-response.mjs';
 import {geminiCall} from './gemini.mjs';
 import {chatAnswerFormat} from './answer-format.mjs';
 import {checkModelTransport,localData} from './data-profile.mjs';
@@ -52,7 +52,7 @@ export async function providerCall(env,messages,tools,choice='auto',send=fetch,l
   const target=new URL(baseUrl.replace(/\/+$/,'')+'/chat/completions');
   if(target.protocol!=='https:'&&!(target.protocol==='http:'&&['localhost','127.0.0.1','[::1]'].includes(target.hostname)))throw Error('Для удалённого API модели требуется HTTPS.');
   let response;
-  const timeout = Math.max(1,Math.min(60000, limits.timeout ?? 60000));
+  const timeout = modelTimeout(limits.timeout);
   const signal = AbortSignal.timeout(timeout);
   const timedOut = error => signal.aborted || error?.name === 'TimeoutError';
   const timeoutError = () => {
@@ -60,10 +60,11 @@ export async function providerCall(env,messages,tools,choice='auto',send=fetch,l
     const unit = { one:'секунду', few:'секунды', many:'секунд', other:'секунды' }[new Intl.PluralRules('ru').select(seconds)];
     return Object.assign(Error('Модель не успела ответить за ' + seconds + ' ' + unit + '.'), {timedOut:true});
   };
-  const history = messages.map(({usage, googleParts, lengthLimited, ...message}) => message);
-  try{response=await send(target,{method:'POST',redirect:'error',signal,headers:{'Content-Type':'application/json',...(key?{Authorization:'Bearer '+key}:{})},
+  const history = messages.map(({usage, googleParts, lengthLimited, finishReason, ...message}) => message);
+  try{response=await send(target,{method:'POST',redirect:'error',signal,dispatcher:modelDispatcher,headers:{'Content-Type':'application/json',...(key?{Authorization:'Bearer '+key}:{})},
     body:JSON.stringify({model:env.LLM_MODEL,messages:history,...(tools.length?{tools,tool_choice:choice}:{}),
       ...(limits.maxTokens?{max_tokens:limits.maxTokens}:{}),
+      ...(limits.reasoningEffort?{reasoning_effort:limits.reasoningEffort}:{}),
       ...(limits.responseFormat?{response_format:limits.responseFormat}:{}),
       ...(limits.temperature!==undefined?{temperature:limits.temperature}:{})})});}
   catch(error) {
@@ -77,7 +78,7 @@ export async function providerCall(env,messages,tools,choice='auto',send=fetch,l
   });
   const choiceReply=data?.choices?.[0], reply=choiceReply?.message;
   if(!reply)throw Object.assign(Error('Модель вернула пустой ответ.'),{invalidModelResponse:true});
-  return {...reply,lengthLimited:choiceReply.finish_reason==='length',
+  return {...reply,finishReason:choiceReply.finish_reason,lengthLimited:choiceReply.finish_reason==='length',
     usage:{input:data.usage?.prompt_tokens,output:data.usage?.completion_tokens}};
 }
 async function apiTurn(store,a,history,question,env,send){

@@ -85,7 +85,7 @@ export function demoClient(db, user, service, caseId, sharedOnly = false) {
     if (!imported.length)
       imported.push({
         key: 'DEMO-START',
-        title: 'Проверить путь покупки',
+        title: 'Демо · Проверить путь покупки',
         description: 'Исследовать переход из подбора в корзину',
         priority: 'Normal',
       });

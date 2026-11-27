@@ -12,6 +12,8 @@ type Period = { start: string; end: string; mean: number; rows: Week[] };
 type Trend =
   | { available: true; baseline: Period; current: Period; change: number | null }
   | { available: false; reason: string };
+type Claim = { text: string; test?: string; sources: Citation[] };
+type Analysis = { observations: Claim[]; hypotheses: Claim[]; recommendations: Claim[]; missing: string[]; omittedObservations?: number };
 type Decision = {
   decisionContext?: string;
   scope?: 'account';
@@ -29,11 +31,9 @@ type Decision = {
     product: string; merchant: string; license: string | null; terms: string | null;
     competitorPrice: number; storePrice: number; checked: string; match?: string; sku: string | null; url?: string | null;
   } | null;
-  customer: Citation & { tags: string; excerpt: string | null } | null;
+  customer: Citation & { tags?: string; excerpt: string | null; date?: string } | null;
   backlog: Task | null;
   measurement: Citation & { title: string; metric: string; comment: string; formula: string } | null;
-  recommendation: { title: string; reason: string | null; next: string; uncertainty: string };
-  measurementIssue: boolean;
 };
 type TrackerSearch = {
   local: boolean;
@@ -51,6 +51,48 @@ function Source({ source }: { source: Citation }) {
   return <a className="decision-source" href={'#knowledge-source/' + source.version + '/' + encodeURIComponent(source.loc)}>
     {source.file} · {source.loc}
   </a>;
+}
+
+function ReleaseAnalysis({ decisionContext }: { decisionContext: string }) {
+  const [report, setReport] = useState<Analysis>();
+  const [pending, setPending] = useState(false);
+  const [error, setError] = useState('');
+  async function run() {
+    setPending(true);
+    setError('');
+    try {
+      setReport(await post<Analysis>('release-analysis', { decisionContext }));
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setPending(false);
+    }
+  }
+  const claims = (title: string, items: Claim[]) => !!items.length && <div>
+    <h3>{title}</h3>
+    <ul>{items.map((claim, index) => <li key={index}>
+      <p>{claim.text}</p>
+      {claim.test && <p>Проверка — {claim.test}</p>}
+      {claim.sources.map(source => <div key={source.version + '/' + source.loc}><Source source={source} /></div>)}
+    </li>)}</ul>
+  </div>;
+  return <section className="paper">
+    <h2>Вывод агента</h2>
+    <button type="button" disabled={pending} onClick={() => void run()}>
+      {pending ? 'Анализируем источники…' : error || report ? 'Повторить анализ' : 'Подготовить вывод'}
+    </button>
+    {error && <p role="alert">{error}</p>}
+    {report && <>
+      {!!report.omittedObservations && <p role="status">Часть наблюдений исключена после проверки чисел по источникам.</p>}
+      {claims('Наблюдения', report.observations)}
+      {claims('Гипотезы', report.hypotheses)}
+      {claims('Рекомендации', report.recommendations)}
+      {!!report.missing.length && <div>
+        <h3>Недостающие данные</h3>
+        <ul>{report.missing.map(item => <li key={item}>{item}</li>)}</ul>
+      </div>}
+    </>}
+  </section>;
 }
 
 type OfferCheck = { text: string; url?: string; checkedAt: string; searchRequests: number; searchNote?: string };
@@ -120,7 +162,9 @@ function WeeklyIndex({ trend }: { trend: Trend }) {
   </section>;
 }
 
-function TrackerActions({ product, releaseId, action }: { product: string; releaseId: string; action: Action }) {
+function TrackerActions({ product, releaseId, decisionContext, action, onCase }: {
+  product: string; releaseId: string; decisionContext?: string; action: Action; onCase: (caseId: string) => void
+}) {
   const [search, setSearch] = useState<TrackerSearch>();
   const [draft, setDraft] = useState<TrackerPreview>();
   const [pending, setPending] = useState(false);
@@ -135,8 +179,10 @@ function TrackerActions({ product, releaseId, action }: { product: string; relea
       if (op === 'case' && search) {
         const { caseId } = await post<{ caseId: string }>('release-tracker-case', payload);
         setSearch({ ...search, caseId });
+        onCase(caseId);
       } else if (op === 'draft' && search?.caseId) {
-        setDraft(await post<TrackerPreview>('release-tracker-draft', { ...payload, caseId: search.caseId, key }));
+        setDraft(undefined);
+        setDraft(await post<TrackerPreview>('release-tracker-draft', { ...payload, caseId: search.caseId, key, decisionContext }));
       } else if (op === 'search') {
         setSearch(await post<TrackerSearch>('release-tracker', payload));
       }
@@ -272,8 +318,6 @@ export function ReleaseDecision({
           </> : <p>К этой дате в календаре нет выпущенной функции семейства.</p>}
         </div>
         <div className="decision-next">
-          <h3>{data.recommendation.title}</h3>
-          <p>{data.recommendation.next}</p>
           {release && <>
             <button type="button" className="primary" disabled={opening} onClick={() => action(() => openChat(release.id))}>
               {opening ? 'Открываем чат…' : 'Открыть чат разбора'}
@@ -312,12 +356,11 @@ export function ReleaseDecision({
           <h2>Опыт покупателей</h2>
           {data.customer?.excerpt ? <>
             <blockquote>«{data.customer.excerpt}»</blockquote>
-            <p>Фрагмент интервью без даты в источнике.</p>
+            <p>{data.customer.date ? 'Дата интервью · ' + date(data.customer.date) : 'Фрагмент интервью без даты в источнике.'}</p>
           </> : <p>{data.historical ? 'В архиве нет датированного интервью для этого среза.'
             : data.customer ? 'В источнике доступны темы ответа; безопасная дословная цитата отсутствует.'
               : 'В загруженных интервью нет подтверждённой фразы для этого семейства.'}</p>}
           {data.customer && <Source source={data.customer} />}
-          <p>{data.recommendation.uncertainty}</p>
         </section>
         <section className="paper">
           <h2>Проверка у конкурента</h2>
@@ -337,10 +380,13 @@ export function ReleaseDecision({
           </> : <p>К этой дате нет проверенной строки с обеими ценами для семейства.</p>}
         </section>
       </div>}
+      {data.decisionContext && <ReleaseAnalysis key={data.decisionContext} decisionContext={data.decisionContext} />}
       {thread && release && <div className="decision-chat" ref={chatAnchor}>
         <h2>Чат разбора · {release.id}</h2>
         <div className="decision-chat-grid">
-          {!data.historical && <TrackerActions key={data.product + '/' + release.id} product={data.product} releaseId={release.id} action={action} />}
+          {!data.historical && <TrackerActions key={data.decisionContext} product={data.product} releaseId={release.id}
+            decisionContext={data.decisionContext} action={action} onCase={caseId => setData(current =>
+              current && current.decisionContext === data.decisionContext ? {...current,caseId} : current)} />}
           {renderChat(thread, data.caseId || undefined, release.id, data.product, data.decisionContext)}
         </div>
       </div>}

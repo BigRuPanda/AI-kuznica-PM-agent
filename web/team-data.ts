@@ -159,10 +159,11 @@ export type View = {
   ctr: RatioCard & { sources: string[] };
   reach: RatioCard;
   gap?: string;
+  gapSource?: Omit<SourceReference, 'source'>;
   signal?: Signal;
   monitoring?: Monitoring;
 };
-export type Issue = { key: string; title: string; category: string; reason: string; source: string };
+export type Issue = { key: string; title: string; category: string; reason: string; source: string; sourceRefs?: SourceReference[] };
 export type InvestigationSource = { label: string; calcId?: string; findingId?: string; url?: string };
 export type InvestigationHypothesis = {
   title: string; for: string[]; against: string[]; test: string;

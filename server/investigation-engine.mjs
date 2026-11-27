@@ -1,9 +1,13 @@
 import { z } from 'zod/v4';
 import { InvestigationValidationError, parseInvestigationArguments } from './investigation-validation.mjs';
 import { providerCall } from './agent.mjs';
+import { MODEL_TIMEOUT_MS } from './model-response.mjs';
 import { access } from './chart-ranges.mjs';
 import { checkModelTransport } from './data-profile.mjs';
-import { caseEvidenceSearch, digest, facts, fmt, getCase, listSales, productFamily, rankBacklog } from './evidence.mjs';
+import { caseEvidenceSearch, digest, fmt, getCase, productFamily } from './evidence.mjs';
+import { backlogRecommendations } from './backlog.mjs';
+import { sourceReader } from './source-reader.mjs';
+import { rowLink } from './analysis-composer.mjs';
 import { aggregateMetric, defaultStepDays, normalizeObservation, observationKey, observationWithin, ratioFields } from './metric-observations.mjs';
 import { legacyOrderMetric } from './watch-measurement.mjs';
 
@@ -85,8 +89,11 @@ function relatedRelease(releases, product, id, anchor, metric) {
     .sort((a, b) => a.data.release_date.localeCompare(b.data.release_date) || a.key.localeCompare(b.key)).at(-1);
 }
 
-function salesRows(db, origin) {
-  if (!Array.isArray(origin?.summary)) return listSales(db);
+function salesRows(read, origin) {
+  if (!Array.isArray(origin?.summary)) return read('sales').map(row => ({
+    product:row.data.product_family, week:row.data.week_start, value:row.data.orders_index,
+    partial:partial(row.data), source:source(row), version:row.version,
+  }));
   return origin.summary.flatMap(series => Array.isArray(series.rows) ? series.rows.map(r => ({...r, product: series.product})) : []);
 }
 
@@ -109,8 +116,8 @@ function salesSeries(product, rows, baseline, latest, sameWeeks) {
     {product, rows: values, baseline, latest, before: a, after: b, change, changeUnit: '%'})};
 }
 
-function salesEvidence(db, c, signal, measurement, dates, releases, origin) {
-  const rows = salesRows(db, origin), product = measurement?.product || c.product;
+function salesEvidence(read, c, signal, measurement, dates, releases, origin) {
+  const rows = salesRows(read, origin), product = measurement?.product || c.product;
   const observations = rows.filter(r => r.product === product && isDate(r.week));
   const threshold = signal?.rule === 'absolute' && isDate(signal.week) ? signal : null;
   const cutoff = dates.through || (threshold && plus(threshold.week, 6));
@@ -139,7 +146,7 @@ function salesEvidence(db, c, signal, measurement, dates, releases, origin) {
   const detail = (controlSeries?.hasCoverage ? 'Контроль сравнивается на тех же неделях. ' :
     'Доступного сравнения с контролем на тех же неделях пока нет. ') +
     (releaseDay || dates.releaseWeek ? 'Неделя релиза и неполные недели исключены. ' : 'Неполные недели исключены. ') +
-    'Индекс отражает динамику самостоятельных заказов. Причину и шаг, на котором теряется покупатель, проверяем отдельно.';
+    'Индекс отражает динамику самостоятельных заказов. Данных о поведении покупателей в этом ряду нет.';
   return {unit:'п. индекса', metric:'orders_index', title:metricNames.orders_index + ' · ' + product,
     product, measurable:primary.hasCoverage, baseline, latest, through, pivot, release, reason:primary.text,
     summary:text, impact:detail, findings:[primary.finding, ...(controlSeries ? [controlSeries.finding] : [])]};
@@ -169,12 +176,12 @@ function rangeWindows(ranges) {
   return window[0].through < window[1].from ? window : null;
 }
 
-function kpiRows(db, metric, origin) {
+function kpiRows(db, read, metric, origin) {
   const versions = origin?.metric === metric && origin?.metricVersions;
   const reads = versions?.length ? db.prepare('SELECT version,file,body FROM documents WHERE version IN (SELECT value FROM json_each(?)) ORDER BY rowid')
     .all(JSON.stringify(versions)).flatMap(({version,file,body}) => JSON.parse(body).facts
       .filter(f => f.kind === 'metrics' && f.row.metric_id === metric)
-      .map(f => ({version,file,loc:f.loc,data:f.row}))) : facts(db, 'metrics').filter(f => f.data.metric_id === metric);
+      .map(f => ({version,file,loc:f.loc,data:f.row}))) : read('metrics').filter(f => f.data.metric_id === metric);
   const normalized = reads.map(f => ({...normalizeObservation(f.data, f.file), source:source(f), version:f.version}));
   return [...new Map(normalized.map(r => [observationKey(r), r])).values()];
 }
@@ -236,11 +243,11 @@ function deviceComparisons(rows, metric, selection, sample, pinned) {
   return entries.length > 1 ? entries : [];
 }
 
-function kpiEvidence(db, c, signal, measurement, dates, releases, origin) {
+function kpiEvidence(db, read, c, signal, measurement, dates, releases, origin) {
   const product = signal?.product || measurement?.product || c.product;
   const metric = signal?.metric || measurement.metric;
   const title = metricNames[metric] || signal?.title || metric;
-  const rows = kpiRows(db, metric, origin);
+  const rows = kpiRows(db, read, metric, origin);
   const selection = {product, segment:signal?.segment || measurement?.segment || origin?.segment || 'all',
     sourceId:signal?.sourceId || measurement?.sourceId || origin?.sourceId,
     definitionId:signal?.definitionId || measurement?.definitionId || origin?.definitionId,
@@ -259,7 +266,9 @@ function kpiEvidence(db, c, signal, measurement, dates, releases, origin) {
   const baseline = windows?.[0] || {from: measurement?.baselineFrom || dates.from || (pivot && plus(pivot, -28)),
     through: measurement?.baselineThrough || (pivot && plus(pivot, -1))};
   const latest = windows?.[1] || {from: pivot && (releaseDay && releaseDay !== pivot ? plus(pivot, 7) : pivot), through};
-  const canUseSignal = signal && [signal.baseN, signal.baseD, signal.baseValue, signal.n, signal.d, signal.value].every(Number.isFinite) &&
+  const canUseSignal = signal && (!dates.through || isDate(signal.week) && plus(signal.week,6) <= dates.through) &&
+    (!dates.from || signal.baselineFrom >= dates.from) &&
+    [signal.baseN, signal.baseD, signal.baseValue, signal.n, signal.d, signal.value].every(Number.isFinite) &&
     signal.baseD > 0 && signal.d > 0 && signal.baseN >= 0 && signal.n >= 0 && signal.baseN <= signal.baseD && signal.n <= signal.d;
   const sample = canUseSignal ? frozenWindows(signal) : {baseline, latest};
   const candidates = rows.filter(r => observationWithin(r, sample.baseline?.from, sample.latest?.through));
@@ -297,31 +306,34 @@ function kpiEvidence(db, c, signal, measurement, dates, releases, origin) {
       'Проверка причин требует проверить сопоставимость измерений и переход пользователя.', findings};
 }
 
-function releaseFindings(releases, calculation) {
+function releaseFindings(releases, calculation, {from,through}) {
   const date = calculation.release?.data.release_date;
   const around = date || calculation.pivot;
-  const nearby = releases.filter(f => f === calculation.release || (around && isDate(f.data.release_date) &&
+  const nearby = releases.filter(f => (!from || f.data.release_date >= from) && (!through || f.data.release_date <= through) &&
+    (f === calculation.release || (around && isDate(f.data.release_date) &&
     (!calculation.through || f.data.release_date <= calculation.through) &&
-    Math.abs(Date.parse(f.data.release_date) - Date.parse(around)) <= 14 * dayMs));
+    Math.abs(Date.parse(f.data.release_date) - Date.parse(around)) <= 14 * dayMs)));
   return nearby.sort((a,b) => a.data.release_date.localeCompare(b.data.release_date)).slice(0, 8).map(f => {
     const r = f.data;
     return makeFinding('releases', r.release_id + ' · ' + r.release_date,
       [r.description, r.affected_metrics && 'Затронутые метрики — ' + r.affected_metrics].filter(Boolean).join('. '),
-      {date:r.release_date, source:source(f), version:f.version});
+      {date:r.release_date, source:source(f), version:f.version, loc:f.loc});
   });
 }
 
-function operationalFindings(db, calculation, signal, question) {
+function operationalFindings(read, calculation, question, dates) {
   const {product, through, metric, release} = calculation;
   const metricId = metric === 'orders_index' ? 'family_orders_idx' : metric;
-  const recommended = rankBacklog(db, product, {through, historical:Boolean(through), metricId,
-    releaseId:release?.data.release_id, signal});
-  const byTask = new Map(facts(db, 'backlog').map(f => [f.data.task_id,f]));
+  const backlog = read('backlog').filter(f=>!dates.from || f.data.created_date >= dates.from);
+  const definitions = read('dictionary');
+  const recommended = backlogRecommendations(backlog, definitions, read('releases'), {product,
+    through:dates.through || through, historical:Boolean(dates.through || through), metricId, releaseId:release?.data.release_id});
+  const byTask = new Map(backlog.map(f => [f.data.task_id,f]));
   const tasks = recommended.filter(r => byTask.has(r.key)).slice(0, 6);
   const linked = new Set([metricId, ...metricIds(release?.data.affected_metrics),
     ...tasks.flatMap(r => metricIds(byTask.get(r.key).data.linked_metric_ids))]);
   const wanted = prefixes(question).filter(w => !terms(product).includes(w));
-  const definitions = facts(db, 'dictionary').map(f => {
+  const dictionary = definitions.map(f => {
     const r = f.data, text = [r.metric_name, r.formula_or_logic, r.comment].filter(Boolean).join('. ');
     const score = (r.metric_id === metricId ? 12 : 0) + (linked.has(r.metric_id) ? 4 : 0) +
       (familyMatch(product, r.comment) ? 3 : 0) + hits(wanted, text);
@@ -332,30 +344,34 @@ function operationalFindings(db, calculation, signal, question) {
     return {f, r, text, score, measurementGap};
   }).filter(r => r.score > 0).sort((a, b) => b.score - a.score || a.f.key.localeCompare(b.f.key)).slice(0, 8);
   return [
-    ...definitions.map(({f,r,text,measurementGap}) => makeFinding('dictionary', r.metric_name || r.metric_id, text,
-      {metricId:r.metric_id, source:source(f), version:f.version, ...(measurementGap && {measurementGap})})),
+    ...dictionary.map(({f,r,text,measurementGap}) => makeFinding('dictionary', r.metric_name || r.metric_id, text,
+      {metricId:r.metric_id, source:source(f), version:f.version, loc:f.loc, ...(measurementGap && {measurementGap})})),
     ...tasks.map(r => {
       const f = byTask.get(r.key), task = f.data;
+      const historical = dates.through && (!task.closed_date || task.closed_date > dates.through);
       return makeFinding('backlog', r.key + ' · ' + r.title,
-        [task.description_short, task.status && 'Статус в книге — ' + task.status,
+        [!historical && task.description_short, !historical && task.status && 'Статус в книге — ' + task.status,
           task.linked_metric_ids && 'Метрики — ' + task.linked_metric_ids].filter(Boolean).join('. ') || r.title,
-        {issueKey:r.key, date:task.created_date, source:source(f), version:f.version});
+        {issueKey:r.key, date:task.created_date, source:source(f), version:f.version, loc:f.loc});
     }),
   ];
 }
 
-function qualitativeFindings(db, product, question, asOf, datedOnly) {
+function qualitativeFindings(db, read, product, question, asOf, {through,from}) {
   const wanted = prefixes(question).filter(w => !terms(product).includes(w));
   return Object.entries(sections).flatMap(([kind, label]) => {
-    const available = db.prepare('SELECT 1 FROM facts WHERE kind=? LIMIT 1').get(kind);
-    const candidates = available ? caseEvidenceSearch(db, product, [product, question].filter(Boolean).join(' '), [kind],
-      datedOnly ? asOf : undefined).filter(r => !asOf || !r.metadata?.date || r.metadata.date <= asOf) : [];
+    const saved = read(kind);
+    const available = saved.length > 0;
+    const candidates = (through ? saved.filter(r => isDate(r.data?.date)).map(r => ({
+      ...r, metadata:r.data, source:source(r), data:r.data.excerpt, score:0,
+    })) : available ? caseEvidenceSearch(db, product, [product, question].filter(Boolean).join(' '), [kind]) : [])
+      .filter(r => !r.metadata?.date || (!asOf || r.metadata.date <= asOf) && (!from || r.metadata.date >= from));
     const relevant = candidates.map(r => {
       const hypothesis = [r.metadata?.hypothesis, r.metadata?.question, r.data].filter(Boolean).join(' ');
       const productMatch = familyMatch(product, [r.metadata?.product, hypothesis].filter(Boolean).join(' '));
       const matches = hits(wanted, hypothesis);
       return {r, matches, productMatch};
-    }).filter(r => (r.matches && (r.productMatch || r.matches >= 2)) || r.productMatch)
+    }).filter(r => r.productMatch)
       .sort((a, b) => Number(Boolean(b.matches)) - Number(Boolean(a.matches)) ||
         (b.productMatch * 2 + b.matches) - (a.productMatch * 2 + a.matches) || b.r.score - a.r.score)
       .slice(0, 5);
@@ -371,7 +387,7 @@ function qualitativeFindings(db, product, question, asOf, datedOnly) {
       const relation = matches && productMatch ? meta.relation || 'упоминание' : 'упоминание';
       const criterion = meta.question || meta.hypothesis;
       return makeFinding(kind, criterion ? label + ' · ' + criterion.slice(0, 120) : label,
-        String(r.data || '').slice(0, 750), {source:r.source, version:r.version, relation, date:meta.date,
+        String(r.data || '').slice(0, 750), {source:r.source, version:r.version, loc:r.loc, relation, date:meta.date,
           hypothesis:meta.hypothesis, criterion, relevance:[matches && productMatch ? 'по вопросу и продукту' :
             matches ? 'контекст по вопросу' : 'упоминание продукта', asOf && !meta.date && 'дата источника неизвестна']
             .filter(Boolean).join(', ')});
@@ -381,7 +397,8 @@ function qualitativeFindings(db, product, question, asOf, datedOnly) {
 
 function link(calcId, finding) {
   if(finding.url) return {label:finding.label,url:finding.url};
-  return {label: finding.source ? finding.label + ' · ' + finding.source : finding.label, calcId, findingId:finding.id};
+  return {label: finding.source ? finding.label + ' · ' + finding.source : finding.label, calcId, findingId:finding.id,
+    ...(finding.loc && /^[a-f\d]{64}$/iu.test(finding.version || '') && {url:rowLink(finding)})};
 }
 
 export function captureInvestigation(db, run) {
@@ -391,22 +408,24 @@ export function captureInvestigation(db, run) {
     (c.body.plan?.metric && {metric:c.body.plan.metric});
   const origin = selectedOrigin(db, run, c);
   const dates = requestedDates(run, c, origin);
-  const releases = facts(db, 'releases');
   const parent = run.parentCapture?.context;
+  const explicitThrough = parent?.explicitThrough || dates.through;
+  if (explicitThrough) dates.through = explicitThrough;
+  const read = sourceReader(db, explicitThrough);
+  const releases = read('releases').filter(f=>!explicitThrough || f.data.release_date <= explicitThrough);
   const metric = rawSignal?.metric || measurement?.metric || origin?.metric || 'orders_index';
   const signal = rawSignal?.metric === metric ? rawSignal : null;
   const inherited = parent?.calculation?.measurable && parent.calculation.findings?.length;
   const calculation = inherited ? parent.calculation : legacyOrderMetric(metric) ?
-    salesEvidence(db, c, rawSignal, measurement, dates, releases, origin) :
-    kpiEvidence(db, c, signal, measurement ? {...measurement, metric} : {metric}, dates, releases, origin);
+    salesEvidence(read, c, rawSignal, measurement, dates, releases, origin) :
+    kpiEvidence(db, read, c, signal, measurement ? {...measurement, metric} : {metric}, dates, releases, origin);
   const period = comparisonPeriod(calculation.baseline, calculation.latest);
   const {unit, summary, measurable, product, title} = calculation;
   const question = run.question || c.body.plan?.question || c.title;
-  const explicitThrough = inherited ? parent.explicitThrough : dates.through;
   const operations = inherited ? parent.findings.filter(f => ['releases','dictionary','backlog'].includes(f.kind)) :
-    [...releaseFindings(releases, calculation), ...operationalFindings(db, calculation, rawSignal, question)];
+    [...releaseFindings(releases, calculation, dates), ...operationalFindings(read, calculation, question, dates)];
   const findings = [...calculation.findings, ...operations,
-    ...qualitativeFindings(db, product, question, explicitThrough || calculation.through, Boolean(explicitThrough))];
+    ...qualitativeFindings(db, read, product, question, explicitThrough || calculation.through, dates)];
   const context = {kind:'investigation-calculation', caseId:run.caseId, runId:run.id || run.parentId || run.owner,
     product, title, period, unit, summary, question, findings, explicitThrough, calculation};
   const raw = JSON.stringify(context), calcId = digest(raw);
@@ -541,11 +560,14 @@ export async function runInvestigationStage({env = process.env, send = fetch, st
   ].join('\n')},{role:'user',content:JSON.stringify({question:run.question || capture.context.question, product:capture.context.product,
     period:capture.period, unit:capture.unit, prior, catalog:findings.map(({id,kind,label,relation,topicKind,measurementGap}) =>
       ({id,kind,label,relation,topicKind,measurementGap}))})}];
+  const deadline = Date.now()+MODEL_TIMEOUT_MS;
   try {
     for (let round = 0; round < 5; round++) {
       const choice = round === 0 ? {type:'function',function:{name:'read_findings'}} : round === 4 ?
         {type:'function',function:{name:submit}} : 'required';
-      const reply = await providerCall(env, messages, tools, choice, send);
+      const timeout = deadline-Date.now();
+      if (timeout <= 0) throw Object.assign(Error('Модель не успела завершить этап за 600 секунд.'),{timedOut:true});
+      const reply = await providerCall(env, messages, tools, choice, send, {timeout});
       usage.calls++;
       usage.input += reply.usage?.input || 0;
       usage.output += reply.usage?.output || 0;

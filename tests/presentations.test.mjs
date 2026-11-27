@@ -158,6 +158,7 @@ test('empty and long cases preserve every check and export without a model',asyn
   const first=startPresentation(store,author,'sample','empty-case');
   await workPresentations(store,{...local,DATA_PROFILE:'local'},()=>assert.fail('local profile must never call a model'));
   assert.deepEqual(readPresentation(db,peer,first.id).deck.slides.map(s=>s.kind),['cover','decision','sources']);
+  assert.equal(readPresentation(db,peer,first.id).deck.slides[1].body,'Решение в разборе пока не зафиксировано.');
   const long=Array(180).fill('Проверили оформление заказа.').join(' ')+' Конечная строка.';
   db.prepare("UPDATE cases SET state='Завершено',body=? WHERE id='sample'").run(JSON.stringify({owner:author.id,notes:[{text:long,created:Date.now()}]}));
   const next=startPresentation(store,author,'sample','long-case');
@@ -345,7 +346,7 @@ test('the presentation editor cannot send a private snapshot through ProxyAPI',a
   let calls=0;
   await workPresentations(store,{...local,LLM_BACKEND:'proxyapi',PROXYAPI_API_KEY:'synthetic-key'},async()=>{
     calls++;
-    return Response.json({choices:[{message:{content:'{"slides":[0]}'}}]});
+    return Response.json({choices:[{message:{content:'{"slides":[0],"decision":null}'}}]});
   });
   assert.equal(calls,0);
   const result=readPresentation(db,author,version.id);
@@ -355,11 +356,17 @@ test('the presentation editor cannot send a private snapshot through ProxyAPI',a
 
 test('the loopback presentation editor requests a strict JSON schema',async t=>{
   const store=await fixture(t),db=store.db;
+  importDocs(store,[{file:'Release.xlsx',facts:[{kind:'releases',loc:'Changes!A2',
+    row:{release_id:'R-1',release_date:'2026-10-01',description:'Оформление заказа'}}]}],{notify:false});
+  db.prepare("UPDATE cases SET body=json_set(body,'$.release','R-1') WHERE id='sample'").run();
   const {id}=startPresentation(store,author,'sample','strict-editor-schema');
   const requests=[];
   await workPresentations(store,local,async (url,{body})=>{
-    requests.push({url:String(url),body:JSON.parse(body)});
-    return Response.json({choices:[{message:{content:'{"slides":[0]}'}}]});
+    const payload = JSON.parse(body);
+    requests.push({url:String(url),body:payload});
+    const source = JSON.parse(payload.messages.at(-1).content).evidence.find(item=>item.kind==='flow' || item.steps);
+    return Response.json({choices:[{message:{content:JSON.stringify({slides:[0],
+      decision:{text:'Сверить показатель по исходным строкам.',sources:[source.index]}})}}]});
   });
   assert.equal(requests.length,1);
   assert.equal(requests[0].url,'http://127.0.0.1:8080/v1/chat/completions');
@@ -367,7 +374,11 @@ test('the loopback presentation editor requests a strict JSON schema',async t=>{
   assert.equal(format?.type,'json_schema');
   assert.equal(format.json_schema.name,'presentation');
   assert.equal(format.json_schema.strict,true);
-  assert.deepEqual(format.json_schema.schema.required,['slides']);
+  assert.deepEqual(format.json_schema.schema.required,['slides','decision']);
   assert.equal(format.json_schema.schema.additionalProperties,false);
-  assert.equal(readPresentation(db,author,id).status,'ready');
+  const presentation = readPresentation(db,author,id);
+  assert.equal(presentation.status,'ready');
+  const decision = presentation.deck.slides.find(slide => slide.kind === 'decision');
+  assert.match(decision.body,/Сверить показатель по исходным строкам/);
+  assert.ok(decision.refs.some(ref => ref.url.startsWith('#knowledge-source/')));
 });

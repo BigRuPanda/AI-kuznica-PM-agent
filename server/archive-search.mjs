@@ -1,6 +1,8 @@
 import { normalizeObservation, observationWithin } from './metric-observations.mjs';
 import { explicitDates } from './day-comparison.mjs';
 import { apiConfigured, providerCall } from './agent.mjs';
+import { releaseEvidence } from './release-decision.mjs';
+import { analysisEvidence, analysisSources, analysisText, composeAnalysis, markdownSource, rowLink, uniqueRows } from './analysis-composer.mjs';
 
 const indexes = new WeakMap();
 const stop = new Set('как какой какова какая какие каких какого сколько чем что чего где когда почему ли бы на по от до за для при или из было были был была есть эту эти этом этой его нее еще после перед можно наши нашей раз раза назови укажи покажи основании данным данных источник источники согласно именно'.split(' '));
@@ -25,12 +27,13 @@ const taskIdsOf = r => list(r.data.related_task_ids).filter(id=>!/^[-—–]$|^(
 const linkedTask = (task, release) => taskIdsOf(release).includes(task.data.task_id) ||
   list(task.data.release_id).includes(release.data.release_id);
 
-function archiveIndex(db) {
-  const versions=db.prepare('SELECT DISTINCT version FROM facts ORDER BY version').all().map(r=>r.version);
+function archiveIndex(db, references) {
+  const versions=references ? [...new Set(references.map(row=>row.version))].sort() :
+    db.prepare('SELECT DISTINCT version FROM facts ORDER BY version').all().map(row=>row.version);
   const stamp=versions.join('/')+':'+db.prepare('SELECT generation FROM case_investigation_sources WHERE id=1').get().generation;
-  if (indexes.get(db)?.stamp===stamp) return indexes.get(db);
+  if (!references && indexes.get(db)?.stamp===stamp) return indexes.get(db);
   const records=[], metrics=[], sales=[];
-  const byVersion=Map.groupBy(db.prepare('SELECT version,loc FROM facts').all(),r=>r.version);
+  const byVersion=Map.groupBy(references || db.prepare('SELECT version,loc FROM facts').all(),row=>row.version);
   const doc=db.prepare('SELECT file,body FROM documents WHERE version=?');
   for(const version of versions) {
     const saved=doc.get(version);
@@ -67,7 +70,8 @@ function archiveIndex(db) {
     r.titleWords=new Set(stems(r.data?.metric_name || r.data?.title || r.prices?.Продукт || ''));
   }
   const result={stamp,records,metrics,sales};
-  indexes.set(db,result);return result;
+  if (!references) indexes.set(db,result);
+  return result;
 }
 
 function termStatistics(records) {
@@ -122,8 +126,11 @@ function excerpt(r, words) {
 }
 
 function archiveScope(db, {product,from,through,full,snapshot,fixedPeriod,competitorVersions}) {
-  const idx=archiveIndex(db);
-  const corrections=product?db.prepare('SELECT source,comment FROM feedback WHERE product=? ORDER BY id').all(product):[];
+  const references = snapshot?.decision && releaseEvidence(db,snapshot.decision).evidence.flatMap(item=>item.sources);
+  const idx=archiveIndex(db,references);
+  const cutoff = snapshot?.decision?.historical ? Date.parse(through + 'T21:00:00Z') : null;
+  const corrections=product?db.prepare('SELECT source,comment FROM feedback WHERE product=? AND (? IS NULL OR created<?) ORDER BY id')
+    .all(product, cutoff, cutoff):[];
   const excluded=new Map(corrections.map(row=>[row.source,row.comment.startsWith('[Исключить связь]')]));
   const visible=r=>!r.refs.some(s=>excluded.get(s.file+' · '+s.loc)) &&
     !excluded.get(r.data?.sourceFile+' · '+r.data?.sourceLoc);
@@ -134,6 +141,7 @@ function archiveScope(db, {product,from,through,full,snapshot,fixedPeriod,compet
   const versions = {releases:releaseVersions,
     backlog:snapshot?.backlogVersions && new Set(snapshot.backlogVersions),
     dictionary:snapshot?.dictionaryVersions && new Set(snapshot.dictionaryVersions),
+    interview:snapshot?.interviewVersions && new Set(snapshot.interviewVersions),
     competitor:competitorVersions && new Set(competitorVersions)};
   const records=idx.records.filter(r=>visible(r) && inPeriod(r.data?.release_date || r.data?.created_date || r.data?.date) &&
     (!fixedPeriod || r.kind!=='competitor' || /^\d{4}-\d{2}-\d{2}$/u.test(r.offerDate) && inPeriod(r.offerDate)) &&
@@ -202,7 +210,7 @@ export function archiveEvidence(db, question, {releaseId,now = Date.now(),...sco
   const asksRespondent=/интервью|респондент|со слов (?:покупателя|клиента)/iu.test(q);
   if (!mentionedIds.size && !dates.length && asksRespondent &&
       (!taskQuery || !/номер|тикет|б[еэ]клог/iu.test(q))) {
-    const corpus=termStatistics(visible.filter(r=>r.fields));
+    const corpus=termStatistics(visible.filter(r=>r.kind==='interview'));
     addRow(ranked(corpus.records,words,corpus)[0]?.r);
     return evidence;
   }
@@ -306,12 +314,22 @@ export function archiveInquiry(question) {
   return !/(?:построй|нарисуй|график|диаграмм|создай|заведи|оформи|подготовь|составь|сохрани|запиши|закрепи|опубликуй|отправь|экспортируй|закрой|назначь|обнови|прокомментируй|отслеживай|redmine|confluence|уведомлен|разберись|проверь воронк)/iu.test(question) &&
     /\?|како|сколько|почему|покажи|найди|назови|укажи|сравни|где|когда|зачем|ответь|расскажи/iu.test(question);
 }
-export async function archiveAnswer(store, question, evidence, env, send, job) {
+export async function archiveAnswer(store, question, evidence, env, send, job, scope = {}) {
   if(!evidence.length) return null;
-  const readSources=[...new Map(evidence.flatMap(x=>x.refs).map(s=>[s.version+'/'+s.loc,{
-    label:s.file+' · '+s.loc,url:'#knowledge-source/'+s.version+'/'+encodeURIComponent(s.loc)}])).values()];
+  const citation = row => ({label:row.file+' · '+row.loc,url:rowLink(row)});
+  const readSources=uniqueRows(evidence.flatMap(x=>x.refs)).map(citation);
   const fallback=()=>evidence.map(x=>x.text).join('\n\n');
   const result={mode:'archive',outcome:'done',steps:['search'],readSources};
+  if (explanation(question)) {
+    const catalog = analysisEvidence(scope, evidence.map(row=>({kind:row.kind || 'archive',data:row.text,sources:row.refs})));
+    try {
+      const report = await composeAnalysis({scope,evidence:catalog,request:question},env,send);
+      return {...result,text:analysisText(report,markdownSource),readSources:analysisSources(report).map(citation),
+        outcome:report.missing.length?'partial':'done'};
+    } catch (error) {
+      return {...result,text:error.message+'\n\n'+fallback(),outcome:'partial'};
+    }
+  }
   if(evidence.every(x=>x.kind==='interview')) return {...result,text:'Из записей интервью:\n\n'+fallback()};
   if(evidence.every(x=>x.kind==='dictionary')) return {...result,text:fallback()};
   // Measured values, computed differences and their calendar context are already readable.

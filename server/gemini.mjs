@@ -1,5 +1,5 @@
 import { checkModelTransport } from './data-profile.mjs';
-import {readModelResponse} from './model-response.mjs';
+import {modelDispatcher,modelTimeout,readModelResponse} from './model-response.mjs';
 import {GoogleAuth} from 'google-auth-library';
 import {randomUUID} from 'node:crypto';
 
@@ -51,16 +51,21 @@ export async function geminiCall(env,messages,tools,choice,send,credentials=auth
   const url=developer?'https://generativelanguage.googleapis.com/v1beta/models/'+model+':generateContent':
     'https://'+host+'/v1/'+prefix+'publishers/google/models/'+model+':generateContent';
   const request=geminiRequest(messages,tools,choice);
-  if(limits.maxTokens)request.generationConfig={maxOutputTokens:limits.maxTokens};
+  if(limits.maxTokens || limits.responseFormat?.type==='json_schema') request.generationConfig={
+    ...(limits.maxTokens && {maxOutputTokens:limits.maxTokens}),
+    ...(limits.responseFormat?.type==='json_schema' && {responseMimeType:'application/json',
+      responseJsonSchema:limits.responseFormat.json_schema.schema}),
+  };
   const body=JSON.stringify(request);
   let res;
-  const signal=AbortSignal.timeout(limits.timeout ?? 60000);
-  try{res=await send(url,{method:'POST',headers,redirect:'error',signal,body});}
+  const signal=AbortSignal.timeout(modelTimeout(limits.timeout));
+  try{res=await send(url,{method:'POST',headers,redirect:'error',signal,body,dispatcher:modelDispatcher});}
   catch{throw Object.assign(Error('Не удалось связаться с Google Cloud.'),{retryable:true,timedOut:signal.aborted});}
   if(!res.ok)throw Object.assign(Error('Google вернул HTTP '+res.status+'. '+({400:'Проверьте параметры модели и тип ключа.',401:'Проверьте аутентификацию.',403:developer?'Проверьте доступ ключа к Gemini API и модели.':'Проверьте биллинг, включение API и право aiplatform.endpoints.predict.',404:'Проверьте доступность ID модели.',429:'Исчерпана квота запросов.'}[res.status]||'Повторите запрос позже.')),{status:res.status});
-  const response=await readModelResponse(res,signal),parts=response?.candidates?.[0]?.content?.parts;
-  if(!parts?.length)throw Object.assign(Error('Gemini вернула пустой ответ.'),{invalidModelResponse:true});
+  const response=await readModelResponse(res,signal),candidate=response?.candidates?.[0],parts=candidate?.content?.parts;
+  const finishReason=candidate?.finishReason;
+  if(!parts?.length)throw Object.assign(Error('Gemini вернула пустой ответ.'),{invalidModelResponse:true,finishReason});
   // Gemini may split a word across adjacent parts. Whitespace belongs to the text itself.
-  return {role:'assistant',usage:{input:response.usageMetadata?.promptTokenCount,output:response.usageMetadata?.totalTokenCount!=null?response.usageMetadata.totalTokenCount-(response.usageMetadata.promptTokenCount||0):undefined},content:parts.filter(p=>p.text&&!p.thought).map(p=>p.text).join(''),googleParts:parts,
+  return {role:'assistant',finishReason,lengthLimited:finishReason==='MAX_TOKENS',usage:{input:response.usageMetadata?.promptTokenCount,output:response.usageMetadata?.totalTokenCount!=null?response.usageMetadata.totalTokenCount-(response.usageMetadata.promptTokenCount||0):undefined},content:parts.filter(p=>p.text&&!p.thought).map(p=>p.text).join(''),googleParts:parts,
     tool_calls:parts.filter(p=>p.functionCall).map(p=>({id:p.functionCall.id||randomUUID(),type:'function',function:{name:p.functionCall.name,arguments:JSON.stringify(p.functionCall.args||{})}}))};
 }

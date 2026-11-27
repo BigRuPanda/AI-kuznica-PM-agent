@@ -46,7 +46,7 @@ export function ReleaseAnalytics({ route, requestedId, user }: {
     if (id && journal?.releases.some(r => r.id === id)) remember('last', id);
   }, [id, journal]);
   return <section className="release-workspace">
-    <a className="crumb" href="#releases-list">← Журнал релизов</a>
+    <a className="crumb" href="#releases-list" data-ui-hint="Вернёт в календарь из загруженных материалов.">← Журнал релизов</a>
     {error && <p role="alert">{error}</p>}
     {route === 'calc' ? <CalculationPage id={requestedId || ''}/> :
       journal && id ? <Releases key={id} id={id} journal={journal} user={user}
@@ -153,8 +153,8 @@ function Releases({id,journal,user,generation,onForm}:{id:string;journal:Journal
     {error&&<p role="alert" className="error">{error}</p>}
     {r&&<Headline report={r}/>}</div>
     {r?<><div className="filter-area">
-    <div className="filters"><label className="icon-select" title="Данные на дату"><Icon name="calendar"/><select aria-label="Данные на" value={r.context.day} onChange={e=>{setDay(+e.target.value);remember(id+'/day',e.target.value);}}>{Array.from({length:r.last+1},(_,j)=><option key={j} value={j}>{dayDate(r.release.launch,j)}</option>)}</select></label>
-    <label className="icon-select" title="Сегмент клиентов"><Icon name="people"/><select aria-label="Клиенты" value={seg} onChange={e=>{setSeg(e.target.value as Segment);remember(id+'/seg',e.target.value);}}>{Object.entries(segmentNames).map(([v,l])=><option key={v} value={v}>{l}</option>)}</select></label>
+    <div className="filters"><label className="icon-select"><Icon name="calendar"/><select aria-label="Данные на" data-ui-hint="Ограничивает расчёт событиями по выбранную дату." value={r.context.day} onChange={e=>{setDay(+e.target.value);remember(id+'/day',e.target.value);}}>{Array.from({length:r.last+1},(_,j)=><option key={j} value={j}>{dayDate(r.release.launch,j)}</option>)}</select></label>
+    <label className="icon-select"><Icon name="people"/><select aria-label="Клиенты" data-ui-hint="Выбирает группу клиентов для расчёта." value={seg} onChange={e=>{setSeg(e.target.value as Segment);remember(id+'/seg',e.target.value);}}>{Object.entries(segmentNames).map(([v,l])=><option key={v} value={v}>{l}</option>)}</select></label>
     {names.length>0&&<label>Дашборд <select value={board} onChange={e=>setBoard(e.target.value)}><option value="">Основной обзор</option>{names.map(n=><option key={n}>{n}</option>)}</select></label>}</div>
     <details className="about"><summary>О релизе</summary><p>{r.release.description}</p><p>Аудитория · {r.release.audience}</p><p>Главный вопрос · {r.release.question}</p>
     {r.report?.summaryMetric===r.release.target&&r.report.version===r.context.version&&<details><summary>Первый разбор · {dayDate(r.release.launch,r.report.day)}</summary><Answer text={r.report.answer}/><a href={calcHref(r.report.calc)}>Открыть расчёт</a></details>}</details></div>

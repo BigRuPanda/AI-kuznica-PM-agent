@@ -2,7 +2,7 @@ import { marketOffers } from './market-offers.mjs';
 import { visibleCase } from './workbench.mjs';
 import { checkOffer } from './competitor-check.mjs';
 import { noWeb } from './web-search.mjs';
-import { fmt } from './evidence.mjs';
+import { fmt, productFamily } from './evidence.mjs';
 
 export function competitorQuestion(question) {
   if (noWeb(question) || /(?:не проверяй|на дату|на момент|по состоянию на\s+(?!сегодня)|\d{4}-\d{2}-\d{2}|\d{1,2}[./]\d{1,2}[./]\d{2,4})/iu.test(question)) return false;
@@ -15,16 +15,18 @@ export function archivedOfferQuestion(question) {
     /конкурент|продав[це]|allsoft|аллсофт|[a-z0-9-]+\.(?:ru|com)\b|артикул/iu.test(question);
 }
 
-function matchingOffers(db, question, product, through, bounds) {
+function matchingOffers(db, question, product, through, bounds, scoped = false) {
   question = question.toLowerCase();
   const domains = question.match(/[a-z0-9-]+(?:\.[a-z0-9-]+)*\.(?:ru|com)\b/g) || [];
-  const all = marketOffers(db, null, through, bounds);
+  const all = marketOffers(db, scoped ? product : null, through, bounds);
   const named = [...new Set(all.map(o => o.merchant))].filter(m => question.includes(m.split('.')[0].toLowerCase()) ||
     (m === 'allsoft.ru' && question.includes('аллсофт')));
   const sku = /\b(?=[a-z0-9-]*[a-z])(?=[a-z0-9-]*\d)[a-z0-9-]{7,32}\b/i.exec(question)?.[0];
   const namedProduct = /kaspersky|каспер/u.test(question) ? 'Kaspersky' : /astra|астр/u.test(question) ? 'Astra' : null;
   const source = namedProduct || (!sku && product);
-  return (source ? marketOffers(db, source, through, bounds) : all).filter(o =>
+  const matches = scoped ? all.filter(offer=>!namedProduct || productFamily(offer.product) === productFamily(namedProduct)) :
+    source ? marketOffers(db, source, through, bounds) : all;
+  return matches.filter(o =>
     (!domains.length || domains.includes(o.merchant)) && (!named.length || named.includes(o.merchant)) &&
     (!sku || o.sku?.toLowerCase() === sku));
 }
@@ -33,8 +35,8 @@ const offerSource = o => ({url:'#knowledge-source/'+o.version+'/'+encodeURICompo
 
 export function archivedOfferAnswer(db, question, {from,through,product,versions}, ref) {
   const bounds = {from,versions};
-  const offers = ref ? marketOffers(db, null, through, bounds).filter(o=>o.version===ref.version && o.loc===ref.loc)
-    : matchingOffers(db, question, product, through, bounds);
+  const offers = ref ? marketOffers(db, product, through, bounds).filter(o=>o.version===ref.version && o.loc===ref.loc)
+    : matchingOffers(db, question, product, through, bounds, true);
   const rows = offers.slice(0,8);
   return {mode:'archive',outcome:rows.length ? 'done' : 'clarification',
     text:rows.length ? ['Предложения в срезе по '+through+'.', ...rows.map(o=>

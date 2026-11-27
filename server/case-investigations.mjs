@@ -3,6 +3,7 @@ import {webQuestion,yandexSearch} from './web-search.mjs';
 import {noWeb} from './web-search.mjs';
 import { randomUUID } from 'node:crypto';
 import { apiConfigured } from './agent.mjs';
+import { MODEL_TIMEOUT_MS } from './model-response.mjs';
 import { grant } from './chart-ranges.mjs';
 import { localData } from './data-profile.mjs';
 import { getCase, digest } from './evidence.mjs';
@@ -10,7 +11,7 @@ import { captureInvestigation, runInvestigationStage, thresholdObservation } fro
 import { effectiveResearchMode } from './investigation-settings.mjs';
 
 import { stageOrder, ensureStages, initStages, states, eligible, updateRunProgress, publicStages, failureReason } from './investigation-stages.mjs';
-const leaseDuration = 6 * 60_000;
+const leaseDuration = MODEL_TIMEOUT_MS + 60_000;
 const providerWait = 5 * 60_000;
 const revisionOf = "COALESCE(json_extract(c.body,'$.signal.revision'), 0)";
 const signalActive = "COALESCE(json_extract(c.body,'$.signal.status'), '') <> 'withdrawn'";
@@ -315,7 +316,7 @@ function saveStage(db, row, stage, ordinal, result, usage, elapsed, env, now, at
 // Store the excerpt with the calculation so all later stages inspect the same evidence.
 async function attachRequestedWeb(store,job,env,send,pageOptions) {
   const {row,capture,lease}=job;
-  if (!row.parent_id || !row.owner || capture.externalRead || noWeb(row.question || '')) return true;
+  if (!row.parent_id || !row.owner || capture.externalRead || capture.context.explicitThrough || noWeb(row.question || '')) return true;
   const question=row.question || '';
   const url=/(?:прочитай|проверь|открой|сверь|посмотри)/iu.test(question) && question.match(/https?:\/\/[^\s<>«»]+/iu)?.[0];
   const query=webQuestion(question,false);

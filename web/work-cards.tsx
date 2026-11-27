@@ -14,7 +14,7 @@ export const labels: Record<string, string> = {
   trend: 'Индекс заказов',
   timeline: 'События и релизы',
   evidence: 'Источники',
-  backlog: 'Приоритеты бэклога',
+  backlog: 'Связанные задачи',
   ctr: 'Рекомендации в ЛК',
   reach: 'Выбор опций',
   gap: 'Качество измерения',
@@ -293,7 +293,7 @@ export function Cards({
             </p>
           )}
           {k === 'gap' && (
-            <p>{view.gap || 'Для вывода о причине нужны подтверждённые данные следующего шага.'}</p>
+            <p>{view.gap || 'Отдельного примечания к измерению в источниках среза нет.'}</p>
           )}
           {k === 'watch' && (view.monitoring?.kind === 'archive-observation'
             ? <ObservationResult value={view.monitoring.result} />
@@ -327,11 +327,14 @@ export function Cards({
                   </small>
                 ))
               ) : k === 'gap' ? (
-                <small>{view.gap}</small>
+                view.gapSource && <small><SourceLink {...view.gapSource}
+                  source={view.gapSource.file + ' · ' + view.gapSource.loc} /></small>
               ) : k === 'backlog' ? (
                 backlog.map((s) => (
                   <small key={s.key}>
-                    {s.key} · {s.source}
+                    {s.key} · {s.sourceRefs?.map(row=><React.Fragment key={row.version + '/' + row.loc}>
+                      <SourceLink {...row} />{' '}
+                    </React.Fragment>) || s.source}
                   </small>
                 ))
               ) : (k === 'summary' || k === 'trend') && (

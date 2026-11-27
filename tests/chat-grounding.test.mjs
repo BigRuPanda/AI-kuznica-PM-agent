@@ -243,9 +243,9 @@ test('carousel chat on a saved screen admits only the selected metric versions a
   assert.ok(confirmed.readSources.every(s=>!s.label.includes('Calendar!A3')));
   importDocs(store,[book(99)],{notify:false});
   const changed=await ask();
-  assert.match(changed.text,/в выбранном снимке.{0,60}версии/iu);
+  assert.match(changed.text,/14 → 28/u);
   assert.doesNotMatch(changed.text,/1.?386/u);
-  assert.ok(changed.readSources.every(s=>!s.label.includes('Clicks!')));
+  assert.ok(changed.readSources.some(s=>s.url.includes(view.metricVersions[0]) && s.label.includes('Clicks!')));
   const frozen=await answer(store,user,{thread,question:'Как изменились визиты с кликом после выкладки?',
     decisionReleaseId:'R-50',decisionThrough:view.cut,
     releaseDecisionSnapshot:{releaseId:'R-50',product:'ЛК',through:view.cut,releaseVersions:view.releaseVersions,

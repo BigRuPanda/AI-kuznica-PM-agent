@@ -57,6 +57,7 @@ import { BrandLogo } from './brand-logo';
 import { ProfileEntry, ProfilePage } from './profile';
 import { NotificationSettings } from './notifications';
 import { ChatPresentation, PresentationMaterials } from './presentations';
+import { HelpMarker, UiHintsScope, useUiHintsPreference, type UiHintsPreference } from './ui-hints';
 import './team.css';
 import './tracking.css';
 import './chat.css';
@@ -83,6 +84,7 @@ function Login({ onLogin, joinCode }: { onLogin: (user: User) => void; joinCode?
     [error, fail] = useState(''),
     [pending, wait] = useState(false);
   return (
+    <UiHintsScope enabled viewKey={register ? 'register/' + (joinCode ?? '') : 'login'}>
     <main className="login-wrap">
       <div className="login-box">
         <div className="login-top">
@@ -129,21 +131,26 @@ function Login({ onLogin, joinCode }: { onLogin: (user: User) => void; joinCode?
             />
           </label>
           {register && (
-            <label>
-              Код приглашения
-              <input name="code" defaultValue={joinCode ?? ''} required />
-            </label>
+            <div className="ui-hint-field">
+              <label>
+                Код приглашения
+                <input name="code" defaultValue={joinCode ?? ''} required />
+              </label>
+              <HelpMarker label="О поле «Код приглашения»" hint="Код из ссылки или письма с приглашением." />
+            </div>
           )}
           {error && <p role="alert">{error}</p>}
           <button className="primary" disabled={pending}>
             {pending ? 'Подождите…' : register ? 'Создать аккаунт' : 'Войти'}
           </button>
         </form>
-        <button className="text-action" onClick={() => mode(!register)}>
+        <button className="text-action" onClick={() => mode(!register)}
+          data-ui-hint={register ? undefined : 'Откроет форму регистрации по коду.'}>
           {register ? 'Уже есть аккаунт' : 'У меня есть приглашение'}
         </button>
       </div>
     </main>
+    </UiHintsScope>
   );
 }
 function CaseList({ items }: { items: Case[] }) {
@@ -231,11 +238,14 @@ function Overview({ home, onAsk }: { home: Home; onAsk: () => void }) {
         <div className="overview-actions">
           {(home.products.length > 0 || home.releases.some(release => release.decisionAvailable)) &&
             <a className="primary arrow-action" href="#release-decision">Решение по релизу <Icon name="arrow" /></a>}
-          <button onClick={onAsk}>Спросить помощника</button>
+          <button onClick={onAsk} data-ui-hint="Откроет чат с помощником.">Спросить помощника</button>
         </div>
       </div>
       <section aria-labelledby="attention-title">
-        <h2 id="attention-title">Требует внимания</h2>
+        <div className="ui-hint-heading">
+          <h2 id="attention-title">Требует внимания</h2>
+          <HelpMarker label="О разделе «Требует внимания»" hint="Что изменилось и требует проверки." />
+        </div>
         {featured && signal && (
           <article className="signal-panel">
             <div className="signal-main">
@@ -265,7 +275,7 @@ function Overview({ home, onAsk }: { home: Home; onAsk: () => void }) {
                   <span /><span />
                 </div>
               )}
-              <a className="primary arrow-action" href={'#case/' + featured.id}>
+              <a className="primary arrow-action" href={'#case/' + featured.id} data-ui-hint="Откроет данные и выводы проверки.">
                 Открыть разбор <Icon name="arrow" />
               </a>
             </div>
@@ -274,7 +284,10 @@ function Overview({ home, onAsk }: { home: Home; onAsk: () => void }) {
         {(!featured || attention.length > 1) && <CaseList items={attention.filter((c) => c !== featured)} />}
       </section>
       <section aria-labelledby="watch-title">
-        <h2 id="watch-title">Проверка эффекта</h2>
+        <div className="ui-hint-heading">
+          <h2 id="watch-title">Проверка эффекта</h2>
+          <HelpMarker label="О разделе «Проверка эффекта»" hint="Как изменилась метрика после релиза." />
+        </div>
         {watching.length ? <CaseList items={watching} /> : <p className="empty">Пока нет назначенных проверок.</p>}
       </section>
     </>
@@ -521,7 +534,10 @@ function Chat({
       <header className="conversation-heading">
         <span className="chat-avatar" aria-hidden="true"><Icon name={isGroup ? 'people' : 'agent'} /></span>
         <div className="conversation-title">
-          <h3>{caseId ? 'Обсудить разбор' : activeThread?.title || 'Чат'}</h3>
+          <div className="ui-hint-heading">
+            <h3>{caseId ? 'Обсудить разбор' : activeThread?.title || 'Чат'}</h3>
+            {caseId && <HelpMarker label="О разделе «Обсудить разбор»" hint="Здесь можно задать вопрос о данных и выводах разбора." />}
+          </div>
           <small>{isGroup ? 'Командный чат' : 'Личный чат'}</small>
         </div>
         {activeThread && onThreadAction && (
@@ -946,6 +962,7 @@ function RenameChatDialog({ thread, close, onRename }: {
               ref={field}
               name="title"
               defaultValue={thread.title}
+              data-ui-hint="Новое название появится в списке чатов."
               maxLength={120}
               required
               readOnly={saving}
@@ -982,7 +999,7 @@ function DeleteChatDialog({ thread, close, onDelete }: {
           {error && <p role="alert">{error}</p>}
           <footer className="actions chat-dialog-actions">
             <button ref={cancel} type="button" disabled={deleting} onClick={() => dismiss()}>Отмена</button>
-            <button type="button" className="primary" disabled={deleting} onClick={async () => {
+            <button type="button" className="primary" disabled={deleting} data-ui-hint="Удаляет чат вместе со всей перепиской." onClick={async () => {
               if (deleting) return;
               setDeleting(true);
               fail('');
@@ -1067,7 +1084,7 @@ function ChatWorkspace({ home, id, avatar, action, refresh, onRename, onDelete }
     <>
       <div className="page-head chats-head">
         <h1>Чаты</h1>
-        <button type="button" className="primary new-chat" onClick={() => create(true)}>
+        <button type="button" className="primary new-chat" data-ui-hint="Выберите личный или командный чат." onClick={() => create(true)}>
           <Icon name="plus" /> Новый чат
         </button>
       </div>
@@ -1155,7 +1172,7 @@ function ChatWorkspace({ home, id, avatar, action, refresh, onRename, onDelete }
             <label>Название<input name="title" required /></label>
             <label>
               Участники
-              <select name="scope"><option value="private">Только я</option><option value="group">Вся команда</option></select>
+              <select name="scope" data-ui-hint="Определяет, кто увидит переписку."><option value="private">Только я</option><option value="group">Вся команда</option></select>
             </label>
             <button className="primary" disabled={saving}>Создать</button>
           </form>
@@ -1428,8 +1445,9 @@ function Investigation({
         })
       }>Подготовить задачу по сигналу</button>
     )}
-    {(researchAvailable || !completed) && <button onClick={openShare} disabled={updating}>Поделиться</button>}
-    {!researchAvailable && <button className="primary arrow-action" disabled={updating && completed} onClick={completed ? openShare : openNext}>
+    {(researchAvailable || !completed) && <button onClick={openShare} disabled={updating} data-ui-hint="Откроет предпросмотр материалов для команды.">Поделиться</button>}
+    {!researchAvailable && <button className="primary arrow-action" disabled={updating && completed} onClick={completed ? openShare : openNext}
+      data-ui-hint={completed ? 'Откроет предпросмотр материалов для команды.' : undefined}>
       {completed ? 'Поделиться' : watchNext ? 'Проверить эффект' : 'К задаче'}
       <Icon name="arrow" />
     </button>}
@@ -1461,7 +1479,10 @@ function Investigation({
         <div>
           <small>{!c.title.toLocaleLowerCase('ru').includes(c.product.toLocaleLowerCase('ru')) && c.product + ' · '}
             {c.body.owner ? 'Личный разбор' : 'Команда'}</small>
-          <h1>{c.title}</h1>
+          <div className="ui-hint-heading">
+            <h1>{c.title}</h1>
+            <HelpMarker label="О разборе" hint="Выводы, расчёты и дальнейшие действия по одному вопросу." />
+          </div>
           {signal && !withdrawn && !research.investigation?.current?.period && <p>
             {[signal.releaseId, signalPeriod(signal), changeLabel(signal.change, signal.changeUnit)].filter(Boolean).join(' · ')}
           </p>}
@@ -1500,7 +1521,7 @@ function Investigation({
             {signalDetails}
           </div>}
           <details className="paper">
-            <summary>Период расчёта</summary>
+            <summary data-ui-hint="Меняет даты, которые попадают в расчёт.">Период расчёта</summary>
             <form key={id + '/' + (period.from || '') + '/' + (period.through || '')} onSubmit={e => {
               e.preventDefault();
               const fields = new FormData(e.currentTarget);
@@ -1601,7 +1622,7 @@ function Investigation({
             reload={load}
           />
           <details className="paper effect-panel" ref={effectSection}>
-            <summary>Проверка эффекта</summary>
+            <summary data-ui-hint="Здесь задают период и критерий успеха после релиза.">Проверка эффекта</summary>
             {useArchiveForm ? <EffectPlan key={id + '/' + (archiveMonitoring?.plan.revision || 0)}
               caseId={id} saved={archiveMonitoring?.result ?? null} archiveOnly={home.archiveOnly}
               readOnly={completed} reload={async () => { await load(); await refresh(); }} /> : <>
@@ -1747,7 +1768,9 @@ function Investigation({
                 : 'Разбор получит статус «Завершено» и уйдёт из активных проверок.'}</p>
               <footer className="actions">
                 <button type="button" onClick={() => dismiss()}>Отмена</button>
-                <button type="button" className="primary" onClick={() => dismiss(() => {
+                <button type="button" className="primary"
+                  data-ui-hint={confirmation === 'reset' ? 'Вернёт начальные фильтры и карточки.' : 'Уберёт разбор из активных проверок.'}
+                  onClick={() => dismiss(() => {
                   if (confirmation === 'reset') {
                     localStorage.removeItem(prefix + '/period');
                     localStorage.removeItem(prefix + '/metric-series');
@@ -1795,6 +1818,7 @@ function Investigation({
               <button
                 className="primary"
                 disabled={!selection.length}
+                data-ui-hint="Отправит выбранные материалы и вывод в командный чат."
                 onClick={() =>
                   action(async () => {
                     await post('publish', { caseId: id, calc: v.id, cards: selection, conclusion });
@@ -1901,9 +1925,10 @@ function Sources({ home, action, refresh }: { home: Home; action: Action; refres
               })}>Согласовать версию</button>
             </>}
             <div className="actions source-actions">
-              <button className="primary">Загрузить и пересчитать</button>
+              <button className="primary" data-ui-hint="Читает файл и обновляет расчёты.">Загрузить и пересчитать</button>
               {!home.archiveOnly && <button
                 type="button"
+                data-ui-hint="Загружает свежие данные из Метрики."
                 onClick={() =>
                   action(async () => {
                     try {
@@ -1923,7 +1948,10 @@ function Sources({ home, action, refresh }: { home: Home; action: Action; refres
       )}
       {!home.archiveOnly && home.user.space === 'team' && <MetrikaJournal status={home.metrikaSync} />}
       <section className="paper">
-        <h3>Загруженные материалы</h3>
+        <div className="ui-hint-heading">
+          <h3>Загруженные материалы</h3>
+          <HelpMarker label="О разделе «Загруженные материалы»" hint="Файлы, на которых основаны расчёты." />
+        </div>
         {home.sources.map((s) => (
           <div className="event-row" key={s.file}>
             <b>{s.total !== 0 && /\.(xlsx|pptx)$/i.test(s.file) ? <a href={'#knowledge-source/'+s.version}>{s.file}</a> : s.file}</b>
@@ -1948,17 +1976,18 @@ const deliveryState: Record<string, string> = {
 };
 const deliveryChannel: Record<string, string> = { telegram:'Telegram',smtp:'Электронная почта' };
 const settingsLinks = [
-  { scope: 'personal', href: '#settings/personal', label: 'Мои настройки', icon: 'settings' },
-  { scope: 'team', href: '#settings', label: 'Настройки команды', icon: 'people' },
+  { scope: 'personal', href: '#settings/personal', label: 'Мои настройки', icon: 'settings', hint: 'Настройки вашего интерфейса.' },
+  { scope: 'team', href: '#settings', label: 'Настройки команды', icon: 'people', hint: 'Правила и подключения для всей команды.' },
 ] as const;
 
-function Settings({ home, action, refresh, menu, changeMenu, scope }: {
+function Settings({ home, action, refresh, menu, changeMenu, scope, uiHints }: {
   home: Home;
   action: Action;
   refresh: () => Promise<void>;
   menu: MenuLayout;
   changeMenu: (layout: MenuLayout) => void;
   scope: 'team' | 'personal';
+  uiHints: UiHintsPreference;
 }) {
   const [notice, say] = useState('');
   const admin = home.user.role === 'admin';
@@ -1966,7 +1995,10 @@ function Settings({ home, action, refresh, menu, changeMenu, scope }: {
     <>
       <a className="crumb" href="#profile" aria-label="Вернуться в профиль">← Профиль</a>
       <div className="page-head">
-        <h1>{scope === 'personal' ? 'Мои настройки' : 'Настройки команды'}</h1>
+        <div className="ui-hint-heading">
+          <h1>{scope === 'personal' ? 'Мои настройки' : 'Настройки команды'}</h1>
+          {scope === 'team' && <HelpMarker label="О настройках команды" hint="Правила и подключения для всей команды." />}
+        </div>
       </div>
       <InvestigationSettings scope={scope} admin={admin} />
       <Connections home={home} action={action} refresh={refresh} scope={scope} />
@@ -2054,7 +2086,17 @@ function Settings({ home, action, refresh, menu, changeMenu, scope }: {
           </div>
         </section>
         <section className="paper">
-          <h3>Личный доступ</h3>
+          <label className="ui-hints-setting">
+            <input type="checkbox" role="switch" checked={uiHints.enabled}
+              onChange={(event) => uiHints.setEnabled(event.currentTarget.checked)} />
+            Показывать подсказки
+          </label>
+        </section>
+        <section className="paper">
+          <div className="ui-hint-heading">
+            <h3>Личный доступ</h3>
+            <HelpMarker label="О разделе «Личный доступ»" hint="Ключ MCP нужен для доступа из внешнего клиента." />
+          </div>
           <div className="actions">
           <button
             onClick={() =>
@@ -2107,6 +2149,7 @@ function Snapshot({
     };
   }, [id]);
   if (v && 'findings' in v) return <InvestigationSnapshot calculation={v} selected={selected} embedded={embedded} />;
+  const calculationHint = <HelpMarker label="О сохранённом расчёте" hint="Здесь сохранено, по каким данным получен результат." />;
   const custom = v as unknown as {
     kind?: string;
     metric: string;
@@ -2119,7 +2162,7 @@ function Snapshot({
   if (custom?.kind === 'evidence-search' && v)
     return (
       <section className="paper">
-        <h2>{custom.title}</h2>
+        <div className="ui-hint-heading"><h2>{custom.title}</h2>{calculationHint}</div>
         {v.evidence.map((e) => (
           <div key={e.kind + e.key} className="excerpt">
             <small>{e.source}</small>
@@ -2146,7 +2189,7 @@ function Snapshot({
     ];
     const detail = (
       <section className="paper">
-        <h2>{custom.title}</h2>
+        <div className="ui-hint-heading"><h2>{custom.title}</h2>{calculationHint}</div>
         <RangeChart
           title={custom.title}
           unit={unit}
@@ -2191,7 +2234,7 @@ function Snapshot({
   return (
     <>
       {!embedded && <a href="#cases">← Разборы</a>}
-      {!embedded && <h1>Сохранённый расчёт</h1>}
+      {!embedded && <div className="ui-hint-heading"><h1>Сохранённый расчёт</h1>{calculationHint}</div>}
       {v ? (
         <Cards
           view={{ ...v, id }}
@@ -2212,6 +2255,7 @@ function Workspace({ user, onLogout, onUpdate }: { user: User; onLogout: () => v
     [newCaseRelease, showCaseForm] = useState<string | null>(null),
     [menu, setMenu] = useState(readMenuLayout);
   const sidebar = useSidebarWidth();
+  const uiHints = useUiHintsPreference(user.id);
   const bridgePages = Boolean(home?.bridgeEnabled);
   const route = home && !bridgePages && ['knowledge', 'demo-page'].includes(requestedRoute) ? 'cases' : requestedRoute;
   const documentation = bridgePages && selected?.split('?')[0] === 'documentation'
@@ -2248,11 +2292,11 @@ function Workspace({ user, onLogout, onUpdate }: { user: User; onLogout: () => v
     });
   }
   const tabs = [
-    ['overview', 'Обзор'],
-    ['chats', 'Чаты'],
-    ['cases', 'Разборы'],
-    ...(bridgePages ? [['knowledge', 'База знаний']] : []),
-    ['sources', 'Источники'],
+    ['overview', 'Обзор', 'Сигналы и проверки эффекта.'],
+    ['chats', 'Чаты', 'Диалоги с помощником и командой.'],
+    ['cases', 'Разборы', 'Исследования, расчёты и планы действий.'],
+    ...(bridgePages ? [['knowledge', 'База знаний', 'Сохранённые страницы и материалы команды.']] : []),
+    ['sources', 'Источники', 'Файлы и данные для расчётов.'],
   ];
   const content = (
     <div className="team-app" data-menu={menu} style={{
@@ -2265,7 +2309,7 @@ function Workspace({ user, onLogout, onUpdate }: { user: User; onLogout: () => v
           <span className="brand-emblem"><BrandLogo compact /></span>
         </a>
         <nav aria-label="Основные разделы">
-          {tabs.map(([k, t]) => {
+          {tabs.map(([k, t, hint]) => {
             const active = !settings && (route === k || (k === 'knowledge' && route === 'demo-page') ||
               (k === 'overview' && route === 'release-decision') ||
               (k === 'cases' && ['case','snapshot','range','material','demo-issue','releases-list','release-detail','release','releases','calc'].includes(route)));
@@ -2274,7 +2318,7 @@ function Workspace({ user, onLogout, onUpdate }: { user: User; onLogout: () => v
               className={active ? 'active' : ''}
               aria-current={active ? 'page' : undefined}
               aria-label={t}
-              title={t}
+              data-ui-hint={hint}
               key={k}
               href={'#' + k}
             >
@@ -2285,8 +2329,9 @@ function Workspace({ user, onLogout, onUpdate }: { user: User; onLogout: () => v
           })}
         </nav>
         <div className="side-bottom">
-          {settingsLinks.map(({ scope, href, label, icon }) => (
-            <a key={scope} className="side-setting" href={href} aria-label={label} title={label}
+          {settingsLinks.map(({ scope, href, label, icon, hint }) => (
+            <a key={scope} className="side-setting" href={href} aria-label={label} data-ui-hint={hint}
+              title={uiHints.enabled ? undefined : label}
               aria-current={settings && scope === settingsScope ? 'page' : undefined}>
               <Icon name={icon} /><span className="menu-label">{label}</span>
             </a>
@@ -2330,7 +2375,7 @@ function Workspace({ user, onLogout, onUpdate }: { user: User; onLogout: () => v
         ) : route === 'snapshot' ? (
           <Snapshot id={id} selected={selected} />
         ) : settings ? (
-          <Settings home={home} action={action} refresh={refresh} menu={menu} changeMenu={changeMenu}
+          <Settings home={home} action={action} refresh={refresh} menu={menu} changeMenu={changeMenu} uiHints={uiHints}
             scope={settingsScope} />
         ) : route === 'knowledge-source' ? (
           <SourceExtract key={id+selected} version={id} loc={selected && decodeURIComponent(selected)} />
@@ -2354,7 +2399,7 @@ function Workspace({ user, onLogout, onUpdate }: { user: User; onLogout: () => v
           <>
             <a href="#cases">← Разборы</a>
             <h1>Журнал релизов</h1>
-            <a className="primary" href="#releases">Аналитика по событиям CSV</a>
+            <a className="primary" href="#releases" data-ui-hint="Откроет показатели релизов по загруженным событиям.">Аналитика по событиям CSV</a>
             <section className="paper">
               <h2>Календарь из источников</h2>
               {!home.releases.length && <p>В загруженных источниках пока нет релизов.</p>}
@@ -2382,6 +2427,7 @@ function Workspace({ user, onLogout, onUpdate }: { user: User; onLogout: () => v
                   <p>Связанные задачи: {r?.related_task_ids}</p>
                   {r.decisionAvailable && <a href={'#release-decision/' + r.release_id}>Решение по релизу</a>}
                   <button
+                    data-ui-hint="Откроет форму разбора для этого релиза."
                     onClick={() => {
                       showCaseForm(id);
                       jump('cases');
@@ -2399,6 +2445,7 @@ function Workspace({ user, onLogout, onUpdate }: { user: User; onLogout: () => v
             <div className="page-head">
               <h1>Разборы</h1>
               <button className="primary" aria-expanded={newCaseRelease !== null}
+                data-ui-hint={newCaseRelease !== null ? 'Свернёт форму нового разбора.' : 'Откроет форму личного исследования.'}
                 onClick={() => moveView(() => showCaseForm(current => current === null ? '' : null))}>
                 Новый разбор
               </button>
@@ -2446,7 +2493,7 @@ function Workspace({ user, onLogout, onUpdate }: { user: User; onLogout: () => v
                   </select>
                 </label>
                 <details>
-                  <summary>Гипотеза и критерии до разработки</summary>
+                  <summary data-ui-hint="Укажите, что проверяем и какой результат считаем успехом.">Гипотеза и критерии до разработки</summary>
                   <label>Начало исследования<input type="date" name="from" /></label>
                   <label>Срез исследования по дату<input type="date" name="through" /></label>
                   <label>
@@ -2469,7 +2516,7 @@ function Workspace({ user, onLogout, onUpdate }: { user: User; onLogout: () => v
                   ))}
                 </select>
               </label>
-              <a href="#releases-list">Журнал релизов →</a>
+              <a href="#releases-list" data-ui-hint="Откроет календарь из загруженных материалов.">Журнал релизов →</a>
             </div>
             <CaseList items={home.cases.filter((c) => !filter || c.state === filter)} />
           </>
@@ -2490,9 +2537,11 @@ function Workspace({ user, onLogout, onUpdate }: { user: User; onLogout: () => v
     </div>
   );
   return (
-    <MaterialsProvider caseId={route === 'case' ? id : undefined}>
-      <BridgePages.Provider value={bridgePages}>{content}</BridgePages.Provider>
-    </MaterialsProvider>
+    <UiHintsScope enabled={uiHints.enabled} viewKey={[route, id, selected, menu].join('/')}>
+      <MaterialsProvider caseId={route === 'case' ? id : undefined}>
+        <BridgePages.Provider value={bridgePages}>{content}</BridgePages.Provider>
+      </MaterialsProvider>
+    </UiHintsScope>
   );
 }
 function Root() {
@@ -2510,6 +2559,7 @@ function Root() {
     <p>{error || 'Открываем приложение…'}</p>
   ) : user ? (
     <Workspace
+      key={user.id}
       user={user}
       onUpdate={(updated) => set(current => current?.id === updated.id ? updated : current)}
       onLogout={() => {

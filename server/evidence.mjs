@@ -259,15 +259,17 @@ export function search(db, query, kinds = ['interview', 'competitor', 'backlog',
   }
   return found.sort((a, b) => b.score - a.score || a.source.localeCompare(b.source)).slice(0, limit);
 }
-function sourceCorrections(db, product) {
-  return db.prepare('SELECT source,author,comment FROM feedback WHERE product=? ORDER BY id').all(product);
+function sourceCorrections(db, product, through) {
+  const until = through ? Date.parse(through + 'T21:00:00Z') : null;
+  return db.prepare('SELECT source,author,comment FROM feedback WHERE product=? AND (? IS NULL OR created<?) ORDER BY id')
+    .all(product, until, until);
 }
 function excludedSources(corrections) {
   const latest = new Map(corrections.map(c => [c.source, c.comment]));
   return [...latest].filter(([, comment]) => comment.startsWith('[Исключить связь]')).map(([source]) => source);
 }
 export function caseEvidenceSearch(db, product, query, kinds, asOf) {
-  return search(db, query, kinds, 8, { asOf, excluded: excludedSources(sourceCorrections(db, product)) });
+  return search(db, query, kinds, 8, { asOf, excluded: excludedSources(sourceCorrections(db, product, asOf)) });
 }
 function salesSummary(all, product, from, to, cut, full) {
   const series = all.filter((x) => x.product === product && x.week >= from && dateMs(x.week) + WEEK - 86400000 <= dateMs(cut));
@@ -360,17 +362,17 @@ export function analysisView(
   const ctr = ratioCard(metrics.filter(r => !full || !r.partial && !/неполн/i.test(r.comment || '')), 'lk_reco_ctr', limits,
     ratioSelections.ctr || (ctrSeries && { product: ctrSeries.product || product, segment: ctrSeries.segment,
       sourceId: ctrSeries.sourceId, definitionId: ctrSeries.definitionId }));
-  const corrections = sourceCorrections(db, product);
+  const corrections = sourceCorrections(db, product, through);
   const excluded = excludedSources(corrections);
   const evidence = ['interview', 'competitor', 'backlog'].flatMap((k) =>
     search(db, product + ' ' + String(sourceQuery).slice(0, 400), [k], 12, { asOf: through, excluded }).slice(0, 3),
   );
   const reach = ratioCard(metrics.filter(r => product && productFamily(r.product) === productFamily(product) &&
     (!full || !/неполн/i.test(r.comment || ''))), 'cfg_reach_rate', limits, ratioSelections.reach);
-  const definition = facts(db, 'dictionary').find((f) => f.data.metric_id === 'cfg_add_to_cart_rate');
-  const gap = definition
-    ? String(definition.data.comment || '') + ' · ' + definition.file + ' · ' + definition.loc
-    : 'Определение события добавления в корзину пока не загружено.';
+  const metricId = kpi?.metric || signal?.metric || c?.body.plan?.metric || 'family_orders_idx';
+  const definition = facts(db, 'dictionary').find(f =>
+    f.data.metric_id === (metricId === 'orders_index' ? 'family_orders_idx' : metricId));
+  const gap = definition?.data.comment || '';
   const watch = c?.body.watch;
   const archiveObservation = watchKind(watch) === 'archive-observation';
   const result = {
@@ -395,11 +397,11 @@ export function analysisView(
     evidence,
     corrections,
     gap,
+    gapSource: gap ? {file:definition.file, loc:definition.loc, version:definition.version} : undefined,
     backlog: rankBacklog(db, product, {
       through: cut, historical: Boolean(through),
       releaseId: c?.body.release || release?.data.release_id,
       metricId: c?.body.plan?.measurement?.metric || signal?.metric || c?.body.plan?.metric,
-      signal,
     }),
     ctr,
     reach,
@@ -415,11 +417,8 @@ export function analysisView(
   return { id, ...result };
 }
 export function rankBacklog(db, product, context = {}) {
-  const signal = context.signal || cases(db).find((c) => c.product === product &&
-    c.body.signal?.rule === 'relative' && c.body.signal.status !== 'withdrawn' &&
-    (!context.through || c.body.signal.week <= context.through))?.body.signal;
   return backlogRecommendations(facts(db, 'backlog'), facts(db, 'dictionary'), facts(db, 'releases'), {
-    ...context, product, signal,
+    ...context, product,
   });
 }
 function measurementRows(db, spec) {

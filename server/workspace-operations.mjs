@@ -1,7 +1,8 @@
 import { excelSources, sourceRows, sourceValues, cellSource, issuePages, issueClosure, pagesByIssue } from './knowledge.mjs';
 import { readPublicPage } from './public-page.mjs';
 import { marketOffers } from './market-offers.mjs';
-import { decisionDraft, releaseDecision } from './release-decision.mjs';
+import { decisionDraft, releaseDecision, releaseEvidence } from './release-decision.mjs';
+import { analysisSources, composeAnalysis, rowLink } from './analysis-composer.mjs';
 import { checkOffer, savedOfferCheck } from './competitor-check.mjs';
 import { randomUUID } from 'node:crypto';
 import { signalHistory } from './signal-history.mjs';
@@ -23,7 +24,7 @@ import {
   digest,
   fmt,
 } from './evidence.mjs';
-import { visibleCase, dashboard, thread, cardTypes, addUserMessage, bindReleaseThreadCase } from './workbench.mjs';
+import { visibleCase, dashboard, thread, cardTypes, addUserMessage, bindReleaseThreadCase, readReleaseDecisionContext } from './workbench.mjs';
 import { access, grant, readSnapshot, readRange, compareRanges, neighboring } from './chart-ranges.mjs';
 import { targetFor } from './tracker-connections.mjs';
 import { trackerClient, prepareTracker, confirmTracker, preview, publicPage, caseLinks } from './tracker-workflow.mjs';
@@ -144,11 +145,12 @@ export const operations = {
   'knowledge-sources':['Список версий Excel рабочего пространства',{}],
   'knowledge-source':['Строки книги по версии и ячейке',{version:id,loc:optional,offset:z.number().int().nonnegative().optional()}],
   release_decision: ['Измерения, источники и связанные задачи по выпущенной функции. Для истории through — дата последнего доступного дня.',
-    { product: optional, caseId: id.optional(), releaseId: id.optional(), through: optional }],
+    { product: optional, caseId: id.optional(), releaseId: id.optional(), from: optional, through: optional }],
+  'release-analysis': ['Подготовить вывод по сохранённому срезу релиза.', {decisionContext:id}],
   'release-tracker': ['Найти связанные задачи и дубли.', { caseId: id.optional(), releaseId: id, product: optional }],
   'release-tracker-case': ['Создать личный разбор по выбранному релизу.', { releaseId: id, product: optional }],
   'release-tracker-draft': ['Подготовить задачу или комментарий по решению.',
-    { caseId: id, releaseId: id, product: optional, key: id.optional() }],
+    { caseId: id, releaseId: id, product: optional, key: id.optional(), decisionContext:id.optional() }],
   source_value:['Исходные значения метрики с точными координатами и идентификаторами ряда',{product:text,metric:id,date:z.iso.date(),segment:optional,sourceId:optional,definitionId:optional,stepDays:z.number().int().positive().optional()}],
   read_public_page:['Читать публичную HTML-страницу по URL или выбранной ячейке',{url:z.url().max(2048).optional(),version:id.optional(),loc:optional}],
   competitor_check:['Проверить предложение продавца из конкретной строки исследования',{version:id,loc:id,savedOnly:z.boolean().optional(),asOf:z.iso.datetime().optional()}],
@@ -359,6 +361,11 @@ function prepareSignalIssue(store, user, input, env, send) {
   if (revision !== undefined && revision !== currentRevision)
     throw Error('Сигнал изменился. Обновите разбор перед подготовкой задачи.');
   const request = digest(JSON.stringify(['signal-issue-draft', user.id, caseId, currentRevision]));
+  const rows = [
+    ...(signal.evidence?.baseline || []).flatMap(week => week.rows || []),
+    ...(signal.evidence?.latest?.rows || []),
+  ].filter(row => row.file && row.loc && row.version);
+  const base = env.APP_BASE_URL?.replace(/\/+$/, '');
   const description = [
     c.title,
     signal.releaseId && 'Релиз: ' + signal.releaseId,
@@ -372,14 +379,14 @@ function prepareSignalIssue(store, user, input, env, send) {
       fmt(signal.baseN) + ' / ' + fmt(signal.baseD) + ' = ' + fmt(signal.baseValue) + '%.',
     signal.change != null && 'Изменение: ' + fmt(signal.change) + ' ' + (signal.changeUnit || '%') + '.',
     signal.source && 'Источник: ' + signal.source,
+    ...rows.map(row => row.file + ' · ' + row.loc + ' · ' + (base ? base + '/' : '') + rowLink(row)),
     'Разбор ' + c.id + ', версия сигнала ' + currentRevision + '.',
-    '\nПроверить причины отклонения и предложить дальнейшие действия.',
   ].filter(Boolean).join('\n');
   return prepareTracker(store, user, 'issue', {
     caseId,
-    title: ('Проверить сигнал · ' + c.title + ' · ' + signal.week).slice(0, 240),
+    title: ('Сигнал · ' + c.title + ' · ' + signal.week).slice(0, 240),
     description,
-  }, env, send, request, false, true, {signalRevision: currentRevision});
+  }, env, send, request, false, true, {signalRevision: currentRevision, sources: rows});
 }
 
 function signalMeasurement(c) {
@@ -463,6 +470,11 @@ export function workspaceOperation(
   const meta = operations[op];
   const b = meta ? z.object(meta[1]).parse(input) : input;
   if (op === 'release_decision') return releaseDecision(db, user, b, sharedOnly);
+  if (op === 'release-analysis') {
+    if (sharedOnly || assistantAuthored) throw Error('Откройте решение по релизу.');
+    const {decision} = readReleaseDecisionContext(db, user, b.decisionContext);
+    return composeAnalysis({...releaseEvidence(db, decision), request:'Оценить выпуск и предложить проверку.'}, env, send);
+  }
   if (['release-tracker', 'release-tracker-case', 'release-tracker-draft'].includes(op)) {
     if (sharedOnly || assistantAuthored) throw Error('Откройте личный чат этого разбора.');
     const decision = releaseDecision(db, user, b);
@@ -483,11 +495,10 @@ export function workspaceOperation(
         return { caseId };
       });
     }
-    const proposed = decisionDraft(decision, env.APP_BASE_URL);
     const target = targetFor(db, user, 'redmine', env);
     const linkedKeys = [...new Set([...decision.release.relatedTaskIds, ...decision.delivered.map(task => task.id)])];
-    const titles = [decision.backlog?.title, proposed.title, ...decision.delivered.map(task => task.title)].filter(Boolean);
-    const queries = [...new Set([...linkedKeys, ...titles, decision.product, decision.measurement?.metric].filter(Boolean))];
+    const titles = [...(decision.openTasks || []), ...decision.delivered].map(task => task.title).filter(Boolean);
+    const queries = [...new Set([...linkedKeys, ...titles, decision.product, ...(decision.definitions || []).map(row=>row.metric)])];
     return Promise.resolve(trackerClient(store, user, target, env, send, caseId)).then(async api => {
       const hits = api.searchProject ? await api.searchProject(queries) :
         (await Promise.all(queries.map(query => api.search(query, true)))).flat();
@@ -505,10 +516,25 @@ export function workspaceOperation(
       if (b.key && !chosen) throw Error('Повторите поиск и выберите задачу из результатов.');
       if (chosen && !chosen.canComment) throw Error('Откройте найденную задачу в Redmine для добавления комментария.');
       if (!chosen && items.some(item => item.exact)) throw Error('Найдена подходящая задача. Предложите комментарий к ней.');
+      const snapshot = b.decisionContext && readReleaseDecisionContext(db, user, b.decisionContext).decision;
+      if (snapshot && (snapshot.historical || snapshot.release?.id !== b.releaseId || snapshot.product !== decision.product ||
+          snapshot.caseId && snapshot.caseId !== caseId))
+        throw Error('Откройте текущий срез этого релиза и связанного разбора.');
+      const evidence = releaseEvidence(db, {...(snapshot || decision), caseId});
+      const report = await composeAnalysis({...evidence,
+        request:chosen ? 'Подготовить черновик комментария в выбранную задачу.' : 'Подготовить черновик новой задачи.',
+        destination:chosen ? {key:chosen.key,title:chosen.title} : {kind:'new-task'},
+      }, env, send);
+      const sources = analysisSources(report);
+      if (!sources.length || !chosen && !report.title) throw Error('Для черновика не хватает проверяемых сведений. Повторите подготовку.');
       if (visibleCase(db, user, caseId).body.release !== b.releaseId) throw Error('Привязка разбора к релизу изменилась.');
+      if (JSON.stringify(targetFor(db, user, 'redmine', env)) !== JSON.stringify(target))
+        throw Error('Подключение Redmine изменилось. Повторите поиск задачи.');
+      const proposed = decisionDraft(snapshot || decision, report, env.APP_BASE_URL);
       const body = chosen ? { caseId, key: chosen.key, comment: proposed.description } : { caseId, ...proposed };
-      const draftId = digest(JSON.stringify(['release-decision', user.id, caseId, b.releaseId, b.key, target, proposed.description]));
-      return prepareTracker(store, user, 'issue', body, env, send, draftId);
+      const draftId = digest(JSON.stringify(['release-analysis', user.id, caseId, b.releaseId, b.key, target, body, sources]));
+      return prepareTracker(store, user, 'issue', body, env, send, draftId, false, true,
+        {target, sources, releaseId:b.releaseId, product:decision.product, selectedKey:chosen?.key, selectedUrl:chosen?.url});
     });
   }
   if (op === 'presentation-create') return startPresentation(store, user, b.caseId, b.request);

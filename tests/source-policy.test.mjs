@@ -242,3 +242,24 @@ test('archive answers fall back to the retrieved source on timeout or an invente
     assert.equal(result.readSources[0].label,'Assets.xlsx · Stock!C5');
   }
 });
+
+test('an archive explanation uses the model and cites the rows behind its hypothesis', async t => {
+  const store = fixture(t);
+  initWorkbench(store.db);
+  const source = {file:'Assets.xlsx',version:'a'.repeat(64),loc:'Stock!C5'};
+  const evidence = [{kind:'measurement',text:'Зарегистрировано 72 прибора.',refs:[source]}];
+  const env = {LLM_DATA_MODE:'analysis',LLM_BASE_URL:'http://127.0.0.1:9999',LLM_MODEL:'fixture'};
+  const explanation = await archiveAnswer(store,'Почему изменилось число приборов?',evidence,env,async (_url,{body})=>{
+    const context = JSON.parse(JSON.parse(body).messages.at(-1).content);
+    const sources = [context.evidence[0].id];
+    const report = {observations:[{text:'Зарегистрировано 72 прибора.',sources}],
+      hypotheses:[{text:'Мог измениться порядок регистрации.',test:'Сопоставить журналы регистрации на обе даты.',sources}],
+      recommendations:[],missing:['Нужен журнал регистрации.']};
+    return Response.json({choices:[{message:{content:JSON.stringify(report)}}]});
+  },'fixture');
+  assert.match(explanation.text,/Гипотезы[\s\S]*порядок регистрации[\s\S]*Сопоставить журналы/);
+  assert.equal(explanation.readSources[0].url,'#knowledge-source/'+source.version+'/Stock!C5');
+  const offline = await archiveAnswer(store,'Почему изменилось число приборов?',evidence,{},()=>assert.fail('No model'), 'fixture');
+  assert.match(offline.text,/Модель[\s\S]*72 прибора/);
+  assert.doesNotMatch(offline.text,/порядок регистрации/);
+});

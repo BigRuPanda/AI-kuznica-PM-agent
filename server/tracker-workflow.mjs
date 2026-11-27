@@ -90,6 +90,7 @@ export function preview(row) {
     version: b.version,
     receipt: b.receipt,
     issue: b.issue,
+    sources: b.sources,
     reason: b.reason,
   };
 }
@@ -142,6 +143,7 @@ async function issueDraft(client, input, target, assistantAuthored) {
     kind: 'issue',
     target,
     key: current.key || '',
+    sourceUrl: current.url,
     title: changes.title || current.title,
     description: changes.description || changes.comment || '',
     changes,
@@ -248,6 +250,13 @@ function sameTarget(db, user, target, env) {
 }
 
 function requireDraftVersion(db, user, caseId, draft, env) {
+  if (draft.releaseId) {
+    const c = getCase(db, caseId);
+    if (c.body.owner && c.body.owner !== user.id || c.body.release !== draft.releaseId || c.product !== draft.product)
+      throw Error('Разбор больше не связан с выбранным релизом. Подготовьте новый черновик.');
+    if (!sameTarget(db, user, draft.target, env))
+      throw Error('Назначение изменилось. Подготовьте новый черновик.');
+  }
   if (draft.investigationId) {
     requireActionableRun(db, user, caseId, draft.investigationId);
     if (!sameTarget(db, user, draft.target, env))
@@ -302,6 +311,8 @@ export async function prepareTracker(store, user, kind, input, env, send, reques
         throw Error('Выберите доступную задачу из результатов поиска.');
     }
     body = await issueDraft(client, input, target, assistantAuthored);
+    if (binding?.selectedKey && (body.key !== binding.selectedKey || body.sourceUrl !== binding.selectedUrl))
+      throw Error('Выбранная задача изменилась. Повторите поиск.');
     if (!body.key && !target.local && !target.bridge) {
       await client.checkOriginConfiguration(body.changes.origin);
       if (env.REDMINE_REQUIRE_AI_FLAG === 'true') body.requireGeneratedFlag = true;
@@ -358,6 +369,10 @@ export async function prepareTracker(store, user, kind, input, env, send, reques
     if (binding) {
       body.investigationId = binding.runId;
       body.signalRevision = binding.signalRevision;
+      body.releaseId = binding.releaseId;
+      body.product = binding.product;
+      body.sources = binding.sources;
+      if (binding.releaseId) body.revision = randomUUID();
       requireDraftVersion(db, user, input.caseId, body, env);
     }
     const serialized = JSON.stringify(body);
@@ -383,6 +398,16 @@ export async function confirmTracker(store, user, row, revision, env, send) {
     marker = 'pm-' + id;
   if (row.state === 'done')
     return { ...(b.receipt || {}), key: row.external, local: !!b.target.local, state: 'done' };
+  if (b.kind === 'issue' && !b.releaseId && row.state === 'draft') {
+    const releaseId = getCase(db, row.case_id).body.release;
+    const text = b.key ? b.changes?.comment : b.description;
+    if (releaseId && text && id === digest(JSON.stringify(
+      ['release-decision', row.user, row.case_id, releaseId, b.key || null, b.target, text],
+    ))) {
+      db.prepare("UPDATE draft_actions SET state='obsolete' WHERE id=? AND state='draft'").run(id);
+      throw Error('Этот черновик подготовлен до проверки источников. Подготовьте новый черновик в решении по релизу.');
+    }
+  }
   if (b.kind === 'page' && b.input?.resultPage) {
     const origin = demoClient(db, user, 'confluence', row.case_id).read(b.input.resultPage);
     b.pageOwner = wikiPageOwner(db, origin.key);
@@ -393,9 +418,9 @@ export async function confirmTracker(store, user, row, revision, env, send) {
     b.input.pageOwner = b.pageOwner;
   }
   b.signalRevision ??= legacySignalRevision(row, b);
-  const versionBound = b.investigationId || b.signalRevision !== undefined;
-  if (b.kind === 'page' && revision !== b.revision)
-    throw Error('Откройте и подтвердите актуальный предпросмотр страницы');
+  const versionBound = b.investigationId || b.signalRevision !== undefined || b.releaseId;
+  if ((b.kind === 'page' || b.releaseId) && revision !== b.revision)
+    throw Error('Откройте и подтвердите актуальный предпросмотр');
   if (
     row.state === 'sending' ||
     !db.prepare("UPDATE draft_actions SET state='sending' WHERE id=? AND state=?").run(id, row.state).changes

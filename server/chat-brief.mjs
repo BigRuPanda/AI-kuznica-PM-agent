@@ -1,5 +1,5 @@
 import { apiConfigured, providerCall } from './agent.mjs';
-import { fmt, productFamily } from './evidence.mjs';
+import { productFamily } from './evidence.mjs';
 
 const normalize = q => q.trim().replace(/[?!.…]+$/u, '').trim();
 const identity = /^(?:ты кто|кто (?:ты|вы)(?: такой| такая)?|ты (?:бот|агент)|что (?:ты|вы) умеешь?|чем (?:ты )?можешь помочь)$/iu;
@@ -55,7 +55,6 @@ export async function briefConversation(store, job, question, activeCase, env, s
   return {mode:'conversation',outcome:'failed',contextReset:true,briefUnavailable:true,retryExhausted:retry,
     text:reason+(retry?' Введите уточнение или включите поиск в интернете.':' Можно повторить короткий запрос.')};
 }
-
 // Only whole, general requests about the current case qualify. Specific investigations
 // and requests with additional actions continue through the workspace agent.
 export function caseBriefKind(question,product) {
@@ -68,22 +67,4 @@ export function caseBriefKind(question,product) {
   return !/[?,;]|\sи\s/iu.test(target) && target.split(/\s+/u).length<=product.split(/\s+/u).length &&
     (target.toLowerCase()===product.toLowerCase() ||
     (!/\s/u.test(target) && productFamily(target)===productFamily(product))) ? 'report' : null;
-}
-
-export function caseBrief(c,view) {
-  const summary=view.summary?.find(s=>s.product===c.product), control=view.summary?.find(s=>s.product!==c.product);
-  const lines=[];
-  if (summary && Number.isFinite(summary.before) && Number.isFinite(summary.after)) {
-    lines.push('Средний индекс заказов «'+c.product+'» изменился с '+fmt(summary.before)+' до '+fmt(summary.after)+
-      (Number.isFinite(summary.change)?' ('+fmt(summary.change)+'%)':'')+'.');
-    if (view.base && view.pivot && view.cut) lines.push('База начинается с '+view.base+'. Переходная неделя '+view.pivot+' исключена из сравнения. Конец среза — '+view.cut+'.');
-    if (control && Number.isFinite(control.before) && Number.isFinite(control.after))
-      lines.push('В контрольном ряду «'+control.product+'» за те же периоды: '+fmt(control.before)+' → '+fmt(control.after)+'.');
-    lines.push('Проверьте полноту последней недели и сохранение изменения на полных неделях. Затем сопоставьте начало изменения с датами релизов. Само совпадение дат не устанавливает причину.');
-  } else {
-    lines.push('Для «'+c.product+'» нет двух сопоставимых значений индекса. Проверьте покрытие периодов в исходной таблице.');
-  }
-  if (c.body.plan?.success) lines.push('Критерий проверки из карточки: '+c.body.plan.success);
-  return {text:lines.join('\n\n'),mode:'analysis',product:c.product,caseId:c.id,
-    calc:view.id,cards:['summary','trend'],outcome:'done',steps:['view']};
 }
