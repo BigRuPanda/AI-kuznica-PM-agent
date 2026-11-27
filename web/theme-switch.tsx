@@ -10,38 +10,19 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
   const [theme, setTheme] = useState<Theme>(() => root.dataset.theme === 'dark' ? 'dark' : 'light');
 
   useEffect(() => {
-    const system = matchMedia('(prefers-color-scheme: dark)');
-    function syncSystem() {
-      if (root.dataset.themeOverride) return;
-      const next = system.matches ? 'dark' : 'light';
+    function syncStorage(event: StorageEvent) {
+      if (event.key !== storageKey && event.key !== null) return;
+      const next = event.newValue === 'dark' ? 'dark' : 'light';
       root.dataset.theme = next;
       setTheme(next);
     }
-    function syncStorage(event: StorageEvent) {
-      if (event.key !== storageKey && event.key !== null) return;
-      const next = event.newValue;
-      if (next === 'light' || next === 'dark') {
-        root.dataset.theme = next;
-        root.dataset.themeOverride = 'true';
-        setTheme(next);
-      } else {
-        delete root.dataset.themeOverride;
-        syncSystem();
-      }
-    }
-    syncSystem();
-    system.addEventListener('change', syncSystem);
     window.addEventListener('storage', syncStorage);
-    return () => {
-      system.removeEventListener('change', syncSystem);
-      window.removeEventListener('storage', syncStorage);
-    };
+    return () => window.removeEventListener('storage', syncStorage);
   }, [root]);
 
   function toggle() {
     const next = theme === 'dark' ? 'light' : 'dark';
     root.dataset.theme = next;
-    root.dataset.themeOverride = 'true';
     setTheme(next);
     try { localStorage.setItem(storageKey, next); } catch {}
   }

@@ -152,6 +152,7 @@ export function Cards({
 }) {
   const periods = analysisPeriods(view);
   const hasPartial = view.summary.some((s) => s.rows.some((r) => r.partial));
+  const openVersion = <a href={'#snapshot/' + view.id}>Открыть версию расчёта</a>;
   return (
     <>
       {cards.map((k) => (
@@ -289,7 +290,7 @@ export function Cards({
             <p>Период наблюдения и критерий успеха указаны в разделе «Проверка эффекта».</p>)}
           {k === 'signal' && view.signal?.metric && <SignalEvidence signal={view.signal} />}
           {k !== 'watch' && <div className="card-foot">
-            <details className="proof">
+            {k === 'evidence' ? openVersion : <details className="proof">
               <summary>Источники и период</summary>
               {['summary', 'trend', 'ctr', 'reach', 'timeline'].includes(k) && (
                 <p>
@@ -315,8 +316,6 @@ export function Cards({
                     {s.key} · {s.source}
                   </small>
                 ))
-              ) : k === 'evidence' ? (
-                view.evidence.map((s) => <small key={s.kind + '/' + s.key}>{s.source}</small>)
               ) : (
                 view.summary.map((s) => (
                   <details key={s.product}>
@@ -329,8 +328,8 @@ export function Cards({
                   </details>
                 ))
               )}
-              <a href={'#snapshot/' + view.id}>Открыть версию расчёта</a>
-            </details>
+              {openVersion}
+            </details>}
             {onAsk && <button type="button" onClick={() => onAsk(labels[k])}>Спросить</button>}
           </div>}
         </section>

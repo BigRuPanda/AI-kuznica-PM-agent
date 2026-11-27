@@ -542,6 +542,7 @@ p {
 }
 .card-foot > .proof { margin: 0; min-width: 0; }
 .card-foot > .proof > summary { width: fit-content; padding-block: 7px; font-weight: 650; color: var(--fg); }
+.card-foot > a { justify-self: start; align-self: center; }
 .team-plot {
   width: 100%;
   display: block;

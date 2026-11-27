@@ -281,6 +281,11 @@ test('Softline workspace, upgrade and browser journeys', async t => {
       const sources = admin.locator('.card-evidence');
       const metrics = sources.getByRole('button',{name:/^Метрики/});
       const dialog = admin.getByRole('dialog');
+      await visible(metrics);
+      assert.equal(await sources.getByText('Источники и период',{exact:true}).count(),0);
+      const version = sources.getByRole('link',{name:'Открыть версию расчёта'});
+      await visible(version);
+      assert.match(await version.getAttribute('href'),/^#snapshot\//);
       await metrics.click();
       await visible(dialog.getByRole('columnheader',{name:'Источник'}));
       await visible(dialog.getByText(/Synthetic evaluation\.xlsx · Kaspersky!A\d+/).first());
@@ -328,12 +333,12 @@ test('Softline workspace, upgrade and browser journeys', async t => {
     await go(member, 'snapshot/'+fixture.calc+'/trend');
     await visible(member.locator('.card-trend'));
     assert.equal(await member.locator('.card-summary').count(),0);
-    assert.equal(await member.locator('html').getAttribute('data-theme'),'dark');
+    assert.equal(await member.locator('html').getAttribute('data-theme'),'light');
     assert.equal(await role(member,'Тёмная тема').count(),0);
     await go(member,'settings/personal');
     await visible(member.getByRole('heading',{name:'Оформление'}));
     await role(member,'Тёмная тема').click();
-    assert.equal(await member.locator('html').getAttribute('data-theme'),'light');
+    assert.equal(await member.locator('html').getAttribute('data-theme'),'dark');
     assert.ok(await member.evaluate(()=>document.documentElement.scrollWidth <= innerWidth));
     await visible(judge.getByText('Демо · жюри',{exact:true}));
     await go(admin,'cases/settings');
@@ -389,7 +394,7 @@ test('Softline workspace, upgrade and browser journeys', async t => {
     await submit(member,'save-research-settings',()=>role(member,'Сохранить режим').click());
     await member.reload();
     assert.equal(await personalMode.inputValue(),'lead');
-    assert.equal(await member.locator('html').getAttribute('data-theme'),'light');
+    assert.equal(await member.locator('html').getAttribute('data-theme'),'dark');
     await teamMode.selectOption('roles');
     await submit(admin,'save-research-settings',()=>role(admin,'Сохранить режим').click());
     await personalMode.selectOption('inherit');
@@ -982,12 +987,13 @@ test('Softline workspace, upgrade and browser journeys', async t => {
   });
 
   await journey('standalone demo preserves release selection, filters, themes and discussion', async () => {
-    const demo = await browser.newPage();
+    const demo = await browser.newPage({colorScheme:'dark'});
     try {
       const file = new URL('../prototype/index.html',import.meta.url);
       file.hash='R-001';
       await demo.goto(file.href);
       await visible(demo.locator('[data-slot=title]'));
+      assert.equal(await demo.locator('html').getAttribute('data-theme'),'light');
       const title = await demo.locator('[data-slot=title]').textContent();
       await demo.locator('[data-filter=segment]').selectOption('returning');
       await demo.locator('[data-filter=date]').selectOption('7');
