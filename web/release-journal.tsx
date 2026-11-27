@@ -63,8 +63,8 @@ export function ReleaseJournal({ calendar, initialFilter, admin, archiveOnly, on
     setForm(kind);
   }
   return <section className="release-journal">
-    <header className="release-page-head">
-      <h1 id="release-journal-title">Журнал релизов</h1>
+    <header className="page-head">
+      <h1>Релизы</h1>
       {journal && (canImport || canCreate) && <details className="release-management" ref={menu}>
         <summary>Управление</summary>
         <div className="release-management-actions">
@@ -73,19 +73,21 @@ export function ReleaseJournal({ calendar, initialFilter, admin, archiveOnly, on
         </div>
       </details>}
     </header>
-    <div className="release-table-card">
-      <div className="release-journal-toolbar">
-        <div className="release-filters" role="group" aria-label="Источник релизов">
-          {filters.map(([key, label]) => <button key={key} type="button" aria-pressed={filter === key}
-            onClick={() => setFilter(key)}>{label}</button>)}
-        </div>
-      </div>
+    <div className="toolbar">
+      <label>
+        Источник
+        <select value={filter} onChange={event => setFilter(event.target.value as Filter)}>
+          {filters.map(([key, label]) => <option key={key} value={key}>{label}</option>)}
+        </select>
+      </label>
+    </div>
+    <div className="paper release-table-card">
       {error && filter !== 'calendar' && <div className="release-list-status">
         <p role="alert" className="error">Не удалось загрузить релизы с метриками. {error}</p>
         <button type="button" onClick={() => refresh(n => n + 1)}>Повторить</button>
       </div>}
       {loading && <p role="status" className="release-list-note">Загружаем релизы с метриками…</p>}
-      {visible.length > 0 ? <table role="table" className="release-table release-journal-table" aria-labelledby="release-journal-title">
+      {visible.length > 0 ? <table role="table" className="release-table release-journal-table" aria-label="Журнал релизов">
         <colgroup>
           <col /><col className="release-date-col" /><col className="release-source-col" />
           {showActions && <col className="release-actions-col" />}
@@ -117,9 +119,9 @@ export function ReleaseJournal({ calendar, initialFilter, admin, archiveOnly, on
               <td role="cell" className="release-source">{sourceNames[row.source]}</td>
               {showActions && <td role="cell" className="release-actions">
                 {release && <div className="release-row-actions">
-                  <button type="button" className="release-row-action" aria-label={'Запланировать разбор ' + row.id}
+                  <button type="button" className="text-action" aria-label={'Запланировать разбор ' + row.id}
                     onClick={() => onPlan(row.id)}>Запланировать разбор</button>
-                  {detailsLabel && <button type="button" className="release-row-action" aria-expanded={expanded}
+                  {detailsLabel && <button type="button" className="text-action" aria-expanded={expanded}
                     aria-controls={expanded ? detailsId : undefined}
                     aria-label={'Связанные ' + detailsLabel.toLowerCase() + ' ' + row.id}
                     onClick={() => setExpandedRelease(expanded ? null : row.id)}>{detailsLabel}<Icon name="down" /></button>}

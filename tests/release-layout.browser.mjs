@@ -35,7 +35,9 @@ test('the release journal sorts both sources and keeps their routes distinct', a
   }), { times: 1 });
   await page.goto(origin + '/#releases-list');
   const table = page.getByRole('table', { name: 'Журнал релизов' });
+  const source = page.getByRole('combobox', { name: 'Источник', exact: true });
   await table.waitFor();
+  assert.equal(await source.inputValue(), 'all');
   await table.getByRole('link', { name: calendarTitle, exact: true }).waitFor();
   await page.getByRole('button', { name: 'Повторить', exact: true }).click();
   await table.getByRole('link', { name: 'Кнопка «Скачать счёт»' }).waitFor();
@@ -45,7 +47,7 @@ test('the release journal sorts both sources and keeps their routes distinct', a
   assert.equal(await rows.nth(0).getByRole('link').getAttribute('href'), '#release-decision/R-001');
   assert.equal(await rows.nth(2).getByRole('link').getAttribute('href'), '#release/R-001');
   assert.equal(await rows.last().getByRole('link').count(), 0);
-  await page.getByRole('button', { name: 'Из календаря', exact: true }).click();
+  await source.selectOption('calendar');
   assert.equal(await rows.count(), 3);
   await page.setViewportSize({ width: 390, height: 844 });
   const fit = await rows.first().evaluate(row => {
@@ -72,7 +74,7 @@ test('the release journal sorts both sources and keeps their routes distinct', a
   await page.getByRole('heading', { name: 'Разбор релиза', exact: true }).waitFor();
   await page.waitForURL('**/#release-decision/R-001');
   await page.goto(origin + '/#releases');
-  await page.getByRole('button', { name: 'С метриками', exact: true, pressed: true }).waitFor();
+  assert.equal(await source.inputValue(), 'metrics');
   await table.getByRole('link', { name: 'Кнопка «Скачать счёт»' }).waitFor();
   assert.equal(await rows.count(), 2);
   await rows.first().getByRole('link').click();

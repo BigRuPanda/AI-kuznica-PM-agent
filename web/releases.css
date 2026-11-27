@@ -2,35 +2,17 @@
   min-width: 0;
 }
 
-.team-app:has(.release-journal) { background-image: none; }
-.release-journal {
-  container: release-journal / inline-size;
-  max-inline-size: 76rem;
-  margin-inline: auto;
-}
-
-.release-page-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  flex-wrap: wrap;
-  gap: 12px;
-  margin-block-end: clamp(16px, 2.4vw, 24px);
-}
-.release-page-head h1 {
-  font-size: clamp(1.75rem, 2.75vw, 2.4rem);
-  letter-spacing: -.037em;
-  line-height: 1.18;
-}
+.release-journal { container: release-journal / inline-size; }
 
 .release-management { position: relative; margin-inline-start: auto; }
 .release-management summary {
   padding: 8px 12px 8px 28px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
+  border: 1px solid var(--control-border);
+  border-radius: var(--button-radius);
   background: var(--surface);
   color: var(--fg);
   font-size: .875rem;
+  font-weight: 550;
   cursor: pointer;
 }
 .release-management summary::before { inset-inline-start: 12px; }
@@ -51,41 +33,7 @@
 }
 .release-management-actions button { text-align: start; }
 
-.release-journal-toolbar {
-  display: flex;
-  padding: 12px clamp(12px, 2vw, 20px);
-  border-block-end: 1px solid var(--border);
-}
-.release-filters {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 3px;
-  min-width: 0;
-  padding: 4px;
-  border-radius: calc(var(--radius-sm) + 3px);
-  background: var(--surface-subtle);
-}
-.release-filters button {
-  min-height: 34px;
-  padding: 5px clamp(8px, 1.25vw, 13px);
-  border: 1px solid transparent;
-  background: transparent;
-  color: var(--fg-muted);
-  font-size: .875rem;
-  font-weight: 530;
-}
-.release-filters button[aria-pressed='true'] {
-  border-color: var(--border);
-  background: var(--surface);
-  color: var(--fg);
-  font-weight: 640;
-}
-.release-filters button[aria-pressed='false']:hover { background: var(--surface-hover); color: var(--fg); }
-.release-table-card {
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  background: var(--surface);
-}
+.paper.release-table-card { padding: 0; }
 .release-table {
   width: 100%;
   border-collapse: collapse;
@@ -111,13 +59,10 @@
 .release-source-col { width: 6.4rem; }
 .release-actions-col { width: 12rem; }
 .release-journal-table > thead th {
-  padding: 9px 16px;
-  background: var(--surface-subtle);
-  font-size: .8rem;
-  font-weight: 560;
+  padding: 11px 16px;
   white-space: nowrap;
 }
-.release-journal-table > tbody > tr > :is(th, td) { padding: 14px 16px; }
+.release-journal-table > tbody > tr > :is(th, td) { padding: 12px 16px; }
 .release-row > .release-name {
   color: var(--fg);
   font-size: .975rem;
@@ -164,33 +109,28 @@
   align-items: flex-start;
   gap: 4px;
 }
-.release-row-action {
-  display: inline-flex;
-  align-items: center;
+.release-row-actions .text-action {
+  justify-content: flex-start;
   gap: 7px;
   max-width: 100%;
   min-height: 30px;
   padding: 4px 7px;
-  border-color: transparent;
-  background: transparent;
   color: var(--fg-muted);
   font-size: .83rem;
-  font-weight: 550;
   line-height: 1.35;
   text-align: start;
   white-space: nowrap;
 }
-.release-row-action:is(:hover, :focus-visible, [aria-expanded='true']) {
-  border-color: transparent;
-  background: var(--surface-hover);
+.release-row-actions .text-action[aria-expanded='true'] {
+  background: var(--surface-subtle);
   color: var(--fg);
 }
-.release-row-action .ui-icon {
+.release-row-actions .text-action .ui-icon {
   flex: none;
   width: 14px;
   height: 14px;
 }
-.release-row-action[aria-expanded='true'] .ui-icon { transform: rotate(180deg); }
+.release-row-actions [aria-expanded='true'] .ui-icon { transform: rotate(180deg); }
 .release-related-row { background: var(--surface-subtle); }
 .release-related-row section + section { margin-block-start: 16px; }
 .release-related-row h3 { margin: 0 0 8px; }
@@ -293,5 +233,5 @@
     gap: 6px 8px;
     margin-inline-start: -7px;
   }
-  .release-row-action { min-height: 36px; white-space: normal; }
+  .release-row-actions .text-action { min-height: 36px; white-space: normal; }
 }

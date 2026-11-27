@@ -379,7 +379,7 @@ test('release decisions preserve the historical cutoff, cited cells and manual i
   assert.equal(await page.locator('a[href^="#release-decision"]').count(), 0);
   const journalLink = page.getByRole('navigation', { name: 'Основные разделы' })
     .getByRole('link', { name: 'Релизы', exact: true });
-  const journalHeading = page.getByRole('heading', { name: 'Журнал релизов', exact: true });
+  const journalHeading = page.getByRole('heading', { name: 'Релизы', exact: true });
   const releaseHeading = page.getByRole('heading', { name: 'Разбор релиза', exact: true });
   const releaseLink = page.getByRole('link', { name: 'Поздний релиз Kaspersky', exact: true });
   await journalLink.click();
