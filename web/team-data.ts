@@ -173,6 +173,8 @@ export type InvestigationRun = {
   reason?: string; question?: string; parentId?: string; published?: boolean; publishedBy?: string;
   result?: InvestigationResult | null; checks: InvestigationCheck[]; stages?: InvestigationStage[]; calcId?: string;
   period?: string; unit?: string; created?: number; summary?: string;
+  thresholdObservation?: { product: string; threshold: number; baseline: { from: string; through: string };
+    weeks: [{ week: string; value: number }, { week: string; value: number }]; findingId: string };
   measurementContext?: Pick<Measurement, 'baselineFrom' | 'baselineThrough' | 'control'>;
 };
 export type InvestigationBundle = { current: InvestigationRun | null; alternatives: InvestigationRun[]; history: InvestigationRun[] };

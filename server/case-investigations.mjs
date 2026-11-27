@@ -6,7 +6,7 @@ import { apiConfigured } from './agent.mjs';
 import { grant } from './chart-ranges.mjs';
 import { localData } from './data-profile.mjs';
 import { getCase, digest } from './evidence.mjs';
-import { captureInvestigation, runInvestigationStage } from './investigation-engine.mjs';
+import { captureInvestigation, runInvestigationStage, thresholdObservation } from './investigation-engine.mjs';
 import { effectiveResearchMode } from './investigation-settings.mjs';
 
 import { stageOrder, ensureStages, initStages, states, eligible, updateRunProgress, publicStages, failureReason } from './investigation-stages.mjs';
@@ -123,12 +123,14 @@ function completed(db, id) {
     WHERE run_id=? AND output IS NOT NULL ORDER BY ordinal`).all(id).map(({ output }) => parse(output));
 }
 
-function publicRun(db, row, prior = completed(db, row.id), user) {
+function publicRun(db, row, prior = completed(db, row.id), user, signal) {
   const capture = parse(row.capture);
   const calculation = capture?.context?.calculation;
   const baseline = calculation?.baseline;
   const control = calculation?.metric === 'orders_index' ? calculation.findings?.[1]?.product : undefined;
   const mode = row.mode || effectiveResearchMode(db, row.owner);
+  const observation = row.status === 'waiting' && row.wait_for === 'data' && !row.parent_id && capture?.calcId
+    ? thresholdObservation(calculation,signal) : undefined;
   return {
     id: row.id, caseId: row.case_id, revision: row.revision, owner: row.owner,
     mode, status: row.status, created: row.created,
@@ -144,6 +146,7 @@ function publicRun(db, row, prior = completed(db, row.id), user) {
     ...(capture?.period && { period: capture.period }),
     ...(capture?.unit && { unit: capture.unit }),
     ...(capture?.summary && { summary: capture.summary }),
+    ...(observation && { thresholdObservation:observation }),
     ...(baseline && { measurementContext: { baselineFrom: baseline.from, baselineThrough: baseline.through, control } }),
   };
 }
@@ -173,7 +176,7 @@ export function readInvestigations(db, user, caseId, sharedOnly = false) {
     const featured = live.find((row) => row.parent_id === null) || live.find((row) => row.published) || live[0];
     const history = available ? runs.filter(row => !isCurrent(row)) : runs;
     return {
-      current: featured ? publicRun(db, featured, undefined, user) : null,
+      current: featured ? publicRun(db, featured, undefined, user, c.body.signal) : null,
       alternatives: live.filter((row) => row !== featured).map((row) => publicRun(db, row, undefined, user)),
       history: history.map((row) => publicRun(db, row.status === 'superseded' ? row : {
         ...row, status: 'superseded', reason: available ? 'Появилась другая версия сигнала.' : 'Разбор завершён.',

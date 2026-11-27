@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { openStore } from '../server/store.mjs';
-import { initEvidence } from '../server/evidence.mjs';
+import { initEvidence, importDocs, cases } from '../server/evidence.mjs';
 import { initWorkbench } from '../server/workbench.mjs';
 import { access, grant } from '../server/chart-ranges.mjs';
 import { saveResearchSettings } from '../server/investigation-settings.mjs';
@@ -44,6 +44,44 @@ function fixture(overrides = {}) {
   };
   return (store, env = enabled) => workInvestigation(store, env, noSend, options);
 }
+
+test('a confirmed threshold episode exposes the two observed weeks while baseline history is missing', async t => {
+  const store = open(), {db} = store;
+  t.after(() => store.close());
+  const sale = (week, value, loc) => ({kind:'sales',loc,row:{week_start:week,product_family:'Альфа',orders_index:value}});
+  const dictionary = {kind:'dictionary',loc:'Правила!A1',row:{metric_id:'family_orders_idx',bad_signal:'Индекс ниже 75 две недели подряд'}};
+  importDocs(store,[{file:'Май.xlsx',facts:[dictionary,sale('2026-05-04',50,'Продажи!A1'),sale('2026-05-11',43,'Продажи!A2')]}],{notify:false});
+  const c = cases(db).find(item => item.product === 'Альфа');
+  const current = () => readInvestigations(db,anna,c.id).current;
+  const work = () => workInvestigation(store,{DATA_PROFILE:'local'},noSend);
+  assert.equal(current().thresholdObservation,undefined);
+  await work();
+  const run = current(), data = run.thresholdObservation;
+  assert.equal(run.status,'waiting');
+  assert.deepEqual(data,{product:'Альфа',threshold:75,baseline:{from:'2026-02-02',through:'2026-05-03'},
+    weeks:[{week:'2026-05-04',value:50},{week:'2026-05-11',value:43}],findingId:run.checks[0].sources[0].findingId});
+  const raw = db.prepare('SELECT capture FROM case_investigations WHERE id=?').get(run.id).capture;
+  const setCapture = db.prepare('UPDATE case_investigations SET capture=? WHERE id=?');
+  for (const alter of [
+    f => { f.rows.pop(); }, f => { f.rows[1].week='2026-05-18'; },
+    f => { f.rows[0].value=75; }, f => { f.rows[0].value=null; }, f => { f.before=60; },
+  ]) {
+    const capture = JSON.parse(raw);
+    alter(capture.context.calculation.findings[0]);
+    setCapture.run(JSON.stringify(capture),run.id);
+    assert.equal(current().thresholdObservation,undefined);
+  }
+  setCapture.run(raw,run.id);
+  for (const signal of [{...c.body.signal,status:'provisional'},{...c.body.signal,rule:'relative'}]) {
+    db.prepare('UPDATE cases SET body=? WHERE id=?').run(JSON.stringify({...c.body,signal}),c.id);
+    assert.equal(current().thresholdObservation,undefined);
+  }
+  db.prepare('UPDATE cases SET body=? WHERE id=?').run(JSON.stringify(c.body),c.id);
+  importDocs(store,[{file:'Апрель.xlsx',facts:[sale('2026-04-27',98,'Продажи!A1')]}],{notify:false});
+  await work();
+  assert.equal(current().thresholdObservation,undefined);
+  assert.match(current().reason,/Локальный режим/);
+});
 test('independent roles complete out of order and keep deterministic inputs', async t => {
   const store = open();
   t.after(() => store.close());

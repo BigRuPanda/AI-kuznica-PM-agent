@@ -145,6 +145,24 @@ function salesEvidence(db, c, signal, measurement, dates, releases, origin) {
     summary:text, impact:detail, findings:[primary.finding, ...(controlSeries ? [controlSeries.finding] : [])]};
 }
 
+// Project the observation from saved source rows so already waiting runs can show it on the next read.
+export function thresholdObservation(calculation, signal) {
+  if (signal?.rule !== 'absolute' || signal.status !== 'confirmed' || !Number.isFinite(signal.threshold) ||
+      !isDate(signal.start) || !isDate(signal.week) || calculation?.metric !== 'orders_index' || calculation.measurable !== false) return;
+  const {baseline, latest, product} = calculation;
+  const primary = calculation.findings?.find(f => f.kind === 'calculation' && f.product === product);
+  if (!primary?.id || primary.before !== null || !Array.isArray(primary.rows) ||
+      !isDate(baseline?.from) || !isDate(baseline.through) || !isDate(latest?.from) || !isDate(latest.through) ||
+      baseline.from > baseline.through || baseline.through >= latest.from) return;
+  const weeks = primary.rows.filter(r => isDate(r.week) && r.week >= signal.start && r.week <= signal.week &&
+    r.week >= latest.from && plus(r.week,6) <= latest.through && Number.isFinite(r.value) && r.value < signal.threshold)
+    .sort((a,b) => a.week.localeCompare(b.week));
+  const second = weeks.findIndex((r,i) => i > 0 && plus(weeks[i-1].week,7) === r.week);
+  if (second < 1) return;
+  return {product, threshold:signal.threshold, baseline, findingId:primary.id,
+    weeks:weeks.slice(second-1,second+1).map(({week,value}) => ({week,value}))};
+}
+
 function rangeWindows(ranges) {
   if (ranges?.length !== 2 || ranges.some(r => !r || !Number.isFinite(r.from) || !Number.isFinite(r.to) || r.from >= r.to)) return null;
   const window = ranges.map(r => ({from: day(r.from), through: day(r.to - 1)})).sort((a,b) => a.from.localeCompare(b.from));

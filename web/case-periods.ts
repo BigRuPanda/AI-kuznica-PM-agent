@@ -27,6 +27,10 @@ export function signalEvidenceWeek(start: string) {
   return period(first, first + 6 * day);
 }
 
+export function calendarPeriod(from: string, through: string) {
+  return period(dateValue(from), dateValue(through));
+}
+
 export function signalBaseline(signal: Signal) {
   if (signal.baselineFrom && signal.baselineThrough) return period(dateValue(signal.baselineFrom),dateValue(signal.baselineThrough));
   const latest = dateValue(signal.week);

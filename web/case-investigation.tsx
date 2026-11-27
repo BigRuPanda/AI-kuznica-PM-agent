@@ -5,6 +5,7 @@ import { InvestigationPlan } from './investigation-plan';
 import { researchModes } from './investigation-settings';
 import { RangeChart, WEEK } from './range-chart';
 import { num, post } from './team-data';
+import { calendarPeriod, signalEvidenceWeek } from './case-periods';
 import type { InvestigationBundle, InvestigationCheck, InvestigationStage, InvestigationHypothesis, InvestigationRun, InvestigationSource } from './team-data';
 import './case-investigation.css';
 
@@ -149,7 +150,24 @@ function StageRetry({run,stage,refresh}: {run: InvestigationRun; stage: Investig
   </div>;
 }
 
+function ThresholdObservation({ observation, calcId }: { observation: NonNullable<InvestigationRun['thresholdObservation']>; calcId: string }) {
+  const {product,threshold,baseline,weeks:[first,second],findingId} = observation;
+  const change = second.value - first.value;
+  return <div className="threshold-observation">
+    <h2>Две недели ниже порога</h2>
+    <p>Индекс {product} составил <strong>{num(first.value)}</strong> за {signalEvidenceWeek(first.week)} и{' '}
+      <strong>{num(second.value)}</strong> за {signalEvidenceWeek(second.week)}. Порог — <strong>{num(threshold)}</strong>.{' '}
+      {change === 0 ? 'За вторую неделю показатель остался на том же уровне.'
+        : `За вторую неделю индекс ${change > 0 ? 'вырос' : 'снизился'} на ${num(Math.abs(change))} п.`}</p>
+    <p><strong>Для сравнения с прошлым периодом нужна история.</strong>{' '}
+      За {calendarPeriod(baseline.from,baseline.through)} в базе нет полных недель. Когда появятся данные за этот период, сравнение пересчитается автоматически.</p>
+    <a href={snapshotLink(calcId,findingId)}>Посмотреть обе недели и источники</a>
+  </div>;
+}
+
 function RunSummary({ run,refresh }: { run: InvestigationRun; refresh?: () => Promise<void> }) {
+  if (run.status === 'waiting' && run.thresholdObservation && run.calcId)
+    return <ThresholdObservation observation={run.thresholdObservation} calcId={run.calcId} />;
   const failures = refresh ? (run.stages || []).filter(stage => stage.canRetry) : [];
   return <>
     {run.status !== 'ready' && <p className="investigation-status" role={run.status === 'superseded' ? undefined : 'status'}>
@@ -259,7 +277,7 @@ export function CaseInvestigation({ investigation, error, refresh, userId, canEx
           <span>{current.published ? 'Опубликовано для команды' : 'Личное исследование'}</span>
           {current.publishedBy && ' · ' + current.publishedBy}
         </p>}
-        <RunMeta run={current} />
+        {!current.thresholdObservation && <RunMeta run={current} />}
         <div aria-live="polite">
           {ready && <h2>Вывод</h2>}
           <RunSummary run={current} refresh={refresh} />

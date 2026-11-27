@@ -5,6 +5,9 @@
   padding: clamp(14px, 2.5vw, 24px);
 }
 .investigation-decision h2 { margin: 12px 0 4px; }
+.threshold-observation { display: grid; gap: .6rem; max-width: 76ch; }
+.threshold-observation :is(h2, p) { margin: 0; }
+.threshold-observation a { justify-self: start; text-decoration: underline; text-underline-offset: .16em; }
 .investigation-meta, .investigation-actions, .investigation-tools {
   display: flex;
   flex-wrap: wrap;
