@@ -226,7 +226,7 @@ export function cellSource(db,version,loc) {
 }
 
 export function sourceValues(db,{product,metric,date,segment,sourceId,definitionId,stepDays}) {
-  const weekly=metric==='orders_index';
+  const weekly=metric==='orders_index' || metric==='family_orders_idx';
   return db.prepare('SELECT version,file,loc,body FROM facts WHERE kind=? AND json_extract(body,?)=?')
     .all(weekly?'sales':'metrics',weekly?'$.week_start':'$.date',date)
     .map(row=>({...row,data:JSON.parse(row.body)}))

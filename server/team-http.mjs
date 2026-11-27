@@ -26,7 +26,6 @@ import {
   initWorkbench,
   dashboard,
   visibleCase,
-  caseThreadId,
   createThread,
   renameThread,
   deleteThread,
@@ -34,6 +33,8 @@ import {
   addUserMessage,
   messages,
   thread,
+  openReleaseThread,
+  openCaseThread,
   workJobs,
   deliver,
 } from './workbench.mjs';
@@ -442,11 +443,11 @@ export function createTeamApp({
           });
           return reply(200, { threshold });
         }
-        if (op === 'case-thread') {
-          const c = visibleCase(db, user, b.caseId),
-            id = caseThreadId(user.id, c.id);
-          db.prepare("INSERT OR IGNORE INTO conversations VALUES(?,?,'private',?)").run(id, user.id, c.title);
-          return reply(200, { id });
+        if (op === 'case-thread') return reply(200, { id: openCaseThread(db, user, b.caseId) });
+        if (op === 'release-thread') {
+          if (typeof b.releaseId !== 'string' || !b.releaseId) throw Error('Выберите выпущенную функцию.');
+          const decision = workspaceOperation(store, user, 'release_decision', { releaseId: b.releaseId }, env, send);
+          return reply(200, { id: openReleaseThread(store, user, decision) });
         }
         if (op === 'thread') return reply(200, { id: createThread(db, user, b.title, !!b.group) });
         if (op === 'rename-thread') return reply(200, renameThread(db, user, b.thread, b.title));

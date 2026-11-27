@@ -263,6 +263,116 @@ test('archive settings diagnose Reports API and sources show the protected ZIP i
   assert.equal(probeRequests, 2);
 });
 
+test('release decisions preserve the historical cutoff, cited cells and manual issue write', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'release-decision-browser-'));
+  await seedWorkspace(dir);
+  const app = createTeamApp({ base: join(dir, 'releases.sqlite'), background: false, env: fixtureEnv, send: transport });
+  let browser;
+  t.after(async () => {
+    await browser?.close();
+    await app.close();
+    await rm(dir, { recursive: true, force: true, maxRetries: 3 });
+  });
+  const store = app.space('team');
+  const { user } = await app.accounts.login({ login: 'fixture-admin', password: 'fixture-password' });
+  const release = (id, date, description, row, extra = {}) => ({ kind: 'releases', loc: 'Релизы!A' + row,
+    row: { release_id: id, release_date: date, description, release_type: 'major', status: 'released', ...extra } });
+  const imported = [{ file: 'Решения.xlsx', facts: [
+    release('DEC-1', '2026-10-01', 'Изменение Kaspersky', 2),
+    release('DEC-2', '2026-11-12', 'Поздний релиз Kaspersky', 3),
+    release('DEC-3', '2026-10-02', 'Изменение Astra', 4),
+    release('DEC-4', '2026-10-04', 'Карусель рекомендаций ЛК', 5, { affected_metrics: 'lk_reco_click_visits' }),
+    { kind: 'interview', loc: 'Интервью!L9', text: 'Темы ответа: Kaspersky · сложность выбора\nФрагмент записи: Неясно, какую лицензию выбрать' },
+    { kind: 'backlog', loc: 'Задачи!A8', row: { task_id: 'DEC-T', title: 'Kaspersky: проверить сбор событий',
+      created_date: '2026-09-20', status: 'New', description_short: 'Проверить передачу событий', linked_metric_ids: 'cfg_add_to_cart_rate' } },
+    { kind: 'dictionary', loc: 'Метрики!A4', row: { metric_id: 'cfg_add_to_cart_rate', metric_name: 'Конверсия в корзину',
+      comment: 'Проверить полноту исходных событий', formula_or_logic: 'Корзины / посещения' } },
+  ] }];
+  for (let day = 0; day < 29; day++) {
+    if (day === 14) continue; // The deployment day is excluded from both windows.
+    imported[0].facts.push({ kind: 'metrics', loc: 'Клики!A' + (day + 2), row: {
+      product: 'ЛК', metric_id: 'lk_reco_click_visits', segment: 'all', unit: 'visits',
+      date: new Date(Date.UTC(2026, 8, 20 + day)).toISOString().slice(0, 10), value: day < 14 ? 1 : 2,
+    } });
+  }
+  importDocs(store, imported, { notify: false });
+  const call = (op, body) => workspaceOperation(store, user, op, body, fixtureEnv, transport);
+  const linked = call('create-case', { title: 'Связанный разбор Kaspersky', product: 'Kaspersky', release: 'DEC-2' });
+  await new Promise((ok, fail) => app.server.once('error', fail).listen(0, '127.0.0.1', ok));
+  const base = 'http://127.0.0.1:' + app.server.address().port;
+  const edge = 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe';
+  browser = await chromium.launch({ executablePath: process.env.PM_BROWSER_PATH || (existsSync(edge) ? edge : undefined) });
+  const page = await browser.newPage({ locale: 'ru-RU', viewport: { width: 1440, height: 900 }, reducedMotion: 'reduce' });
+  page.setDefaultTimeout(20000);
+  const errors = [];
+  page.on('pageerror', error => errors.push(error.message));
+  await page.goto(base + '/#overview');
+  await field(page, 'Логин').fill('fixture-admin');
+  await field(page, 'Пароль').fill('fixture-password');
+  await field(page, 'Пароль').press('Enter');
+  await page.getByRole('link', { name: 'Решение по релизу', exact: true }).click();
+  await visible(page.getByRole('heading', { name: 'Решение по релизу' }));
+  await field(page, 'Семейство или раздел').selectOption('Kaspersky');
+  await visible(page.getByText('«Неясно, какую лицензию выбрать»'));
+  await page.getByRole('link', { name: /Интервью!L9/ }).click();
+  await visible(page.getByText('Интервью!L9', { exact: true }));
+  await page.goBack();
+  await field(page, 'Семейство или раздел').selectOption('Kaspersky');
+  await field(page, 'Дата среза').fill('2026-11-08');
+  await role(page, 'Показать на дату').click();
+  await visible(page.getByText('Исторический срез · 08.11.2026', { exact: true }));
+  assert.equal(await field(page, 'Релиз').locator('option[value="DEC-2"]').count(), 0);
+  assert.equal(await page.getByText('«Неясно, какую лицензию выбрать»').count(), 0);
+  await page.getByText('16 недель и исходные строки').click();
+  await page.getByRole('link', { name: /Kaspersky!A20/ }).click();
+  await visible(page.getByText('Kaspersky!A20', { exact: true }));
+  await page.goBack();
+  await visible(page.getByText('Исторический срез · 08.11.2026', { exact: true }));
+  await field(page, 'Семейство или раздел').selectOption('Astra');
+  await visible(page.getByRole('heading', { name: 'Astra', exact: true }));
+  assert.equal(await field(page, 'Релиз').inputValue(), 'DEC-3');
+
+  await page.goto(base + '/#release-detail/DEC-2');
+  await page.getByRole('link', { name: 'Решение по релизу', exact: true }).click();
+  assert.equal(new URL(page.url()).hash, '#release-decision/DEC-2');
+  await role(page, 'Открыть чат разбора').click();
+  await visible(page.getByRole('heading', { name: 'Чат разбора · DEC-2' }));
+  await role(page, 'Найти задачу и проверить дубли').click();
+  await visible(page.getByRole('link', { name: /^DEC-T ·/ }));
+  assert.equal(await role(page, 'Подготовить черновик задачи').count(), 0);
+  await role(page, 'Подготовить комментарий').click();
+  await visible(page.locator('.tracker-preview').getByText(/Метрики!A4/));
+  assert.equal(store.db.prepare('SELECT count(*) AS n FROM local_issues').get().n, 0);
+  assert.equal(store.db.prepare('SELECT state FROM draft_actions WHERE case_id=?').get(linked.id).state, 'draft');
+  await role(page, 'Подтвердить запись').click();
+  await visible(page.getByRole('link', { name: 'Открыть задачу · DEC-T' }));
+  assert.equal(store.db.prepare("SELECT count(*) AS n FROM local_issues WHERE key='DEC-T'").get().n, 1);
+
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto(base + '/#release-decision/DEC-4');
+  await visible(page.getByRole('heading', { name: 'Личный кабинет', exact: true }));
+  await visible(page.getByRole('heading', { name: 'Переходы из рекомендаций' }));
+  await visible(page.getByText(/визиты с кликом 14 → 28/));
+  await page.getByText('Источники расчёта').click();
+  await page.getByRole('link', { name: /Клики!A2$/ }).click();
+  await visible(page.getByText('Клики!A2', { exact: true }));
+  await page.goBack();
+  await role(page, 'Открыть чат разбора').click();
+  await visible(page.getByRole('heading', { name: 'Чат разбора · DEC-4' }));
+  const thread = store.db.prepare("SELECT id FROM conversations WHERE title='ЛК · DEC-4'").get().id;
+  assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
+  const question = 'Какая задача связана с этой выкладкой?';
+  await page.locator('textarea').fill(question);
+  await submit(page, 'ask', () => role(page, 'Отправить').click());
+  assert.equal(JSON.parse(store.db.prepare('SELECT body FROM jobs WHERE thread=?').get(thread).body).decisionReleaseId, 'DEC-4');
+  await page.goto(base + '/#overview');
+  await page.goto(base + '/#release-decision/DEC-4');
+  await role(page, 'Открыть чат разбора').click();
+  await visible(page.getByText(question, { exact: true }));
+  assert.deepEqual(store.db.prepare("SELECT id FROM conversations WHERE title='ЛК · DEC-4'").all().map(r => r.id), [thread]);
+  assert.deepEqual(errors, []);
+});
+
 // Model and remote Redmine responses are simulated. Jobs and local tracking use SQLite.
 function transport(url, options) {
   const target = new URL(url);

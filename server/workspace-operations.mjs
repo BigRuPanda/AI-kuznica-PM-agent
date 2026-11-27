@@ -1,6 +1,7 @@
 import { excelSources, sourceRows, sourceValues, cellSource, issuePages, issueClosure, pagesByIssue } from './knowledge.mjs';
 import { readPublicPage } from './public-page.mjs';
 import { marketOffers } from './market-offers.mjs';
+import { decisionDraft, releaseDecision } from './release-decision.mjs';
 import { checkOffer, savedOfferCheck } from './competitor-check.mjs';
 import { randomUUID } from 'node:crypto';
 import { signalHistory } from './signal-history.mjs';
@@ -141,6 +142,10 @@ const agreementInput = z.strictObject({
 export const operations = {
   'knowledge-sources':['Список версий Excel рабочего пространства',{}],
   'knowledge-source':['Строки книги по версии и ячейке',{version:id,loc:optional,offset:z.number().int().nonnegative().optional()}],
+  release_decision: ['Измерения, источники и связанные задачи по выпущенной функции. Для истории through — дата последнего доступного дня.',
+    { product: optional, caseId: id.optional(), releaseId: id.optional(), through: optional }],
+  'release-tracker': ['Найти связанные задачи и дубли.', { caseId: id, releaseId: id }],
+  'release-tracker-draft': ['Подготовить задачу или комментарий по решению.', { caseId: id, releaseId: id, key: id.optional() }],
   source_value:['Исходные значения метрики с точными координатами и идентификаторами ряда',{product:text,metric:id,date:z.iso.date(),segment:optional,sourceId:optional,definitionId:optional,stepDays:z.number().int().positive().optional()}],
   read_public_page:['Читать публичную HTML-страницу по URL или выбранной ячейке',{url:z.url().max(2048).optional(),version:id.optional(),loc:optional}],
   competitor_check:['Проверить предложение продавца из конкретной строки исследования',{version:id,loc:id,savedOnly:z.boolean().optional(),asOf:z.iso.datetime().optional()}],
@@ -445,6 +450,35 @@ export function workspaceOperation(
   const db = store.db;
   const meta = operations[op];
   const b = meta ? z.object(meta[1]).parse(input) : input;
+  if (op === 'release_decision') return releaseDecision(db, user, b, sharedOnly);
+  if (op === 'release-tracker' || op === 'release-tracker-draft') {
+    if (sharedOnly || assistantAuthored) throw Error('Откройте личный чат этого разбора.');
+    const decision = releaseDecision(db, user, b);
+    if (!decision.release || decision.historical) throw Error('Откройте текущий срез выпущенной функции.');
+    const proposed = decisionDraft(decision, env.APP_BASE_URL);
+    const target = targetFor(db, user, 'redmine', env);
+    const queries = [...new Set([decision.backlog?.title, proposed.title, decision.product,
+      decision.measurement?.metric].filter(Boolean))];
+    return Promise.resolve(trackerClient(store, user, target, env, send, b.caseId)).then(async api => {
+      const hits = api.searchProject ? await api.searchProject(queries) :
+        (await Promise.all(queries.map(query => api.search(query, true)))).flat();
+      const normalized = title => title.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
+      const exact = new Set([decision.backlog?.title, proposed.title].filter(Boolean).map(normalized));
+      const items = [...new Map(hits.map(item => [item.key, item])).values()]
+        .map(({ key, title, url, status, canComment = true }) =>
+          ({ key, title, url, status, canComment, exact: exact.has(normalized(title)) }))
+        .sort((a, b) => Number(b.exact) - Number(a.exact));
+      if (op === 'release-tracker') return { items, local: !!target.local };
+      const chosen = b.key && items.find(item => item.key === b.key);
+      if (b.key && !chosen) throw Error('Повторите поиск и выберите задачу из результатов.');
+      if (chosen && !chosen.canComment) throw Error('Откройте найденную задачу в Redmine для добавления комментария.');
+      if (!chosen && items.some(item => item.exact)) throw Error('Найдена подходящая задача. Предложите комментарий к ней.');
+      const body = chosen ? { caseId: b.caseId, key: chosen.key, comment: proposed.description } :
+        { caseId: b.caseId, ...proposed };
+      const draftId = digest(JSON.stringify(['release-decision', user.id, b.caseId, b.releaseId, b.key, target, proposed.description]));
+      return prepareTracker(store, user, 'issue', body, env, send, draftId);
+    });
+  }
   if (op === 'knowledge-sources') return excelSources(db);
   if (op === 'knowledge-source') return sourceRows(db,b.version,b.offset,b.loc);
   if (op === 'source_value') return sourceValues(db,b);

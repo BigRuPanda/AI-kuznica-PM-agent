@@ -90,6 +90,7 @@ export type Release = {
   release_date: string;
   description: string;
   related_task_ids: string;
+  decisionAvailable?: boolean;
 };
 export type Home = {
   bridgeEnabled?: boolean;

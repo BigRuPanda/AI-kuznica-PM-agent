@@ -1,5 +1,6 @@
 import { SourceExtract } from './knowledge-source';
 import { Knowledge } from './knowledge';
+import { ReleaseDecision } from './release-decision';
 import { ReleaseAnalytics } from './app';
 import { MetrikaJournal } from './metrika-status';
 import { ChatTrackerPreview, Connections, DemoObject, Tracking } from './tracking';
@@ -173,6 +174,7 @@ function CaseList({ items }: { items: Case[] }) {
 }
 const stepNames: Record<string, string> = {
   overview: 'Открыт обзор',
+  release_decision: 'Проверены данные по релизу',
   web_search:'Поиск в Яндексе', read_public_page:'Прочитана публичная страница', competitor_check:'Проверено предложение продавца',
   'knowledge-source':'Прочитаны строки книги', 'knowledge-sources':'Найдены книги', source_value:'Проверена ячейка',
   metrics: 'Проверен каталог метрик',
@@ -225,7 +227,11 @@ function Overview({ home, onAsk }: { home: Home; onAsk: () => void }) {
           <h1>Обзор</h1>
           {home.user.role === 'judge' && <span className="state">Демо</span>}
         </div>
-        <button onClick={onAsk}>Спросить помощника</button>
+        <div className="overview-actions">
+          {(home.products.length > 0 || home.releases.some(release => release.decisionAvailable)) &&
+            <a className="primary arrow-action" href="#release-decision">Решение по релизу <Icon name="arrow" /></a>}
+          <button onClick={onAsk}>Спросить помощника</button>
+        </div>
       </div>
       <section aria-labelledby="attention-title">
         <h2 id="attention-title">Требует внимания</h2>
@@ -281,6 +287,8 @@ function Chat({
   threads,
   onThreadAction,
   threadMenuTrigger,
+  decisionReleaseId,
+  product,
   action,
   onResult,
   context,
@@ -296,6 +304,8 @@ function Chat({
   threads: Thread[];
   onThreadAction?: (thread: Thread, action: ChatAction) => void;
   threadMenuTrigger?: RefObject<HTMLButtonElement | null>;
+  decisionReleaseId?: string;
+  product?: string;
   action: Action;
   onResult?: (b: Msg['body']) => void;
   context?: string;
@@ -742,6 +752,8 @@ function Chat({
               typedQuestion:q.trim(), webSearch:!groupMessage && webSearch,
               question: (context && !webSearch ? 'О графике «' + context + '». ' : '') + q,
               caseId,
+              decisionReleaseId,
+              product,
               screen,
               materialIds: [...new Set([material?.id, pasted].filter(Boolean))],
               shareMaterials: !!needsShare && sharing,
@@ -2225,6 +2237,7 @@ function Workspace({ user, onLogout, onUpdate }: { user: User; onLogout: () => v
         <nav aria-label="Основные разделы">
           {tabs.map(([k, t]) => {
             const active = !settings && (route === k || (k === 'knowledge' && route === 'demo-page') ||
+              (k === 'overview' && route === 'release-decision') ||
               (k === 'cases' && ['case','snapshot','range','material','demo-issue','releases-list','release-detail','release','releases','calc'].includes(route)));
             return (
             <a
@@ -2274,6 +2287,11 @@ function Workspace({ user, onLogout, onUpdate }: { user: User; onLogout: () => v
           </section>
         ) : ['releases', 'release', 'calc'].includes(route) ? (
           <ReleaseAnalytics route={route} requestedId={id} user={user} />
+        ) : route === 'release-decision' ? (
+          <ReleaseDecision key={id} action={action} initialRelease={id || undefined} renderChat={(thread, caseId, releaseId, product) => (
+            <Chat key={thread} id={thread} caseId={caseId} decisionReleaseId={releaseId} product={product}
+              userId={user.id} avatar={user.avatar} threads={home.threads} action={action} />
+          )} />
         ) : route === 'case' ? (
           <Investigation key={home.user.id + '/' + id} id={id} selected={selected} documentation={documentation}
             home={home} avatar={user.avatar} action={action} refresh={refresh} />
@@ -2332,6 +2350,7 @@ function Workspace({ user, onLogout, onUpdate }: { user: User; onLogout: () => v
                   <small>{r?.release_date}</small>
                   <p>{r?.description}</p>
                   <p>Связанные задачи: {r?.related_task_ids}</p>
+                  {r.decisionAvailable && <a href={'#release-decision/' + r.release_id}>Решение по релизу</a>}
                   <button
                     onClick={() => {
                       showCaseForm(id);

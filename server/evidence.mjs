@@ -312,7 +312,6 @@ export function analysisView(
 ) {
   for (const date of [from, through, releaseWeek]) checkDate(date);
   if (from && through && from > through) throw Error('Начало периода должно быть не позже конца.');
-  if (releaseWeek && through && releaseWeek > through) throw Error('Неделя релиза должна быть не позже даты среза.');
   const c = caseId ? getCase(db, caseId) : null,
     all = listSales(db);
   product = c?.product || product || all.at(-1)?.product || '';
@@ -328,10 +327,17 @@ export function analysisView(
   const cut = through || [latestWeek && iso(dateMs(latestWeek) + WEEK - 86400000),
     Number.isFinite(latestDay) && iso(latestDay)].filter(Boolean).sort().at(-1) || '';
   const related = search(db, product, ['releases'], Number.MAX_SAFE_INTEGER, { asOf: through });
-  const latest = reported.filter(x => x.week <= cut).at(-1)?.week;
-  const rawSignal = c?.body.signal;
-  const signal = !through || rawSignal?.week <= through ? rawSignal : null;
-  const anchor = signal?.start || latest || (cut && monday(cut));
+  const weekEnded = week => dateMs(week) + WEEK - 86400000 <= dateMs(cut);
+  const latest = reported.filter(x => weekEnded(x.week) && (!through || !full || !x.partial)).at(-1)?.week;
+  let signal = c?.body.signal ?? null;
+  if (through && signal && !weekEnded(signal.week)) {
+    const history = (signal.history || []).filter(row => weekEnded(row.week));
+    const last = history.at(-1);
+    signal = history.length >= (signal.rule === 'absolute' ? 2 : 1)
+      ? { ...signal, ...last, history, count: history.length, source: reported.find(row => row.week === last.week)?.source ?? null }
+      : null;
+  }
+  const anchor = signal?.start || latest || (!through && cut ? monday(cut) : '');
   const release = related
     .filter((x) => x.data.release_date <= anchor && x.data.release_type === 'major')
     .sort((a, b) => b.data.release_date.localeCompare(a.data.release_date))[0];

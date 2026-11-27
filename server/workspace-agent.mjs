@@ -26,7 +26,7 @@ const system = [
 ].join(' ');
 const greeting =
   /^(?:привет(?:ик|ствую)?|здравствуй(?:те)?|доброе утро|добрый (?:день|вечер)|hello|hi)(?:[, ]+агент)?[!.? …]*$/iu;
-const tools = Object.entries(operations).filter(([name])=>!['read_public_page','competitor_check'].includes(name)).map(([name, [description, shape]]) => {
+const tools = Object.entries(operations).filter(([name])=>!['read_public_page','competitor_check','release-tracker','release-tracker-draft'].includes(name)).map(([name, [description, shape]]) => {
   const parameters = z.toJSONSchema(z.object(shape));
   delete parameters.$schema;
   return { type: 'function', function: { name: name.replaceAll('-', '_'), description, parameters } };
@@ -261,11 +261,17 @@ export async function runAssistant(
     }
     const archive = c && archiveInquiry(b.question) && !smallTalk && !b.screen?.calc && !range && !b.analysisPeriod
       ? archiveEvidence(db,b.question+' '+c.product,{product:c.product}).slice(0,4) : [];
+    const decision = b.decisionReleaseId && !smallTalk &&
+      workspaceOperation(store, user, 'release_decision', { releaseId: b.decisionReleaseId, caseId: b.caseId }, env, send, shared);
     const context = {
       archive:archive.length?archive.map(r=>r.text):undefined,
+      releaseDecision: decision ? {
+        asOf: decision.asOf, release: decision.release, delivered: decision.delivered,
+        recommendation: decision.recommendation, accountEvidence: decision.accountEvidence, trend: decision.trend,
+      } : undefined,
       requestedPeriod:b.requestedPeriod || undefined,
       caseId,
-      product: range?.product || research?.product || c?.product || last?.product,
+      product: range?.product || decision?.product || research?.product || c?.product || last?.product,
       research: researchContext(research),
       materials: (b.materialIds || []).map((id) => {
         const m = readMaterial(db, user, id, shared);

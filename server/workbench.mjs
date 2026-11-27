@@ -41,6 +41,7 @@ import {
 } from './agent-research.mjs';
 import { asksToDraw, chartFindings, chartObservations, resolveChartFocus } from './chart-focus.mjs';
 import { dayComparison, explicitDayWindow, investigationPeriod } from './day-comparison.mjs';
+import { canDecideRelease } from './release-decision.mjs';
 
 const chatItemColumns = '(seq INTEGER PRIMARY KEY AUTOINCREMENT,thread TEXT,author TEXT,role TEXT,body TEXT,created INTEGER);';
 
@@ -66,6 +67,7 @@ function migrateChatItems(db) {
 export function initWorkbench(db, env = process.env) {
   db.exec(
     'CREATE TABLE IF NOT EXISTS conversations(id TEXT PRIMARY KEY,owner TEXT,scope TEXT,title TEXT);' +
+      'CREATE TABLE IF NOT EXISTS release_threads(thread TEXT PRIMARY KEY,release_id TEXT NOT NULL);' +
       'CREATE TABLE IF NOT EXISTS chat_items' + chatItemColumns +
       'CREATE TABLE IF NOT EXISTS jobs(id TEXT PRIMARY KEY,thread TEXT,user TEXT,body TEXT,status TEXT,result TEXT,created INTEGER);' +
       'CREATE TABLE IF NOT EXISTS telegram_job_routes(job_id TEXT PRIMARY KEY REFERENCES jobs(id) ON DELETE CASCADE,chat TEXT NOT NULL,is_group INTEGER NOT NULL);' +
@@ -123,6 +125,7 @@ export function caseThreadId(userId, caseId) {
 export function dashboard(db, user) {
   const visibleCases = cases(db).filter(c => !c.body.owner || c.body.owner === user.id);
   const caseByThread = new Map(visibleCases.map(c => [caseThreadId(user.id, c.id), c.id]));
+  const products = [...new Set(listSales(db).map((r) => r.product))];
   return {
     user,
     cases: visibleCases.map(c => ({ ...c, effect: effect(db, c) })),
@@ -138,10 +141,10 @@ export function dashboard(db, user) {
     sources: db
       .prepare('SELECT d.file,d.version,d.created updated,(SELECT count(*) FROM documents h WHERE h.file=d.file) versions FROM documents d WHERE d.rowid=COALESCE((SELECT a.rowid FROM documents a JOIN research_file_versions h ON a.version=h.version WHERE h.file=d.file),(SELECT max(a.rowid) FROM documents a WHERE a.file=d.file)) ORDER BY d.file')
       .all(),
-    products: [...new Set(listSales(db).map((r) => r.product))],
+    products,
     rules: setting(db, 'rules', defaultRules),
     alerts: db.prepare('SELECT id,week,case_id FROM alerts ORDER BY week DESC').all(),
-    releases: facts(db, 'releases').map((f) => f.data),
+    releases: facts(db, 'releases').map((f) => ({ ...f.data, decisionAvailable: canDecideRelease(f, products) })),
     deliveries: db.prepare('SELECT channel,state,count(*) n FROM deliveries GROUP BY channel,state').all(),
   };
 }
@@ -149,6 +152,25 @@ export function thread(db, user, id) {
   const t = db.prepare('SELECT * FROM conversations WHERE id=?').get(id);
   if (!t || (t.scope !== 'group' && t.owner !== user.id)) throw Error('Беседа недоступна');
   return t;
+}
+export function openCaseThread(db, user, caseId) {
+  const c = visibleCase(db, user, caseId);
+  const id = caseThreadId(user.id, c.id);
+  db.prepare("INSERT OR IGNORE INTO conversations VALUES(?,?,'private',?)").run(id, user.id, c.title);
+  return id;
+}
+const releaseThreadId = (user, releaseId) => digest(user.id + '/release/' + releaseId);
+export function openReleaseThread(store, user, decision) {
+  const { db } = store;
+  if (decision.caseId && decision.scope !== 'account') return openCaseThread(db, user, decision.caseId);
+  const releaseId = decision.release.id;
+  const id = releaseThreadId(user, releaseId);
+  return store.tx(() => {
+    db.prepare("INSERT OR IGNORE INTO conversations VALUES(?,?,'private',?)")
+      .run(id, user.id, decision.product + ' · ' + releaseId);
+    db.prepare('INSERT OR IGNORE INTO release_threads VALUES(?,?)').run(id, releaseId);
+    return id;
+  });
 }
 export function createThread(db, user, title, group = false) {
   const id = randomUUID();
@@ -192,6 +214,7 @@ export function deleteThread(store, user, id) {
     )`).run(id, id);
     db.prepare('DELETE FROM jobs WHERE thread=?').run(id);
     db.prepare('DELETE FROM chat_items WHERE thread=?').run(id);
+    db.prepare('DELETE FROM release_threads WHERE thread=?').run(id);
     db.prepare("DELETE FROM snapshot_access WHERE scope='thread' AND ref=?").run(id);
     db.prepare('DELETE FROM conversations WHERE id=?').run(id);
     return { id };
@@ -210,6 +233,11 @@ export function enqueue(store, user, b, { telegramReply } = {}) {
   if (b.caseId) visibleCase(store.db, user, b.caseId);
   return store.tx(() => {
     const t = thread(store.db, user, b.thread);
+    const release = store.db.prepare('SELECT release_id FROM release_threads WHERE thread=?').get(t.id);
+    const legacyRelease = !release && t.scope === 'private' && /^[a-f0-9]{64}$/.test(t.id) && facts(store.db, 'releases')
+      .find(row => releaseThreadId(user, row.data.release_id) === t.id)?.data.release_id;
+    if (legacyRelease) store.db.prepare('INSERT OR IGNORE INTO release_threads VALUES(?,?)').run(t.id, legacyRelease);
+    if (release || legacyRelease) b = { ...b, decisionReleaseId: release?.release_id || legacyRelease };
     if (b.caseId && t.scope === 'group' && getCase(store.db, b.caseId).body.owner)
       throw Error('Сначала опубликуйте личный разбор');
     const id = digest([user.id, t.id, b.requestId || randomUUID()].join('/'));
