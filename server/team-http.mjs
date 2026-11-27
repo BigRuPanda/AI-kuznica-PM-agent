@@ -37,7 +37,8 @@ import {
   deliver,
 } from './workbench.mjs';
 import { mail, python, probeMetrika, telegram } from './connectors.mjs';
-import { bindTelegram, contactAction, initContacts, telegramPolling } from './notification-contacts.mjs';
+import { bindTelegram, contactAction, initContacts, notificationAudience, telegramGroupAllowed, telegramPolling } from './notification-contacts.mjs';
+import { configureSignalAudience } from './signal-history.mjs';
 import { initMetrikaSync, metrikaStatus, syncMetrika } from './metrika-sync.mjs';
 import { preview, revisePage } from './tracker-workflow.mjs';
 import { configure, connectionInfo, personalConnection, finishOAuth } from './tracker-connections.mjs';
@@ -80,6 +81,7 @@ export function createTeamApp({
     if (!spaces.has(id)) {
       const s = openStore(workspacePath(base, id),{seedDemo:!env.SOURCE_ARCHIVE_SHA256});
       initEvidence(s.db);
+      if (id === 'team') configureSignalAudience(s.db, () => notificationAudience(env, accounts.db));
       initWorkbench(s.db);
       initSourcePolicy(s.db);
       initMetrikaSync(s.db);
@@ -134,14 +136,14 @@ export function createTeamApp({
     const store = space('team'), db = store.db;
     if (db.prepare('SELECT id FROM known_updates WHERE id=?').get(update.update_id)) return;
     const chat = String(msg.chat.id), sender = String(msg.from.id), group = msg.chat.type !== 'private';
+    if (!group && chat !== sender) return;
     if (!group && msg.text.startsWith('/start ')) {
       bindTelegram(accounts.db, msg);
     } else {
       const binding = accounts.db.prepare("SELECT user FROM telegram WHERE chat=? AND kind='private'").get(sender);
       const user = binding && accounts.publicUser(binding.user);
-      const allowed = String(env.TELEGRAM_CHAT_IDS || '').split(',').map(x => x.trim());
       if (user?.space === 'team' && user.role !== 'judge' &&
-          (!group || allowed.includes(chat)) &&
+          (!group || telegramGroupAllowed(env, chat)) &&
           (!group || msg.text.startsWith('/ask') || msg.reply_to_message?.from?.is_bot)) {
         const thread = group ? 'tg-group-' + chat : 'tg-' + user.id;
         db.prepare('INSERT OR IGNORE INTO conversations VALUES(?,?,?,?)').run(
@@ -149,8 +151,8 @@ export function createTeamApp({
         );
         enqueue(store, user, {
           question: msg.text.replace(/^\/ask(?:@\w+)?\s*/, '').trim() || 'Обзор',
-          thread, requestId: 'tg' + update.update_id, telegramChat: chat,
-        });
+          thread, requestId: 'tg' + update.update_id,
+        }, { telegramReply: { chat, group } });
       }
     }
     db.prepare('INSERT OR IGNORE INTO known_updates VALUES(?)').run(update.update_id);
@@ -206,7 +208,7 @@ export function createTeamApp({
                     .run(
                       digest(c.id + JSON.stringify(c.body.watch)) + channel,
                       channel,
-                      JSON.stringify({ caseId: c.id, owner: c.body.owner || undefined, text: report.state }),
+                      JSON.stringify({ caseId: c.id, ...notificationAudience(env, accounts.db, c.body.owner), text: report.state }),
                     );
             });
           }

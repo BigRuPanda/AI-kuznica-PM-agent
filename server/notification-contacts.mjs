@@ -17,6 +17,25 @@ export function destination(db, user, channel) {
     .get(user)?.chat;
 }
 
+export function notificationAudience(env, db, owner, { requireOwner = false } = {}) {
+  if (owner) return { owner };
+  const login = String(env.SIGNAL_OWNER_LOGIN || '').trim();
+  if (login) {
+    const assigned = notificationOwner(db, login);
+    return assigned ? { owner: assigned } : { recipientLogin: login };
+  }
+  return requireOwner || env.SOURCE_ARCHIVE_SHA256 ? { awaitingOwner: true } : { broadcast: true };
+}
+
+export function notificationOwner(db, login) {
+  return db?.prepare("SELECT id FROM users WHERE login=? COLLATE NOCASE AND space='team' AND role!='judge'")
+    .get(login)?.id;
+}
+
+export function telegramGroupAllowed(env, chat) {
+  return String(env.TELEGRAM_CHAT_IDS || '').split(',').some(id => id.trim() === chat);
+}
+
 function transaction(db, operation) {
   db.exec('BEGIN IMMEDIATE');
   try {

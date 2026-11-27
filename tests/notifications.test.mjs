@@ -6,8 +6,9 @@ import { join } from 'node:path';
 import test from 'node:test';
 import { openStore } from '../server/store.mjs';
 import { digest, initEvidence } from '../server/evidence.mjs';
+import { reconcileSignals } from '../server/signal-history.mjs';
 import { createTeamApp } from '../server/team-http.mjs';
-import { deliver, initWorkbench } from '../server/workbench.mjs';
+import { deliver, initWorkbench, workJobs } from '../server/workbench.mjs';
 
 async function fixture(t, config = {}) {
   const dir = await mkdtemp(join(tmpdir(), 'pm-contacts-'));
@@ -148,7 +149,7 @@ test('owner-targeted deliveries wait, recheck changed contacts, and do not use s
   assert.equal(store.db.prepare("SELECT state FROM deliveries WHERE id='stale'").get().state, 'cancelled');
   env.SIGNAL_OWNER_LOGIN = 'OTHER';
   app.accounts.db.prepare('DELETE FROM email_contacts WHERE user=?').run(other.id);
-  queue('designated', { caseId: 'shared', signalId: 'shared', revision: 1, proactive: true });
+  queue('designated', { caseId: 'shared', signalId: 'shared', revision: 1, proactive: true, recipientLogin: 'OTHER' });
   queue('disabled', { caseId: 'private', owner: owner.id }, 'telegram');
   await dispatch();
   assert.deepEqual(sentRecipients(), ['owner@example.invalid']);
@@ -164,6 +165,10 @@ test('owner-targeted deliveries wait, recheck changed contacts, and do not use s
   queue('broadcast', { caseId: 'shared', broadcast:true });
   await dispatch();
   assert.equal(sentRecipients().at(-1), 'shared@example.invalid');
+  queue('ambiguous-legacy', { caseId: 'shared' });
+  await dispatch();
+  assert.equal(store.db.prepare("SELECT state FROM deliveries WHERE id='ambiguous-legacy'").get().state, 'review');
+  assert.equal(sentRecipients().length, 3);
 });
 
 test('legacy binding clients still receive a command when the bot is unconfigured', async t => {
@@ -171,6 +176,71 @@ test('legacy binding clients still receive a command when the bot is unconfigure
   const binding = await contact('bind');
   assert.deepEqual(Object.keys(binding), ['command']);
   assert.match(binding.command, /^\/start [A-Za-z0-9_-]+$/);
+});
+
+test('the first claim after restart uses the original assigned audience, including for corrections', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'pm-notice-restart-'));
+  const base = join(dir, 'team.sqlite');
+  const env = { NOTIFICATIONS_ENABLED:'true', SIGNAL_OWNER_LOGIN:'old', NOTIFICATION_CHANNELS:'smtp',
+    SMTP_HOST:'mail.invalid', SMTP_FROM:'sender@example.invalid', SMTP_TO:'shared@example.invalid' };
+  let app = createTeamApp({ base, env, background:false });
+  t.after(async () => {
+    await app.close();
+    await rm(dir, { recursive:true, force:true, maxRetries:3 });
+  });
+  app.accounts.db.exec(`INSERT INTO users(id,login,space,role) VALUES
+    ('old-owner','old','team','member'),('new-owner','new','team','member');
+    INSERT INTO email_contacts VALUES('new-owner','new@example.invalid');`);
+  const signal = { product:'Store', rule:'rolling', start:'2026-11-02', week:'2026-11-09',
+    confirmedWeek:'2026-11-09', title:'Fixture', threshold:90, history:[{week:'2026-11-09',value:70}] };
+  reconcileSignals(app.space('team').db, [signal], ['smtp']);
+  await app.close();
+  const sent = [];
+  const after = {...env, SIGNAL_OWNER_LOGIN:'new'};
+  app = createTeamApp({ base, env:after, background:false });
+  const store = app.space('team');
+  const dispatch = () => deliver(store, after, () => assert.fail('Unexpected Telegram request'),
+    (_text,_env,to) => sent.push(to), app.accounts.db);
+  await dispatch();
+  assert.deepEqual(sent, []);
+  app.accounts.db.prepare('INSERT INTO email_contacts VALUES(?,?)').run('old-owner','old@example.invalid');
+  store.db.exec("UPDATE deliveries SET next=0 WHERE state='queued'");
+  await dispatch();
+  assert.deepEqual(sent, ['old@example.invalid']);
+  reconcileSignals(store.db, [], ['smtp']);
+  await dispatch();
+  assert.deepEqual(sent, ['old@example.invalid','old@example.invalid']);
+
+  delete after.SIGNAL_OWNER_LOGIN;
+  const teamSignal = { ...signal, product:'Team' };
+  reconcileSignals(store.db, [teamSignal], ['smtp']);
+  await dispatch();
+  after.SIGNAL_OWNER_LOGIN = 'new';
+  after.SMTP_TO = 'different-shared@example.invalid';
+  reconcileSignals(store.db, [], ['smtp']);
+  await dispatch();
+  assert.deepEqual(sent, ['old@example.invalid','old@example.invalid','shared@example.invalid','shared@example.invalid']);
+});
+
+test('a queued private Telegram reply expires when its original binding is removed', async t => {
+  const { app, store, env, messages, contact, hook, dispatch } = await fixture(t);
+  const { command } = await contact('bind');
+  await hook(31, command);
+  await hook(32, '/ask Обзор');
+  await workJobs(store, app.accounts, env, () => assert.fail('Unexpected model request'));
+  assert.equal(store.db.prepare("SELECT count(*) n FROM deliveries WHERE channel='telegram' AND state='queued'").get().n, 1);
+  await contact('contact-unlink', { channel:'telegram' });
+  await dispatch();
+  assert.deepEqual(messages, []);
+});
+
+test('web chat submissions cannot inject a Telegram reply destination', async t => {
+  const { app, store, env, contact } = await fixture(t);
+  const { id } = await contact('thread', { title:'Private' });
+  await contact('ask', { thread:id, question:'Обзор', telegramChat:'-123',
+    telegramReply:{chat:'-123',group:true} });
+  await workJobs(store, app.accounts, env, () => assert.fail('Unexpected model request'));
+  assert.equal(store.db.prepare("SELECT count(*) n FROM deliveries WHERE channel='telegram'").get().n, 0);
 });
 
 test('the Telegram queue retries a provider limit, skips definite refusals, and holds ambiguous responses', async t => {

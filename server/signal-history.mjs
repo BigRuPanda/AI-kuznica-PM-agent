@@ -2,6 +2,11 @@ import { createHash } from 'node:crypto';
 
 const fingerprint = (value) => createHash('sha256').update(value).digest('hex');
 const series = (s) => JSON.stringify([s.product, s.rule, s.seriesKey ?? s.product]);
+const audienceByWorkspace = new WeakMap();
+
+export function configureSignalAudience(db, getAudience) {
+  audienceByWorkspace.set(db, getAudience);
+}
 
 export function initSignalHistory(db) {
   db.exec(`CREATE TABLE IF NOT EXISTS signal_revisions(
@@ -26,16 +31,15 @@ function sentTo(channel, body) {
   return channel === 'telegram' ? body.chat : body.emailTo;
 }
 
-function updateNotices(db, id, revision, event, summary, notify) {
+function updateNotices(db, id, revision, event, summary, channels, audience) {
   const text = event === 'withdrawn' ? 'Сигнал отозван после пересчёта: ' + summary
     : event === 'corrected' ? 'Данные сигнала уточнены: ' + summary : summary;
-  const payload = { signalId: id, caseId: id, revision, event, proactive: true, text };
+  const payload = { signalId: id, caseId: id, revision, event, proactive: true, text, ...audience };
   const insert = db.prepare('INSERT OR IGNORE INTO deliveries(id,channel,state,body) VALUES(?,?,?,?)');
   if (event === 'confirmed') {
     // A pending withdrawal no longer describes an episode that has since been re-confirmed.
     db.prepare(`UPDATE deliveries SET state='cancelled' WHERE state IN ('queued','review') AND json_extract(body,'$.signalId')=?
       AND json_extract(body,'$.event')='withdrawn'`).run(id);
-    const channels = Array.isArray(notify) ? notify : notify ? ['telegram','smtp'] : [];
     for (const ch of channels) insert.run(id + '/' + revision + '/' + ch, ch, 'queued', JSON.stringify(payload));
     return;
   }
@@ -80,6 +84,7 @@ function evidenceChanged(old, next) {
 
 // Called in the same transaction as the import or rule change. Preserve a case's identity across late weeks.
 export function reconcileSignals(db, episodes, notify, imported = []) {
+  const channels = Array.isArray(notify) ? notify : notify ? ['telegram', 'smtp'] : [];
   const previous = db.prepare("SELECT * FROM cases WHERE json_type(body,'$.signal')='object'").all().map((r) => {
     const body = JSON.parse(r.body);
     const s = body.signal;
@@ -127,9 +132,22 @@ export function reconcileSignals(db, episodes, notify, imported = []) {
       db.prepare('UPDATE alerts SET body=? WHERE case_id=?').run(JSON.stringify(signal),id);
       event = 'withdrawn';
     }
+    let audience;
+    if (event) {
+      const saved = db.prepare(`SELECT json_extract(body,'$.audience') audience FROM signal_revisions
+        WHERE case_id=? AND json_type(body,'$.audience')='object' ORDER BY revision DESC LIMIT 1`).get(id);
+      if (saved) audience = JSON.parse(saved.audience);
+      else if (old?.body.owner) audience = { owner: old.body.owner };
+      else if (db.prepare("SELECT 1 FROM deliveries WHERE json_extract(body,'$.signalId')=? LIMIT 1").get(id)) {
+        // Older records can identify delivery receipts without establishing the original audience.
+        audience = {};
+      } else if (event === 'confirmed' && channels.length) {
+        audience = audienceByWorkspace.get(db)?.() || { broadcast: true };
+      }
+    }
     db.prepare('INSERT INTO signal_revisions VALUES(?,?,?,?)')
-      .run(id,revision,Date.now(),JSON.stringify({...signal, event, imported}));
-    if (event) updateNotices(db,id,revision,event,title + ' · ' + next.product + ' · ' + next.week,notify);
+      .run(id,revision,Date.now(),JSON.stringify({...signal, event, imported, audience}));
+    if (event) updateNotices(db,id,revision,event,title + ' · ' + next.product + ' · ' + next.week,channels,audience);
   }
 }
 

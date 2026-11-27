@@ -202,7 +202,7 @@ test('Telegram fans out once per recipient, SMTP gets one link and repeated work
     initWorkbench(db);
     const insert = db.prepare("INSERT INTO deliveries(id,channel,state,body) VALUES(?,?,'queued',?)");
     for (const ch of ['smtp', 'telegram'])
-      insert.run(ch, ch, JSON.stringify({ caseId: 'example', text: 'Проверка' }));
+      insert.run(ch, ch, JSON.stringify({ caseId: 'example', text: 'Проверка', broadcast:true }));
     const env = {
       NOTIFICATIONS_ENABLED: 'true',
       TELEGRAM_CHAT_IDS: '11,22,11',

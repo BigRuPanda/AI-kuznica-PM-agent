@@ -20,7 +20,7 @@ import {
 import { apiConfigured, providerCall } from './agent.mjs';
 import { initTracking } from './tracker-workflow.mjs';
 import { mail, smtpConfigured, telegram, telegramConfigured } from './connectors.mjs';
-import { destination } from './notification-contacts.mjs';
+import { destination, notificationOwner, telegramGroupAllowed } from './notification-contacts.mjs';
 import { notificationChannels } from './data-profile.mjs';
 import {
   initMaterials,
@@ -202,7 +202,7 @@ export function addUserMessage(db, user, threadId, body, created = Date.now()) {
     .lastInsertRowid);
 }
 
-export function enqueue(store, user, b) {
+export function enqueue(store, user, b, { telegramReply } = {}) {
   const q = String(b.question || '').trim();
   if (!q || q.length > 2400) throw Error('Введите вопрос до 2400 символов');
   if (b.caseId) visibleCase(store.db, user, b.caseId);
@@ -276,7 +276,7 @@ export function enqueue(store, user, b) {
         id,
         t.id,
         user.id,
-        JSON.stringify({ ...b, screen, ...attachment, question: q, questionSeq, requestedPeriod,
+        JSON.stringify({ ...b, telegramChat: undefined, telegramReply, screen, ...attachment, question: q, questionSeq, requestedPeriod,
           analysisPeriod: investigationPeriod(q, askedAt) }),
         'queued',
         null,
@@ -928,7 +928,8 @@ export async function workJobs(store, accounts, env, send, pageOptions) {
         body,
         Date.now(),
       );
-    if (b.telegramChat) {
+    const reply = telegramReplyTarget(db, accounts.db, env, job, b);
+    if (reply) {
       const base = env.APP_BASE_URL || 'http://127.0.0.1:8090';
       const message = b.caseId
         ? { ...result, text: result.text + '\n' + base + '/#case/' + b.caseId }
@@ -938,12 +939,25 @@ export async function workJobs(store, accounts, env, send, pageOptions) {
         const id = digest(job.id + '/' + body) + '/' + i;
         db.prepare(
           "INSERT OR IGNORE INTO deliveries(id,channel,state,body) VALUES(?,'telegram','queued',?)",
-        ).run(id, JSON.stringify({ chat: b.telegramChat, text, after: previous }));
+        ).run(id, JSON.stringify({ ...reply, text, after: previous }));
         previous = id;
       }
     }
   });
 }
+
+function telegramReplyTarget(db, accounts, env, job, body) {
+  const updateId = /^tg(\d+)$/.exec(body.requestId)?.[1];
+  if (!updateId || body.caseId || body.screen || body.rangeId || body.selection || body.materialIds?.length ||
+      !db.prepare('SELECT 1 FROM known_updates WHERE id=?').get(Number(updateId))) return;
+  const chat = body.telegramReply?.chat ?? body.telegramChat;
+  const group = body.telegramReply?.group ?? job.thread.startsWith('tg-group-');
+  if (!chat || job.thread !== (group ? 'tg-group-' + chat : 'tg-' + job.user)) return;
+  if (group && telegramGroupAllowed(env, chat)) return { chat, telegramGroup: true };
+  if (!group && accounts && destination(accounts, job.user, 'telegram') === chat)
+    return { chat, telegramOwner: job.user };
+}
+
 function claimDelivery(store, env, accounts) {
   const db = store.db;
   const d = db
@@ -952,7 +966,7 @@ function claimDelivery(store, env, accounts) {
        ((?=1 AND channel IN (SELECT value FROM json_each(?))) OR
         (channel='telegram' AND json_extract(body,'$.chat') IS NOT NULL
         AND json_extract(body,'$.caseId') IS NULL AND json_extract(body,'$.owner') IS NULL
-        AND COALESCE(json_extract(body,'$.proactive'),0)=0))
+        AND COALESCE(json_extract(body,'$.proactive'),0)=0 AND COALESCE(json_extract(body,'$.broadcast'),0)=0))
        AND (json_extract(body,'$.after') IS NULL OR EXISTS(SELECT 1 FROM deliveries prev WHERE prev.id=json_extract(d.body,'$.after') AND prev.state='delivered'))
        ORDER BY rowid LIMIT 1`,
     )
@@ -962,18 +976,22 @@ function claimDelivery(store, env, accounts) {
   const isTelegram = d.channel === 'telegram';
   const recipientKey = isTelegram ? 'chat' : 'emailTo';
   const cancel = () => db.prepare("UPDATE deliveries SET state='cancelled' WHERE id=?").run(d.id);
+  const review = () => db.prepare("UPDATE deliveries SET state='review' WHERE id=?").run(d.id);
+  const directReply = isTelegram && b.chat && !b.proactive && !b.broadcast && !b.caseId && !b.owner;
+  if (directReply) {
+    if (!b.telegramGroup && !b.telegramOwner) return void review();
+    if (b.telegramGroup && !telegramGroupAllowed(env, b.chat)) return void cancel();
+    if (b.telegramOwner && (!accounts || destination(accounts, b.telegramOwner, 'telegram') !== b.chat))
+      return void cancel();
+  }
   const caseOwner = b.caseId && db.prepare("SELECT json_extract(body,'$.owner') owner FROM cases WHERE id=?").get(b.caseId)?.owner;
-  const named = b.caseId && b.broadcast !== true &&
-    (b.recipientLogin || b.awaitingOwner || env.SIGNAL_OWNER_LOGIN || env.SOURCE_ARCHIVE_SHA256);
-  const login = named ? String(b.recipientLogin || env.SIGNAL_OWNER_LOGIN || '').trim() : '';
-  const assigned = login && accounts?.prepare(
-    "SELECT id FROM users WHERE login=? COLLATE NOCASE AND space='team' AND role!='judge'",
-  ).get(login)?.id;
-  const owner = caseOwner || b.owner || b.recipientOwner || assigned;
+  const named = b.recipientLogin || b.awaitingOwner;
+  const owner = b.owner || b.recipientOwner || (b.recipientLogin && notificationOwner(accounts, b.recipientLogin)) || caseOwner;
+  if (b.broadcast && caseOwner && !b.owner && !b.recipientOwner) return void review();
+  if (caseOwner && owner !== caseOwner) return void cancel();
+  if (b.caseId && !b.broadcast && !owner && !named && !b[recipientKey]) return void review();
   const postpone = () => {
-    const pending = owner ? { ...b, recipientOwner: owner }
-      : login ? { ...b, recipientLogin: login }
-      : named ? { ...b, awaitingOwner: true } : b;
+    const pending = owner ? { ...b, recipientOwner: owner } : b;
     db.prepare('UPDATE deliveries SET next=?,body=? WHERE id=?')
       .run(Date.now() + 60000, JSON.stringify(pending), d.id);
   };
@@ -981,7 +999,7 @@ function claimDelivery(store, env, accounts) {
     "SELECT id FROM users WHERE id=? AND space='team' AND role!='judge'",
   ).get(owner) && destination(accounts, owner, d.channel);
   if (b.addressHash && (!personal || digest(personal) !== b.addressHash)) return void cancel();
-  if ((b.recipientOwner && owner !== b.recipientOwner) || (b.owner && owner !== b.owner)) return void cancel();
+  if (b.recipientOwner && owner !== b.recipientOwner) return void cancel();
   if ((owner || named) && b[recipientKey] && !b.recipientOwner && b[recipientKey] !== personal) return void cancel();
   if ((owner || named) && !personal) return void postpone();
   const targets = isTelegram
@@ -1008,7 +1026,8 @@ function claimDelivery(store, env, accounts) {
     return;
   }
   const [recipient] = unmatched;
-  const addressedBody = { ...b, [recipientKey]: recipient, ...(owner && { recipientOwner: owner }) };
+  const addressedBody = { ...b, [recipientKey]: recipient, ...(owner && { recipientOwner: owner }),
+    ...(isTelegram && !directReply && { proactive: true }) };
   db.prepare("UPDATE deliveries SET state='sending',body=?,attempts=attempts+1 WHERE id=?")
     .run(JSON.stringify(addressedBody),d.id);
   return {d,b,recipient,recipientKey};

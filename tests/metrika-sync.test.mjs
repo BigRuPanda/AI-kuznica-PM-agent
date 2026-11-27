@@ -245,10 +245,10 @@ test('SMTP-only notifications skip old queued Telegram notices and allow direct 
   initEvidence(s.db);
   const insert=s.db.prepare("INSERT INTO deliveries(id,channel,state,body) VALUES(?,?,'queued',?)");
   insert.run('old-telegram','telegram',JSON.stringify({chat:'33',text:'Старый сигнал',proactive:true}));
-  insert.run('direct-reply','telegram',JSON.stringify({chat:'44',text:'Ответ в личку'}));
+  insert.run('direct-reply','telegram',JSON.stringify({chat:'-44',text:'Ответ в группу',telegramGroup:true}));
   insert.run('mail','smtp',JSON.stringify({text:'Новый сигнал'}));
   const channels={NOTIFICATION_CHANNELS:'smtp',NOTIFICATIONS_ENABLED:'true',TELEGRAM_BOT_TOKEN:'fixture',
-    SMTP_HOST:'localhost',SMTP_FROM:'sender@example.invalid',SMTP_TO:'observer@example.invalid'};
+    TELEGRAM_CHAT_IDS:'-44',SMTP_HOST:'localhost',SMTP_FROM:'sender@example.invalid',SMTP_TO:'observer@example.invalid'};
   const telegramChats=[],emails=[];
   for (let attempt=0;attempt<3;attempt++) {
     await deliver(s,channels,async (_url,init)=>{
@@ -256,7 +256,7 @@ test('SMTP-only notifications skip old queued Telegram notices and allow direct 
       return Response.json({result:{message_id:1}});
     },async (text,config)=>emails.push([text,config.SMTP_TO]));
   }
-  assert.deepEqual(telegramChats,['44']);
+  assert.deepEqual(telegramChats,['-44']);
   assert.deepEqual(emails,[['Новый сигнал','observer@example.invalid']]);
   assert.deepEqual(s.db.prepare('SELECT state FROM deliveries ORDER BY rowid').all().map(row=>row.state),[
     'queued','delivered','delivered',
