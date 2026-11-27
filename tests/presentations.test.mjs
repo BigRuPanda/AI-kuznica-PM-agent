@@ -8,9 +8,11 @@ import {createTeamApp} from '../server/team-http.mjs';
 import {digest,importDocs} from '../server/evidence.mjs';
 import {listPresentations,readPresentation,requestsPresentation,startPresentation,workPresentations} from '../server/presentations.mjs';
 import {addUserMessage,bindReleaseThreadCase,createThread,dashboard,enqueue,messages,openCaseThread,openReleaseThread,resumeJob,workJobs} from '../server/workbench.mjs';
-import {assembleDeck,composeSlide} from '../server/presentation-layout.mjs';
+import {composeSlide} from '../server/presentation-layout.mjs';
+import {assembleDeck} from '../server/presentation-story.mjs';
 import {casePresentationInput} from '../server/presentation-case.mjs';
 import {exportPptx,presentationHtml} from '../server/presentation-export.mjs';
+import {grant} from '../server/chart-ranges.mjs';
 
 const author={id:'pm',name:'Продакт'},peer={id:'peer',name:'Коллега'};
 const local={LLM_BACKEND:'api',LLM_BASE_URL:'http://127.0.0.1:8080/v1',LLM_MODEL:'qwen',LLM_DATA_MODE:'analysis'};
@@ -53,12 +55,13 @@ test('case deck freezes its evidence, checks access on every version and resumes
   db.prepare("UPDATE cases SET title='Другая версия' WHERE id='sample'").run();
   let calls=0;
   await workPresentations(store,local,async()=>{
-    calls++;return Response.json({choices:[{message:{content:'{"slides":[1,0]}'}}]});
+    calls++;return Response.json({choices:[{message:{content:'{"slides":[0]}'}}]});
   });
   const {deck,notice}=readPresentation(db,author,id);
   assert.equal(calls,1);assert.equal(notice,null);assert.equal(deck.title,'Оформление заказа');
   assert.ok(deck.slides.some(s=>s.kind==='quote' && s.body.includes('гарантия')));
-  assert.equal(deck.slides.filter(s=>s.kind==='log').flatMap(s=>s.rows).filter(r=>r[2].includes('Респондент назвал')).length,1);
+  assert.equal(deck.slides.filter(s=>s.kind==='quote').length,1);
+  assert.equal(deck.slides.some(s=>s.kind==='log'),false);
   assert.ok(presentationHtml(deck,'http://localhost').includes('#knowledge-source/'+version));
   const buffer=await exportPptx(deck,'http://localhost');
   assert.equal(buffer.subarray(0,2).toString(),'PK');
@@ -152,23 +155,122 @@ test('a slide cover keeps a percentage together at the configured title size',()
   assert.match(presentationHtml(deck,'http://localhost'),/48\s% за 2026-11-03/u);
 });
 
-test('empty and long cases preserve every check and export without a model',async t=>{
+test('empty and long cases produce a compact deck and link to the complete case without a model',async t=>{
   const store=await fixture(t), db=store.db;
   db.prepare("UPDATE cases SET body='{}' WHERE id='sample'").run();
   const first=startPresentation(store,author,'sample','empty-case');
   await workPresentations(store,{...local,DATA_PROFILE:'local'},()=>assert.fail('local profile must never call a model'));
-  assert.deepEqual(readPresentation(db,peer,first.id).deck.slides.map(s=>s.kind),['cover','decision','sources']);
+  assert.deepEqual(readPresentation(db,peer,first.id).deck.slides.map(s=>s.kind),['cover','decision']);
   const long=Array(180).fill('Проверили оформление заказа.').join(' ')+' Конечная строка.';
   db.prepare("UPDATE cases SET state='Завершено',body=? WHERE id='sample'").run(JSON.stringify({owner:author.id,notes:[{text:long,created:Date.now()}]}));
   const next=startPresentation(store,author,'sample','long-case');
   await workPresentations(store,local,async()=>{throw new Error('offline');});
   const result=readPresentation(db,author,next.id);
   assert.match(result.notice,/шаблону/);
-  assert.ok(result.deck.slides.filter(s=>s.kind==='log').length>1);
-  assert.ok(result.deck.slides.filter(s=>s.kind==='log').at(-1).rows.at(-1)[2].includes('Конечная строка'));
+  assert.ok(result.deck.slides.length<=8);
+  assert.equal(result.deck.slides.some(s=>s.kind==='log' || s.continuation),false);
+  assert.match(presentationHtml(result.deck,'http://localhost'),/href="http:\/\/localhost\/#case\/sample"/u);
+  const snapshot=JSON.parse(db.prepare('SELECT body FROM presentation_inputs WHERE id=?').get(next.id).body);
+  assert.ok(snapshot.checks.some(check=>check.result.endsWith('Конечная строка.')));
   assert.throws(()=>readPresentation(db,peer,first.id),/недоступен/);
   for(const [i] of result.deck.slides.entries())
     for(const o of composeSlide(result.deck,i)) assert.ok(o.y+o.h<=720,o.type+' overflows slide '+i);
+});
+
+test('new decks bound the release, table, checks and sources on distinct slides',()=>{
+  const caseRef={label:'Карточка разбора',url:'#case/sample'};
+  const docs=Array.from({length:45},(_,i)=>({label:'Источник '+i,url:'#material/m'+i}));
+  const headline='Покупатели чаще завершали заказ после того, как форма стала сразу показывать условия доставки и способы оплаты';
+  const input={caseId:'sample',title:'Разбор оформления заказа',product:'Интернет-магазин',created:Date.now(),state:'Исследуем',
+    cover:{kind:'cover',title:headline,keyValue:'48%',keyLabel:'Доля завершённых заказов',refs:[caseRef]},
+    decision:{kind:'decision',title:'Следующий шаг',body:'Сопоставить результат с контрольной группой',refs:[caseRef]},
+    candidates:[
+      {kind:'chart',title:'Доля завершённых заказов',unit:'%',series:[{name:'Все клиенты',points:[
+        {label:'2026-11-01',value:32},{label:'2026-11-08',value:48},
+      ]}],refs:[docs[0]]},
+      {kind:'table',title:'По сегментам',columns:['Сегмент','Период','Значение'],
+        rows:docs.map((_,i)=>['Сегмент '+i,'Ноябрь',String(48+i)]),refs:[docs[1]]},
+      ...docs.slice(2,26).map((ref,i)=>({kind:'quote',title:'Интервью '+i,body:'Респондент описал проблему '+i,refs:[ref]})),
+      {kind:'flow',title:'Связанный релиз',steps:[
+        {label:'Релиз',text:'R-001 · Изменили форму заказа',refs:[docs[26]]},
+        ...docs.slice(27,44).map((ref,i)=>({label:'Задача',text:'Задача '+i,refs:[ref]})),
+        {label:'Проверка эффекта',text:'Контрольное окно зафиксировано',refs:[caseRef]},
+      ],refs:docs.slice(26,44)},
+    ],
+    checks:docs.map((_,i)=>({date:'2026-11-28',stage:'Выполненная проверка',result:'Проверка '+i,refs:[caseRef]})),
+  };
+  const deck=assembleDeck(input,input.candidates.map((_,index)=>({index})));
+  assert.equal(deck.slides.length,8);
+  assert.equal(deck.slides.filter(slide=>slide.kind==='quote').length,1);
+  assert.equal(deck.slides.filter(slide=>slide.kind==='sources').length,1);
+  assert.ok(!deck.slides.some(slide=>slide.continuation || slide.kind==='log'));
+  const table=deck.slides.find(slide=>slide.kind==='table');
+  assert.ok(table.rows.length<=5);
+  assert.deepEqual(table.rows[0],['Сегмент 0','Ноябрь','48']);
+  const flows=deck.slides.filter(slide=>slide.kind==='flow');
+  assert.equal(flows.length,2);
+  const release=flows.find(slide=>slide.steps.some(step=>step.label==='Релиз'));
+  assert.ok(release.steps.length<=3 && release.steps.some(step=>step.label==='Проверка эффекта'));
+  const html=presentationHtml(deck,'http://localhost');
+  assert.match(html,/#material\/m0"/u);
+  assert.match(html,/#case\/sample"/u);
+  assert.doesNotMatch(html,/#material\/m25"/u);
+  assert.match(html,/2026-11-01.*2026-11-08/u);
+  assert.ok(composeSlide(deck,0).some(object=>object.lines?.join(' ')===headline));
+  assert.equal(composeSlide(deck,0)[0].color,composeSlide(deck,6)[0].color);
+  assert.notEqual(composeSlide(deck,0)[0].color,composeSlide(deck,1)[0].color);
+});
+
+test('a shortened period comparison retains matching series on both sides',()=>{
+  const ref={label:'Сравнение периодов',url:'#range/weekly'};
+  const rows=[
+    ['Март','A','32'],['Март','B','14'],['Март','C','33'],['Март','D','31'],['Март','E','42'],
+    ['Апрель','A','48'],['Апрель','B','15'],['Апрель','C','37'],['Апрель','D','40'],['Апрель','E','47'],
+  ];
+  const deck=assembleDeck({
+    cover:{kind:'cover',title:'Два периода',refs:[]},decision:{kind:'decision',refs:[]},checks:[],
+    candidates:[{kind:'table',title:'Сравнение периодов',columns:['Период','Ряд','Значение'],rows,refs:[ref]}],
+  },[]);
+  const comparison=deck.slides.find(slide=>slide.kind==='table');
+  assert.deepEqual(comparison.rows,[rows[0],rows[1],rows[5],rows[6]]);
+  assert.equal(comparison.totalRows,10);
+  assert.deepEqual(comparison.refs,[ref]);
+});
+
+test('a repeated conclusion cites the latest saved range on the cover and finding',async t=>{
+  const {db}=await fixture(t);
+  const notes=[
+    {text:'Завершение заказа выросло.',rangeId:'first',created:1},
+    {text:'Контрольный показатель стабилен.',rangeId:'control',created:2},
+    {text:'Завершение заказа выросло.',rangeId:'latest',created:3},
+  ];
+  for(const note of notes) grant(db,note.rangeId,'case','sample');
+  db.prepare("UPDATE cases SET body=? WHERE id='sample'").run(JSON.stringify({notes}));
+  const deck=assembleDeck(casePresentationInput(db,author,'sample',Date.now()),[]);
+  for(const slide of [deck.slides[0],deck.slides.find(slide=>slide.kind==='finding')])
+    assert.deepEqual(slide.refs.filter(ref=>ref.url.startsWith('#range/')).map(ref=>ref.url),['#range/latest']);
+});
+
+test('the release slide uses the deployed release and its linked task result',async t=>{
+  const store=await fixture(t), {db}=store;
+  importDocs(store,[{file:'Журнал.xlsx',facts:[
+    {kind:'releases',loc:'Релизы!A2',row:{release_id:'R-001',release_date:'2026-11-02',description:'Исходный релиз'}},
+    {kind:'releases',loc:'Релизы!A3',row:{release_id:'R-002',release_date:'2026-11-09',description:'Исправление',related_task_ids:'42'}},
+    {kind:'backlog',loc:'Задачи!A2',row:{task_id:'42',title:'Исправить форму',release_id:'R-002'}},
+  ]}],{notify:false});
+  db.prepare("UPDATE cases SET body=? WHERE id='sample'").run(JSON.stringify({
+    release:'R-001',watch:{releaseId:'R-002',deployed:'2026-11-09',metric:'Оформление заказа',taskId:'42'},
+  }));
+  const insert=db.prepare('INSERT INTO redmine_results VALUES(?,?,?,?)');
+  insert.run('unrelated','sample',JSON.stringify({issue:99,status:'Закрыто',title:'Уточнить каталог'}),1);
+  insert.run('previous','sample',JSON.stringify({issue:42,status:'В работе',title:'Исправить форму'}),2);
+  insert.run('related','sample',JSON.stringify({issue:42,status:'Закрыто',title:'Исправить форму'}),3);
+  const deck=assembleDeck(casePresentationInput(db,author,'sample',Date.now()),[]);
+  const release=deck.slides.find(slide=>slide.slot==='release');
+  assert.match(release.steps[0].text,/R-002/u);
+  assert.match(release.steps[1].text,/#42 · Закрыто/u);
+  assert.ok(!release.steps.some(step=>step.text.includes('#99')));
+  assert.ok(deck.slides.some(slide=>slide.slot==='checks' && slide.steps?.some(step=>step.text.includes('#99'))));
 });
 
 test('a chat request freezes the case before the worker runs and can repair an unavailable version',async t=>{
@@ -242,7 +344,8 @@ test('an upgraded donor workspace preserves UUID links and reports a lost origin
       .run(thread,JSON.stringify({...result,inReplyTo:questionSeq,jobId:job}),now);
     if(state!=='lost') db.prepare('INSERT INTO presentations(id,case_id,author,personal,request,created,status,input,deck) VALUES(?,?,?,?,?,?,?,?,?)')
       .run(id,'sample',user.id,1,'chat-'+job,now,state,state==='ready'?null:JSON.stringify(snapshot),
-        state==='ready'?JSON.stringify(assembleDeck(snapshot,[])):null);
+        state==='ready'?JSON.stringify({product:snapshot.product,title:snapshot.title,created:snapshot.created,
+          state:snapshot.state,slides:[snapshot.cover,snapshot.decision]}):null);
     return {job,id};
   }
   const existing=donorJob('ready'), recoverable=donorJob('failed'), waiting=donorJob('queued'), lost=donorJob('lost');

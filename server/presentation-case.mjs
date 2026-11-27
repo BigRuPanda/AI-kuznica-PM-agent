@@ -15,6 +15,23 @@ const allowed=(db,user,id,shared=false)=>{try {access(db,user,id,shared);return 
 const archiveRef = r => source(r.file + ' · ' + r.loc, '#knowledge-source/' + r.version + '/' + encodeURIComponent(r.loc));
 const salesRef = r => source(r.source,'#knowledge-source/'+r.version+'/'+encodeURIComponent(r.source.split(' · ').at(-1)));
 const titleOf = (s, fallback) => clean(s).split(/\n/u)[0] || fallback;
+const taskKey = value => clean(value).replace(/^#/u,'').toUpperCase();
+
+function observationSources(db,observation,product,control) {
+  if(observation.observed) {
+    return [...observation.observed.sources,...(observation.control?.observed?.sources || [])].map(archiveRef);
+  }
+  if(observation.sample) {
+    const lookup=db.prepare("SELECT file,loc,version FROM facts WHERE version=? AND kind IN ('sales','metrics')");
+    return [observation.sample,observation.peer].filter(Boolean).flatMap(window=>{
+      const names=new Set(window.sources);
+      return window.versions.flatMap(version=>lookup.all(version))
+        .filter(row=>names.has(row.file+' · '+row.loc)).map(archiveRef);
+    });
+  }
+  return listSales(db).filter(row=>(row.product===product || row.product===control) && !row.partial &&
+    row.week>=observation.start && row.week<=observation.end).map(salesRef);
+}
 
 // Collect a coherent version while the caller holds its SQLite transaction.
 export function casePresentationInput(db, user, caseId, created) {
@@ -37,7 +54,7 @@ export function casePresentationInput(db, user, caseId, created) {
   }
   const signal=b.signal, plan=b.plan || {}, watch=b.watch;
   const observed=watch ? effect(db,c) : null;
-  let headline='', keyValue='', keyLabel='', leadRefs=[card];
+  let headline='', keyValue='', keyLabel='', keyUnit='', keyPeriod='', leadRefs=[card];
   const withdrawn=signal?.status==='withdrawn';
   if(withdrawn) {
     headline='Сигнал отозван после пересчёта';
@@ -45,58 +62,63 @@ export function casePresentationInput(db, user, caseId, created) {
   }
   if (signal?.metric) {
     const rows=[...(signal.evidence?.baseline || []),signal.evidence?.latest].filter(Boolean);
-    const refs=rows.flatMap(week=>(week.rows || []).filter(r=>r.version && r.source).map(salesRef));
+    const rowRefs=rows.map(week=>(week.rows || []).filter(r=>r.version && r.source).map(salesRef));
+    const refs=rowRefs.flat();
     if(!withdrawn) {
-      if(refs.length) leadRefs=refs;
+      if(refs.length) leadRefs=unique([...(rowRefs.at(-1) || []),...refs]);
       keyLabel=signal.title || signal.metric;
       keyValue=Number.isFinite(signal.change) ? fmt(signal.change)+' '+(signal.changeUnit || '') : '';
       headline=keyValue ? keyLabel+' · изменение '+keyValue : keyLabel;
       check(signal.week,'Исходный сигнал',headline,leadRefs);
     }
     if(rows.length && (!withdrawn || refs.length)) candidate({kind:'table',
+      priority:90,required:withdrawn,
       title:withdrawn?'Данные первоначального сигнала':'Наблюдения по сигналу',
-      columns:['Начало недели','Числитель','Знаменатель'],rows:rows.map(r=>[r.week,fmt(r.n),fmt(r.d)]),refs:refs.length?refs:[card]});
+      columns:['Начало недели','Числитель','Знаменатель'],rows:rows.map(r=>[r.week,fmt(r.n),fmt(r.d)]),rowRefs,refs:refs.length?refs:[card]});
   } else if (signal) {
     const history=listSales(db).filter(r=>r.product===c.product && !r.partial && r.week<=signal.week);
     const rows=signal.rule==='relative' ? history.slice(-16) : history.filter(r=>r.week>=signal.start);
     const refs=rows.map(salesRef);
-    if (refs.length) leadRefs=refs;
+    if (refs.length) leadRefs=unique([refs.at(-1),...refs]);
     const relative=signal.rule==='relative' && Number.isFinite(signal.change);
     if(withdrawn) {
       const last=rows.find(r=>r.week===signal.week);
       if(last) {
         keyValue=fmt(last.value);
         keyLabel='индекс за '+last.week+' после пересчёта';
+        keyUnit='п. индекса';
         check(last.week,'Пересчёт сигнала','Индекс самостоятельных заказов составил '+keyValue,[salesRef(last)]);
       }
       const original=(signal.history || []).filter(r=>r.version && r.source && Number.isFinite(r.value));
       if(original.length) {
         const threshold=signal.rule==='absolute' && Number.isFinite(signal.threshold) ? ' · порог '+fmt(signal.threshold) : '';
-        candidate({kind:'table',title:'Данные первоначального сигнала'+threshold,columns:['Начало недели','Индекс'],
-          rows:original.map(r=>[r.week,fmt(r.value)]),refs:original.map(salesRef)});
+        candidate({kind:'table',priority:100,required:true,title:'Данные первоначального сигнала'+threshold,columns:['Начало недели','Индекс'],
+          rows:original.map(r=>[r.week,fmt(r.value)]),refs:original.map(salesRef),rowRefs:original.map(r=>[salesRef(r)])});
       }
     } else {
       keyValue=relative ? fmt(signal.change)+'%' : Number.isFinite(signal.value) ? fmt(signal.value) : '';
       keyLabel=relative ? 'изменение индекса заказов' : 'индекс самостоятельных заказов';
+      keyUnit=relative?'':'п. индекса';
       headline=relative ? 'Средний индекс заказов за четыре недели '+(signal.change<0?'снизился':'вырос')+' на '+fmt(Math.abs(signal.change))+'%' :
         'Недельный индекс самостоятельных заказов составил '+keyValue;
       check(signal.week,'Исходный сигнал',headline,leadRefs);
     }
-    if (rows.length) candidate({kind:'chart',
+    if (rows.length) candidate({kind:'chart',priority:80,required:withdrawn,
       title:withdrawn?'Индекс самостоятельных заказов после пересчёта':'Как менялся индекс самостоятельных заказов',unit:'пункты индекса',
       series:[{name:c.product,points:rows.map(r=>({label:r.week,value:r.partial ? null : r.value}))}],refs:leadRefs});
     if(relative && rows.length===16 && Date.parse(rows.at(-1).week)-Date.parse(rows[0].week)===15*7*86400000) {
       const groups=[rows.slice(0,12),rows.slice(12)];
-      candidate({kind:'table',title:'Четыре недели в сравнении с предыдущими двенадцатью',columns:['Окно','Первые дни недель','Средний индекс'],
+      candidate({kind:'table',priority:80,title:'Четыре недели в сравнении с предыдущими двенадцатью',columns:['Окно','Первые дни недель','Средний индекс'],
         rows:groups.map((g,i)=>[i?'Наблюдение':'База',g[0].week+' — '+g.at(-1).week,fmt(g.reduce((sum,r)=>sum+r.value,0)/g.length)]),refs:leadRefs});
     }
   }
   if (plan.hypothesis) {
     check(null,'Исходная гипотеза',plan.hypothesis);
-    candidate({kind:'table',title:'Как проверяем гипотезу',columns:['Условие проверки','Что зафиксировано'],
+    candidate({kind:'table',slot:'checks',title:'План проверки гипотезы',columns:['Условие проверки','Что зафиксировано'],
       rows:[['Гипотеза',plan.hypothesis],['Показатель',plan.metric],['База',plan.baseline],['Контроль',plan.control],['Критерий успеха',plan.success]].filter(r=>r[1])});
   }
   const notes=b.notes || [];
+  let latestNoteRefs=[card];
   for (const n of notes) {
     const refs=[card];
     if(n.rangeId && allowed(db,user,n.rangeId)) {
@@ -104,11 +126,13 @@ export function casePresentationInput(db, user, caseId, created) {
       if(!allowed(db,user,n.rangeId,true)) personal=true;
     }
     check(n.created,'Сохранённый вывод',n.text,refs);
+    latestNoteRefs=refs;
   }
   if (notes.length) {
-    candidate({kind:'finding',title:'Вывод продакта',body:notes.at(-1).text,refs:checks.findLast(r=>r.stage==='Сохранённый вывод')?.refs});
+    candidate({kind:'finding',priority:80,title:'Вывод продакта',body:clean(notes.at(-1).text),
+      refs:latestNoteRefs});
   }
-  let publishedConclusion='';
+  let publishedConclusion='',publishedRefs=[];
   for(const row of db.prepare('SELECT body,created FROM published WHERE case_id=? ORDER BY created').all(c.id)) {
     const publication=JSON.parse(row.body);
     const refs=publication.rangeId ? [source('Опубликованный период','#range/'+publication.rangeId),card] :
@@ -116,30 +140,55 @@ export function casePresentationInput(db, user, caseId, created) {
     check(row.created,'Публикация в команду',publication.conclusion || 'Опубликованы материалы разбора',refs);
     if(publication.conclusion) {
       publishedConclusion=publication.conclusion;
-      candidate({kind:'finding',title:'Вывод, переданный команде',body:publishedConclusion,refs});
+      publishedRefs=refs;
     }
   }
+  if(publishedConclusion) candidate({kind:'finding',priority:90,title:'Вывод, переданный команде',body:clean(publishedConclusion),refs:publishedRefs});
   const releases=facts(db,'releases');
-  const release=releases.find(r=>r.data.release_id===(b.release || watch?.releaseId));
-  const steps=[];
+  const watchReleaseId=observed?.rollout?.id || watch?.releaseId;
+  const releaseId=watchReleaseId || b.release;
+  const release=releases.find(r=>r.data.release_id===releaseId);
+  const steps=[], checkSteps=[], releaseTaskIds=new Set();
   if (release) {
     const r=release.data, ref=archiveRef(release);
     const releaseText=[r.release_id,r.release_date,r.description].filter(Boolean).join(' · ');
     check(r.release_date,'Релиз',releaseText,[ref]);
     steps.push({label:'Релиз',text:releaseText,refs:[ref]});
-    const ids=String(r.related_task_ids || '').split(/[,;]/).map(v=>v.trim());
-    for (const task of facts(db,'backlog').filter(t=>ids.includes(t.data.task_id) || String(t.data.release_id || '').split(/[,;]/).some(v=>v.trim()===r.release_id))) {
-      const text=task.data.task_id+' · '+task.data.title, ref=archiveRef(task);
-      check(task.data.closed_date || task.data.created_date,'Связанная задача',text,[ref]);
-      steps.push({label:'Задача',text,refs:[ref]});
+    for(const id of String(r.related_task_ids || '').split(/[,;]/u).map(taskKey).filter(Boolean)) releaseTaskIds.add(id);
+    for (const task of facts(db,'backlog').filter(t=>releaseTaskIds.has(taskKey(t.data.task_id)) ||
+      String(t.data.release_id || '').split(/[,;]/).some(v=>v.trim()===r.release_id))) {
+      const text=task.data.task_id+' · '+task.data.title, taskRef=archiveRef(task);
+      releaseTaskIds.add(taskKey(task.data.task_id));
+      check(task.data.closed_date || task.data.created_date,'Связанная задача',text,[taskRef]);
+      steps.push({label:'Задача',text,refs:[taskRef]});
     }
   }
+  const linkedWatch=release && watch && (watchReleaseId===releaseId ||
+    releaseTaskIds.has(taskKey(watch.taskId)) || watch.deployed===release.data.release_date);
+  let observationRefs=[];
   if (watch) {
+    const watchSteps=linkedWatch ? steps : checkSteps;
     const text=[watch.metric || watch.plan?.title,watch.success || plan.success,observed?.end || observed?.checkAfter].filter(Boolean).join(' · ');
-    if(text) { steps.push({label:'Проверка эффекта',text,refs:[card]}); check(watch.deployed,'Проверка эффекта',text); }
-    if(Number.isFinite(observed?.actual)) check(observed.end,'Измеренный эффект',fmt(observed.actual)+' '+(observed.unit || '%'));
-    if(watch.taskId && !steps.some(s=>s.label==='Задача' && s.text.split(' · ')[0]===watch.taskId))
-      steps.push({label:'Задача',text:watch.taskId,refs:[card]});
+    if(text) { watchSteps.push({label:'Проверка эффекта',text,refs:[card]}); check(watch.deployed,'Проверка эффекта',text); }
+    if(Number.isFinite(observed?.actual)) {
+      const unit=observed.unit || 'п. индекса', periodStart=observed.start || observed.observed?.from;
+      const periodEnd=observed.end || observed.observed?.through;
+      const period=[periodStart,periodEnd].filter(Boolean).join(' — ');
+      observationRefs=unique([...observationSources(db,observed,c.product,watch.control),card]);
+      const value=fmt(observed.actual);
+      const title='Показатель после выкладки';
+      check(periodEnd,title,value+' '+unit,observationRefs);
+      candidate({kind:'kpi',priority:100,title,value,unit,period,body:observed.state,refs:observationRefs});
+      if(!withdrawn) {
+        keyValue=value;keyUnit=unit;keyLabel=title;keyPeriod=period;leadRefs=observationRefs;
+        headline=observed.state;
+      }
+    }
+    if(watch.taskId) {
+      const key=taskKey(watch.taskId);
+      if(!linkedWatch || !releaseTaskIds.has(key)) watchSteps.push({label:'Задача',text:watch.taskId,refs:[card]});
+      if(linkedWatch) releaseTaskIds.add(key);
+    }
   }
   const trackerResults=db.prepare("SELECT 1 FROM sqlite_schema WHERE type='table' AND name='redmine_results'").get()
     ? db.prepare('SELECT body,created FROM redmine_results WHERE case_id=? ORDER BY created').all(c.id) : [];
@@ -149,21 +198,29 @@ export function casePresentationInput(db, user, caseId, created) {
     if(t.personalOwner) personal=true;
     const text=['#'+t.issue,t.status,t.title,t.closing_note?.text].filter(Boolean).join(' · ');
     check(row.created,'Результат задачи',text,[card]);
-    steps.push({label:'Результат задачи',text,refs:[card]});
+    const step={label:'Результат задачи',text,refs:[card]};
+    if(releaseTaskIds.has(taskKey(t.issue))) {
+      const earlier=steps.findIndex(s=>s.label===step.label && s.text.split(' · ')[0]==='#'+t.issue);
+      if(earlier>=0) steps[earlier]=step;
+      else steps.push(step);
+    } else checkSteps.push(step);
   }
-  if(steps.length) candidate({kind:'flow',title:'От изменения продукта до проверки результата',steps,refs:steps.flatMap(s=>s.refs)});
+  if(steps.length) candidate({kind:'flow',slot:'release',title:linkedWatch?'От релиза до проверки результата':'Связанный релиз',
+    steps,refs:steps.flatMap(s=>s.refs)});
+  if(checkSteps.length) candidate({kind:'flow',slot:'checks',priority:50,title:'Что зафиксировали по разбору',
+    steps:checkSteps,refs:checkSteps.flatMap(s=>s.refs)});
 
-  function plot(title,unit,lines,ref) {
+  function plot(title,unit,lines,ref,priority=30) {
     const series=lines.map(l=>({name:clean(l.key),points:(l.points || []).map(p=>({label:date(p.at),value:Number.isFinite(p.value) && !p.partial ? p.value : null}))}));
-    if(series.some(s=>s.points.some(p=>p.value!==null))) candidate({kind:'chart',title,unit,series,refs:[ref]});
+    if(series.some(s=>s.points.some(p=>p.value!==null))) candidate({kind:'chart',priority,title,unit,series,refs:[ref]});
   }
   if(b.origin?.calc && allowed(db,user,b.origin.calc)) {
     if(!allowed(db,user,b.origin.calc,true)) personal=true;
     const snap=readSnapshot(db,user,b.origin.calc);
     const ref=source('Сохранённый расчёт','#snapshot/'+b.origin.calc);
     check(null,'Исходный расчёт',snap.title || c.title,[ref]);
-    if(snap.points) plot(snap.title || 'Динамика показателя',snap.unit || '',[{key:snap.segment || c.product,points:snap.points.map(p=>({...p,at:p.date}))}],ref);
-    else if(snap.summary) plot('Индекс самостоятельных заказов','пункты индекса',snap.summary.map(s=>({key:s.product,points:s.rows.map(r=>({...r,at:r.week}))})),ref);
+    if(snap.points) plot(snap.title || 'Динамика показателя',snap.unit || '',[{key:snap.segment || c.product,points:snap.points.map(p=>({...p,at:p.date}))}],ref,70);
+    else if(snap.summary) plot('Индекс самостоятельных заказов','пункты индекса',snap.summary.map(s=>({key:s.product,points:s.rows.map(r=>({...r,at:r.week}))})),ref,70);
   }
   function material(id,when) {
     if(seenMaterials.has(id) || !allowed(db,user,id)) return;
@@ -174,7 +231,7 @@ export function casePresentationInput(db, user, caseId, created) {
     for(const text of m.checks || []) check(when,'Выполненная проверка',text,[ref]);
     for(const text of m.findings || []) {
       check(when,'Результат проверки',text,[ref]);
-      candidate({kind:'finding',title:m.title,body:clean(text),refs:[ref]});
+      candidate({kind:'finding',priority:40,title:m.title,body:clean(text),refs:[ref]});
     }
     if(m.plot) plot(m.plot.title || m.title,m.plot.unit || '',m.plot.lines || [],ref);
     for(const s of m.sections || []) {
@@ -183,7 +240,7 @@ export function casePresentationInput(db, user, caseId, created) {
       const rows=s.rows.map(r=>r.map(clean));
       check(when,s.title,rows.map(r=>r.join(' · ')).join('\n'),[ref]);
       const funnel=s.columns.includes('Дошли') && s.columns.includes('Шаг');
-      candidate({kind:funnel?'funnel':'table',title:s.title,columns:s.columns.map(clean),rows,refs:[ref]});
+      candidate({kind:funnel?'funnel':'table',priority:30,title:s.title,columns:s.columns.map(clean),rows,refs:[ref]});
     }
     for(const child of m.children || []) material(child.id,when);
   }
@@ -227,12 +284,12 @@ export function casePresentationInput(db, user, caseId, created) {
       const event=events.find(({row:r})=>r && r.release_date>=first.date && r.release_date<=last.date &&
         String(r.affected_metrics || '').split(/[,;]/).some(m=>m.trim()===first.metric_id));
       const title=label+' · '+first.segment;
-      candidate({kind:'chart',title,unit,style:group.length<=2?'bar':'line',
+      candidate({kind:'chart',priority:20,title,unit,style:group.length<=2?'bar':'line',
         series:[{name:first.product+' · '+first.segment,points:group.map(p=>({label:p.d.date,value:value(p.d)}))}],
         event:event && {date:event.row.release_date,text:event.row.description},refs:[...metricRefs,...(event?[event.ref]:[])]});
-      if(!keyValue) {
+      if(!keyValue && !withdrawn && first.product===c.product) {
         headline=label+' · '+fmt(value(last))+(unit?' '+unit:'')+' за '+last.date;
-        keyValue=fmt(value(last));keyLabel=label;leadRefs=metricRefs;
+        keyValue=fmt(value(last));keyLabel=label;keyUnit=unit;keyPeriod=last.date;leadRefs=unique([metricRefs.at(-1),...metricRefs]);
       }
     }
     for(const m of msg.materials || []) {
@@ -251,7 +308,7 @@ export function casePresentationInput(db, user, caseId, created) {
       if(!allowed(db,user,id,true)) personal=true;
       if(range.periods?.length) {
         const rows=range.periods.flatMap(p=>(p.series || []).map(s=>[date(p.from)+' — '+date(p.to-1),s.key,Number.isFinite(s.value)?fmt(s.value):'Нет наблюдения']));
-        if(rows.length) candidate({kind:'table',title:'Сравнение выбранных периодов',columns:['Период','Ряд','Значение'],rows,refs:[ref]});
+        if(rows.length) candidate({kind:'table',priority:60,title:'Сравнение выбранных периодов',columns:['Период','Ряд','Значение'],rows,refs:[ref]});
       }
     }
     if(!refs.length) continue;
@@ -267,21 +324,26 @@ export function casePresentationInput(db, user, caseId, created) {
   }
   checks.sort((a,b)=>(a.date || '9999').localeCompare(b.date || '9999'));
   const latestNote=notes.at(-1)?.text;
-  const decision=watch ? 'Проверить результат за согласованный период' : c.state==='Завершено' ?
+  const decision=c.state==='Завершено' ?
     (publishedConclusion || 'Разбор завершён. Отдельное решение в карточке не зафиксировано.') :
+    Number.isFinite(observed?.actual) ? observed.state.replace(/[.!?]+$/u,'')+'. Зафиксировать итог проверки.' :
+    watch ? 'Проверить результат за согласованный период' :
     plan.success ? 'Сопоставить результат проверки с критерием успеха.' : withdrawn ?
       'Сверить выводы разбора с пересчитанными данными.' : signal ?
       'Проверить, сохраняется ли изменение в следующем полном периоде, и сопоставить его с событиями продукта.' :
       !checks.length ? 'Собрать исходные наблюдения и сформулировать проверяемую гипотезу.' :
       'Зафиксировать решение по результатам проверки';
   const supporting=candidates.find(s=>s.kind==='finding' || s.kind==='quote');
+  const supportingHeadline=supporting?.kind==='quote' ? 'Интервью · '+supporting.title : supporting?.body;
+  const coverEvidence=publishedConclusion ? publishedRefs : latestNote ? latestNoteRefs : headline ? [] : supporting?.refs;
   const planOnly=plan.hypothesis && checks.every(row=>row.stage==='Исходная гипотеза') && candidates.every(s=>s.kind==='table');
   return {caseId,product:c.product,title:c.title,state:c.state,created,personal,checks,candidates,
-    cover:{kind:'cover',title:titleOf(withdrawn ? headline : publishedConclusion || latestNote || headline || supporting?.body,c.title),
+    cover:{kind:'cover',title:titleOf(withdrawn ? headline : publishedConclusion || latestNote || headline || supportingHeadline,c.title),
       body:planOnly ? 'Гипотеза сформулирована. Результат проверки пока не зафиксирован.' :
         checks.length || candidates.length ? c.title : 'Подтверждённых результатов в разборе пока нет.',
-      keyValue,keyLabel,decision,refs:unique([card,...leadRefs,...(supporting?.refs || [])])},
+      keyValue,keyLabel,keyUnit,keyPeriod,decision,refs:unique([card,...leadRefs,...(withdrawn ? [] : coverEvidence || [])])},
     decision:{kind:'decision',title:c.state==='Завершено'?'Итог разбора':'Следующий шаг',body:decision,
       rows:[['Ответственный',b.responsible],['Критерий успеха',plan.success || watch?.condition],['Контроль',plan.control],
-        ['Проверить',observed?.checkAfter || observed?.end]].filter(r=>r[1]),refs:[card]}};
+        ['Проверить',observed?.checkAfter || observed?.end]].filter(r=>r[1]),
+      refs:unique([card,...(c.state==='Завершено'?publishedRefs:observationRefs)])}};
 }
