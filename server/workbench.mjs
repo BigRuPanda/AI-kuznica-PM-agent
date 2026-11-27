@@ -17,6 +17,8 @@ import {
   digest,
 } from './evidence.mjs';
 import { apiConfigured, providerCall } from './agent.mjs';
+import { webQuestion, webAnswer } from './web-search.mjs';
+import { competitorQuestion, competitorAnswer } from './competitor-chat.mjs';
 import { destination } from './notification-contacts.mjs';
 import { initTracking } from './tracker-workflow.mjs';
 import { mail, telegram } from './connectors.mjs';
@@ -69,6 +71,7 @@ export function initWorkbench(db, env = process.env) {
       'CREATE TABLE IF NOT EXISTS local_issues(key TEXT PRIMARY KEY,title TEXT,description TEXT,priority TEXT,case_id TEXT,updated INTEGER);' +
       'CREATE TABLE IF NOT EXISTS published(id TEXT PRIMARY KEY,case_id TEXT,user TEXT,body TEXT,created INTEGER);' +
       'CREATE TABLE IF NOT EXISTS costs(id INTEGER PRIMARY KEY,job TEXT,model TEXT,elapsed INTEGER,input INTEGER,output INTEGER);' +
+      'CREATE TABLE IF NOT EXISTS competitor_checks(version TEXT,loc TEXT,body TEXT NOT NULL,PRIMARY KEY(version,loc));' +
       'CREATE TABLE IF NOT EXISTS known_updates(id INTEGER PRIMARY KEY);',
   );
   initTracking(db, env);
@@ -494,6 +497,10 @@ export async function answer(store, user, b, env = process.env, send = fetch, jo
   const db = store.db;
   const { scope } = thread(db, user, b.thread);
   const shared = scope === 'group';
+  const typed = typeof b.typedQuestion === 'string' && b.question.endsWith(b.typedQuestion) ? b.typedQuestion : b.question;
+  const query = webQuestion(typed, b.webSearch);
+  if (query !== null) return webAnswer(store, job, query, env, send);
+  if (competitorQuestion(b.question)) return competitorAnswer(store, user, b, env, send, shared);
   const history = recentDialogue(db, b.thread, b.questionSeq);
   if (!b.rangeId && !b.materialIds?.length) {
     const { releaseObservationAnswer } = await import('./release-observation-chat.mjs');
@@ -708,7 +715,7 @@ function briefConclusion(text, findings) {
 }
 
 function completeMaterials(store, user, job, b, result) {
-  if (['daily', 'source-value', 'release-observation'].includes(result.mode)) return result;
+  if (['daily', 'source-value', 'release-observation', 'web', 'competitor-check'].includes(result.mode)) return result;
   if (result.chartChoices) return { ...result, materials: [] };
   const db = store.db;
   const r = JSON.parse(db.prepare('SELECT body FROM job_research WHERE job=?').get(job)?.body || 'null');

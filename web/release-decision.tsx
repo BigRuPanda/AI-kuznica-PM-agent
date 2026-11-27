@@ -24,7 +24,7 @@ type Decision = {
   trend: Trend;
   competitor: Citation & {
     product: string; merchant: string; license: string | null; terms: string | null;
-    competitorPrice: number; storePrice: number; checked: string; match?: string; sku: string | null;
+    competitorPrice: number; storePrice: number; checked: string; match?: string; sku: string | null; url?: string | null;
   } | null;
   customer: Citation & { tags: string; excerpt: string | null } | null;
   backlog: Task | null;
@@ -46,6 +46,45 @@ function Source({ source }: { source: Citation }) {
   return <a className="decision-source" href={'#knowledge-source/' + source.version + '/' + encodeURIComponent(source.loc)}>
     {source.file} · {source.loc}
   </a>;
+}
+
+type OfferCheck = { text: string; url?: string; checkedAt: string; searchRequests: number; searchNote?: string };
+
+function CurrentOffer({ offer }: { offer: NonNullable<Decision['competitor']> }) {
+  const [check, setCheck] = useState<OfferCheck | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  const { version, loc } = offer;
+  const request = useRef(0);
+  useEffect(() => {
+    const id = ++request.current;
+    post<OfferCheck | null>('competitor_check', { version, loc, savedOnly: true })
+      .then(r => { if (request.current === id) setCheck(r); })
+      .catch(e => { if (request.current === id) setError(e.message); });
+    return () => { request.current++; };
+  }, [version, loc]);
+  async function refresh() {
+    const id = ++request.current;
+    setBusy(true);
+    setError('');
+    try {
+      const result = await post<OfferCheck>('competitor_check', { version, loc });
+      if (id === request.current) setCheck(result);
+    } catch (e) {
+      if (id === request.current) setError((e as Error).message);
+    } finally { if (id === request.current) setBusy(false); }
+  }
+  return <div className="offer-check">
+    {offer.url && <a href={offer.url} target="_blank" rel="noreferrer">Карточка из исследования ↗</a>}
+    <button type="button" disabled={busy} onClick={() => void refresh()}>{busy ? 'Проверяем предложение…' : 'Проверить предложение сегодня'}</button>
+    {error && <p role="alert">{error}</p>}
+    {check && <div role="status">
+      <strong>Веб-проверка · {new Date(check.checkedAt).toLocaleString('ru-RU')}</strong>
+      <p>{check.text}</p>
+      {check.url && <a href={check.url} target="_blank" rel="noreferrer">Страница проверки ↗</a>}
+      <small>{check.searchNote} Запросов к Яндексу: {check.searchRequests}.</small>
+    </div>}
+  </div>;
 }
 
 function WeeklyIndex({ trend }: { trend: Trend }) {
@@ -263,6 +302,7 @@ export function ReleaseDecision({
               ? 'В источнике указана частичная сопоставимость. Для вывода о разнице цен нужно сверить лицензии.'
               : 'Источник отмечает предложения сопоставимыми. Цены относятся к этой позиции.'}</p>
             <Source source={data.competitor} />
+            {!data.historical && <CurrentOffer key={data.competitor.version + data.competitor.loc} offer={data.competitor} />}
           </> : <p>К этой дате нет проверенной строки с обеими ценами для семейства.</p>}
         </section>
       </div>

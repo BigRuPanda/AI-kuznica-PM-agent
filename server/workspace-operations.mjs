@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
-import { decisionDraft, releaseDecision } from './release-decision.mjs';
+import { decisionDraft, marketOffers, releaseDecision } from './release-decision.mjs';
+import { checkOffer, savedOfferCheck } from './competitor-check.mjs';
 import { z } from 'zod/v4';
 import { makeObservationPlan, observationOptions, observedEffect } from './effect-plan.mjs';
 import {
@@ -94,6 +95,8 @@ const watchInput = {
   direction: z.enum(['at-least','at-most']).optional(), condition: optional,
 };
 export const operations = {
+  competitor_check: ['Проверить текущее публичное предложение продавца по выбранной строке исследования. Поиск в архиве выполняется отдельно.',
+    { version: id, loc: id, savedOnly: z.boolean().optional() }],
   release_decision: [
     'Разобрать результат выпущенной функции для семейства: сравнить индекс, релиз, измерение, интервью, цены конкурентов и бэклог. Для истории through — дата последнего доступного дня.',
     { caseId: id.optional(), product: optional, releaseId: optional, through: optional },
@@ -294,6 +297,11 @@ export function workspaceOperation(
   const b = meta ? z.object(meta[1]).parse(input) : input;
   const current = () => visibleCase(db, user, b.caseId);
   if (op === 'knowledge-sources') return excelSources(db);
+  if (op === 'competitor_check') {
+    const offer = marketOffers(db, null, new Date().toISOString().slice(0, 10)).find(row => row.version === b.version && row.loc === b.loc);
+    if (!offer) throw Error('Строка отсутствует в текущей версии исследования.');
+    return b.savedOnly ? savedOfferCheck(db, offer) : checkOffer(db, offer, env, send);
+  }
   if (op === 'release_decision') return releaseDecision(db, user, b, sharedOnly);
   if (op === 'release-tracker' || op === 'release-tracker-draft') {
     if (sharedOnly) throw Error('Откройте личный чат этого разбора');

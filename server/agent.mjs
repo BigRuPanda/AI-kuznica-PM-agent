@@ -50,7 +50,7 @@ export async function providerCall(env,messages,tools,choice='auto',send=fetch){
     { timedOut: true, retryable: !local });
   let response;
   try{response=await send(target,{method:'POST',redirect:'error',signal,headers:{'Content-Type':'application/json',...(env.LLM_API_KEY?{Authorization:'Bearer '+env.LLM_API_KEY}:{})},
-    body:JSON.stringify({model:env.LLM_MODEL,messages,tools,tool_choice:choice})});}catch(e){
+    body:JSON.stringify({model:env.LLM_MODEL,messages,...(tools.length ? {tools,tool_choice:choice} : {})})});}catch(e){
     if(timedOut(e))throw timeoutError();
     throw Object.assign(Error('Модель недоступна. Проверьте подключение и параметры .env.'),{retryable:true});
   }

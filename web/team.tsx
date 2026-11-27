@@ -174,6 +174,8 @@ const stepNames: Record<string, string> = {
   'knowledge-source': 'Прочитаны строки документа',
   release_decision: 'Проверены данные по релизу',
   source_value: 'Проверено значение в исходной книге',
+  web_search: 'Выполнен поиск в Яндексе',
+  competitor_check: 'Проверено публичное предложение продавца',
   page_draft: 'Подготовлена публикация в Confluence',
   'create-case': 'Создан личный разбор',
   set_view: 'Обновлён личный экран',
@@ -365,6 +367,8 @@ function Chat({
     return listen(accept);
   }, [storageId, listen]);
   const pasted = pastedMaterial(q);
+  const [webSearch, setWebSearch] = useState(false);
+  useEffect(() => setWebSearch(false), [id]);
   const [linkMaterial, setLinkMaterial] = useState<MaterialRef | null>(null);
   const needsShare =
     threads.find((t) => t.id === id)?.scope === 'group' &&
@@ -530,7 +534,7 @@ function Chat({
               <p>{m.body.text}</p>
             )}
             {m.body.readSources?.map((source) => (
-              <div key={source.url}><a href={source.url}>{source.label}</a>{source.detail && <small> · {source.detail}</small>}</div>
+              <div key={source.url}><a href={source.url} {...(/^https?:\/\//i.test(source.url) && { target: '_blank', rel: 'noreferrer' })}>{source.label}</a>{source.detail && <small> · {source.detail}</small>}</div>
             ))}
             {m.body.materials?.map((item) => (
               <MaterialCard key={item.id} item={item} />
@@ -701,7 +705,9 @@ function Chat({
             setSending(true);
             const body = {
               thread: id,
-              question: (context ? 'О графике «' + context + '». ' : '') + q,
+              question: (context && !webSearch ? 'О графике «' + context + '». ' : '') + q,
+              typedQuestion: q.trim(),
+              webSearch: !groupMessage && webSearch,
               decisionReleaseId,
               caseId,
               screen,
@@ -730,6 +736,7 @@ function Chat({
             setMaterial(null);
             sessionStorage.removeItem('pm-material-draft/' + storageId);
             setQ('');
+            setWebSearch(false);
             work(!groupMessage);
             clearContext?.();
           });
@@ -796,7 +803,7 @@ function Chat({
           <textarea
             ref={box}
             id={'q' + id}
-            placeholder="Спросить помощника…"
+            placeholder={webSearch ? 'Что найти в интернете?' : 'Спросить помощника…'}
             value={q}
             rows={1}
             onChange={(e) => setQ(e.target.value)}
@@ -811,6 +818,8 @@ function Chat({
             <Icon name="arrowUp" />
           </button>
         </div>
+        <label className="chat-web-search"><input type="checkbox" checked={webSearch}
+          onChange={e => setWebSearch(e.target.checked)} /> Поиск в интернете</label>
         {isGroup && !attached && (
           <button type="submit" className="text-action team-send" value="message" disabled={sending || !q.trim()}>
             <Icon name="people" /> Написать команде

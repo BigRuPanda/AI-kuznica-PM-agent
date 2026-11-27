@@ -1,4 +1,5 @@
 import { cases, facts, productFamily } from './evidence.mjs';
+import { sellerUrl } from './competitor-check.mjs';
 
 const DAY = 86400000;
 const addDays = (date, n) => new Date(Date.parse(date + 'T00:00:00Z') + n * DAY).toISOString().slice(0, 10);
@@ -33,17 +34,20 @@ function weeklyTrend(rows, asOf) {
   return { available: true, baseline, current, change, latest: recent };
 }
 
-function marketComparison(db, product, asOf) {
+export function marketOffers(db, product, asOf) {
   // A document contains structured columns in addition to the searchable text. Read only active versions.
   const docs = db.prepare(`SELECT file, version, body FROM documents WHERE version IN
     (SELECT DISTINCT version FROM facts WHERE kind='competitor')`).all();
   const offers = docs.flatMap(doc => JSON.parse(doc.body).facts
-    .filter(f => f.comparison && mentions(f.comparison.product, product) && f.comparison.checked <= asOf)
-    .map(f => ({ ...f.comparison, ...citation({ ...doc, loc: f.loc }) })));
+    .filter(f => f.comparison && (!product || mentions(f.comparison.product, product)) && f.comparison.checked <= asOf)
+    .map(f => {
+      const url = (f.text || '').split(' · ').map(value => sellerUrl(value, f.comparison.merchant)).find(Boolean) || null;
+      return { ...f.comparison, url, ...citation({ ...doc, loc: f.loc }) };
+    }));
   const comparable = offer => offer.match !== 'Частично';
   offers.sort((a, b) => Number(comparable(b)) - Number(comparable(a)) || b.checked.localeCompare(a.checked) ||
     a.merchant.localeCompare(b.merchant) || a.loc.localeCompare(b.loc));
-  return offers[0] || null;
+  return offers;
 }
 
 function interview(db, product) {
@@ -136,7 +140,7 @@ export function releaseDecision(db, user, { product, caseId, releaseId, through 
     backlog: task ? taskInfo(task, asOf, historical) : null,
     measurement: measurement && !historical ? { ...citation(measurement), metric: measurement.data.metric_id, title: measurement.data.metric_name,
       comment: measurement.data.comment, formula: measurement.data.formula_or_logic } : null,
-    customer: historical ? null : interview(db, product), historical, competitor: marketComparison(db, product, asOf),
+    customer: historical ? null : interview(db, product), historical, competitor: marketOffers(db, product, asOf)[0] || null,
     recommendation, measurementIssue: Boolean(issue && !historical) };
 }
 

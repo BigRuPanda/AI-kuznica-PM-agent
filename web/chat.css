@@ -312,6 +312,8 @@ body :is(.composer-row textarea, .thread-search input[type='search']):focus-visi
 .chat-composer .range-attachment { flex-wrap: wrap; }
 .chat-composer :is(.range-attachment, .team-send) { margin: 0; }
 .chat-composer .team-send { justify-self: end; }
+.chat-composer .chat-web-search { display: inline-flex; width: fit-content; align-items: center; gap: .4rem; font-size: .85rem; }
+.chat-composer .chat-web-search input { width: auto; margin: 0; }
 @media (max-width: 820px) {
   .chat-layout { --chat-height: max(420px, calc(100dvh - 250px)); grid-template-columns: minmax(0, 1fr); gap: 9px; }
   .chat-box { position: static; }

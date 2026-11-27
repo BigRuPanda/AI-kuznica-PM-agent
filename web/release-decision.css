@@ -58,3 +58,5 @@
 @media (max-width: 700px) {
   .decision-evidence { grid-template-columns: minmax(0, 1fr); }
 }
+.offer-check { display: grid; justify-items: start; gap: .6rem; margin-top: 1rem; }
+.offer-check small { display: block; margin-top: .4rem; }

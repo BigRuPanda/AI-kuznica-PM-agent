@@ -28,7 +28,7 @@ const system = [
 const greeting =
   /^(?:привет(?:ик|ствую)?|здравствуй(?:те)?|доброе утро|добрый (?:день|вечер)|hello|hi)(?:[, ]+агент)?[!.? …]*$/iu;
 const tools = Object.entries(operations)
-  .filter(([name]) => !['release-tracker', 'release-tracker-draft'].includes(name))
+  .filter(([name]) => !['release-tracker', 'release-tracker-draft', 'competitor_check'].includes(name))
   .map(([name, [description, shape]]) => {
   const parameters = z.toJSONSchema(z.object(shape));
   delete parameters.$schema;

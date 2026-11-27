@@ -24,8 +24,8 @@ export function geminiRequest(messages,tools,choice){
     contents.push({role:'user',parts:[{text:m.content}]});
   }
   return {contents,...(systems.length?{systemInstruction:{parts:systems}}:{}),
-    tools:[{functionDeclarations:tools.map(({function:f})=>({name:f.name,description:f.description,parametersJsonSchema:f.parameters}))}],
-    toolConfig:{functionCallingConfig:{mode:choice==='auto'?'AUTO':'ANY',...(typeof choice==='object'?{allowedFunctionNames:[choice.function.name]}:{})}}};
+    ...(tools.length ? {tools:[{functionDeclarations:tools.map(({function:f})=>({name:f.name,description:f.description,parametersJsonSchema:f.parameters}))}],
+      toolConfig:{functionCallingConfig:{mode:choice==='auto'?'AUTO':'ANY',...(typeof choice==='object'?{allowedFunctionNames:[choice.function.name]}:{})}}} : {})};
 }
 export async function geminiCall(env,messages,tools,choice,send,credentials=auth){
   const developer=env.LLM_BACKEND==='gemini';
