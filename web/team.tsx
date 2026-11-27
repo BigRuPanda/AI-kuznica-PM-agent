@@ -728,13 +728,13 @@ function Chat({
             }
             request.current = null;
             sessionStorage.removeItem(pendingKey);
+            setWebSearch(false);
             follow.current = true;
             setAway(false);
             clearAttachment();
             setMaterial(null);
             sessionStorage.removeItem('pm-material-draft/' + storageId);
             setQ('');
-            setWebSearch(false);
             work(!groupMessage);
             clearContext?.();
           });
@@ -816,7 +816,7 @@ function Chat({
             <Icon name="arrowUp" />
           </button>
         </div>
-        <label className="chat-web-search"><input type="checkbox" checked={webSearch} onChange={e=>setWebSearch(e.target.checked)} /> Поиск в интернете</label>
+        <label className="chat-web-search"><input type="checkbox" checked={webSearch} disabled={sending} onChange={e=>setWebSearch(e.target.checked)} /> Поиск в интернете</label>
         {isGroup && !attached && (
           <button type="submit" className="text-action team-send" value="message" disabled={sending || !q.trim()}>
             <Icon name="people" /> Написать команде
