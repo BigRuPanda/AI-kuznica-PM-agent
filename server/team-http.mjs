@@ -62,6 +62,8 @@ import {
   syncInvestigations, onInvestigationWork, retryInvestigationStage,
 } from './case-investigations.mjs';
 import { prepareInvestigationDraft } from './investigation-draft.mjs';
+import { readPresentation, workPresentations } from './presentations.mjs';
+import { exportPdf, exportPptx, presentationHtml } from './presentation-export.mjs';
 
 export function createTeamApp({
   base = databasePath(),
@@ -78,6 +80,7 @@ export function createTeamApp({
     investigationSubscriptions = [],
     tracking = new Set(),
     chatting = new Set(),
+    presenting = new Set(),
     reconciledAt = new Map(),
     authAttempts = new Map();
   initContacts(accounts.db);
@@ -213,6 +216,12 @@ export function createTeamApp({
           .catch(() => console.error('Не удалось обработать очередь чата'))
           .finally(() => chatting.delete(id));
       }
+      if (!presenting.has(id)) {
+        presenting.add(id);
+        void workPresentations(s, env, send)
+          .catch(() => console.error('Не удалось обработать очередь презентаций'))
+          .finally(() => presenting.delete(id));
+      }
       if (busy.has(id)) continue;
       busy.add(id);
       void (async () => {
@@ -298,6 +307,36 @@ export function createTeamApp({
       }
       const token = req.headers.cookie?.match(/(?:^|;\s*)pm_session=([A-Za-z0-9_-]+)/)?.[1] || '';
       const user = accounts.sessionUser(token);
+      const presentationRoute = /^\/api\/presentations\/([\w-]+)\/(preview|pptx|pdf)$/u.exec(p);
+      if (presentationRoute && method === 'GET') {
+        if (!user) return reply(401, { error: 'Войдите в приложение' });
+        const [, id, format] = presentationRoute;
+        let version;
+        try {
+          version = readPresentation(space(user.space).db, user, id);
+        } catch {
+          return reply(404, { error: 'Презентация недоступна' });
+        }
+        if (!version.deck) return reply(409, { error: 'Презентация ещё не готова' });
+        const { deck } = version;
+        const data = format === 'preview' ? presentationHtml(deck, urlBase.origin, Number(url.searchParams.get('slide') || 0))
+          : format === 'pdf' ? await exportPdf(deck, urlBase.origin, env) : await exportPptx(deck, urlBase.origin);
+        const contentType = {
+          preview: 'text/html; charset=utf-8',
+          pptx: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+          pdf: 'application/pdf',
+        };
+        const filename = encodeURIComponent(deck.product + ' — ' + deck.created + '.' + format).replace(/'/gu, '%27');
+        res.writeHead(200, {
+          'Content-Type': contentType[format],
+          'Cache-Control': 'private, no-store',
+          'X-Content-Type-Options': 'nosniff',
+          ...(format === 'preview' ? { 'Content-Security-Policy': "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'self'" }
+            : { 'Content-Disposition': "attachment; filename=Signal-" + id + '.' + format + "; filename*=UTF-8''" + filename }),
+        });
+        res.end(data);
+        return;
+      }
       if (p === '/api/integrations/confluence/callback' && method === 'GET') {
         if (!user) return reply(401, { error: 'Войдите и повторите подключение Confluence' });
         await finishOAuth(space(user.space).db, user, url.searchParams, env, send);
@@ -552,6 +591,9 @@ export function createTeamApp({
           return reply(200, { ok: true });
         }
         if (op === 'ask') return reply(200, { id: enqueue(store, user, b) });
+        if (op === 'presentation-create') return reply(202, workspaceOperation(store, user, op, b));
+        if (op === 'presentation-list' || op === 'presentation-status')
+          return reply(200, workspaceOperation(store, user, op, b));
         if (op === 'range-chat') {
           const result = b.rangeId
             ? workspaceOperation(store, user, 'range_read', { id: b.rangeId })
@@ -641,7 +683,7 @@ export function createTeamApp({
     if (server.listening) await new Promise((r) => server.close(r));
     investigationSubscriptions.forEach(unsubscribe => unsubscribe());
     await investigations.close();
-    while (busy.size || chatting.size || tracking.size) await new Promise((r) => setTimeout(r, 50));
+    while (busy.size || chatting.size || tracking.size || presenting.size) await new Promise((r) => setTimeout(r, 50));
     for (const s of spaces.values()) s.close();
     accounts.db.close();
   }

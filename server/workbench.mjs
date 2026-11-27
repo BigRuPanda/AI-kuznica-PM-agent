@@ -20,6 +20,7 @@ import {
   digest,
 } from './evidence.mjs';
 import { apiConfigured, providerCall } from './agent.mjs';
+import { chatPresentationStatus, initPresentations, queueChatPresentation, requestsPresentation } from './presentations.mjs';
 import { initTracking } from './tracker-workflow.mjs';
 import { mail, smtpConfigured, telegram, telegramConfigured } from './connectors.mjs';
 import { destination, notificationOwner, telegramGroupAllowed } from './notification-contacts.mjs';
@@ -88,6 +89,7 @@ export function initWorkbench(db, env = process.env) {
   migrateChatItems(db);
   initRanges(db);
   initMaterials(db);
+  initPresentations(db);
   db.prepare("INSERT OR IGNORE INTO conversations VALUES('group','','group','Команда Store')").run();
   const releaseColumns = db.prepare('PRAGMA table_info(release_threads)').all();
   if (!releaseColumns.some(column => column.name === 'case_id')) db.exec('ALTER TABLE release_threads ADD COLUMN case_id TEXT');
@@ -286,6 +288,28 @@ export function addUserMessage(db, user, threadId, body, created = Date.now()) {
     .lastInsertRowid);
 }
 
+function presentationCase(db, user, body, scope) {
+  const typed = typeof body.typedQuestion === 'string' && body.question?.endsWith(body.typedQuestion)
+    ? body.typedQuestion : body.question;
+  if (!requestsPresentation(typed)) return undefined;
+  if (body.caseId) return body.caseId;
+  if (scope !== 'group') {
+    const cases = db.prepare("SELECT id FROM cases WHERE COALESCE(json_extract(body,'$.owner'),'') IN ('',?)").all(user.id);
+    return cases.find(c => caseThreadId(user.id, c.id) === body.thread)?.id || null;
+  }
+  return null;
+}
+
+function missingPresentation(db, user, job, reply, scope) {
+  if (!job || job.user !== user.id) return false;
+  if (reply.presentationId) {
+    const version = chatPresentationStatus(db, user, reply.presentationId);
+    if (version) return version.status === 'failed' || (version.status === 'ready' && !version.hasDeck);
+    if (db.prepare('SELECT 1 FROM presentations WHERE id=?').get(reply.presentationId)) return false;
+  } else if (reply.mode === 'presentation' || reply.actions?.length) return false;
+  return Boolean(presentationCase(db, user, JSON.parse(job.body), scope));
+}
+
 export function enqueue(store, user, b, { telegramReply } = {}) {
   const q = String(b.question || '').trim();
   if (!q || q.length > 2400) throw Error('Введите вопрос до 2400 символов');
@@ -381,6 +405,8 @@ export function enqueue(store, user, b, { telegramReply } = {}) {
     const requestedPeriod = explicitDayWindow(q, askedAt);
     const questionSeq = addUserMessage(store.db, user, t.id,
       { text: q, ...attachment, materials, contextReset: resetsChartTopic(q) }, askedAt);
+    const presentation = presentationCase(store.db, user, { ...b, question: q }, t.scope);
+    if (presentation) queueChatPresentation(store.db, user, presentation, id);
     store.db
       .prepare('INSERT INTO jobs VALUES(?,?,?,?,?,?,?)')
       .run(
@@ -410,6 +436,24 @@ export function messages(db, user, id) {
       .all(id)
       .map((x) => {
         const { authorId, ...body } = JSON.parse(x.body);
+        if (x.role === 'assistant' && body.jobId) {
+          const job = db.prepare('SELECT user,status,body FROM jobs WHERE id=? AND thread=?').get(body.jobId, id);
+          if (missingPresentation(db, user, job, body, scope)) {
+            body.missingPresentation = true;
+            body.canResume = !['queued', 'running'].includes(job.status);
+          }
+        }
+        if (body.presentationId) {
+          const version = chatPresentationStatus(db, user, body.presentationId);
+          if (!version && !body.missingPresentation)
+            return { ...x, own: false, body: { text: 'Презентация недоступна в этом чате.', materials: [] } };
+          body.presentationStatus = body.missingPresentation || (version.status === 'ready' && !version.hasDeck)
+            ? 'failed' : version.status;
+          body.text = body.presentationStatus === 'ready' ? 'Презентация разбора готова.'
+            : body.presentationStatus === 'failed'
+              ? (version?.status === 'failed' && version.notice) || 'Презентация недоступна. Повторите сборку.'
+              : 'Собираю презентацию по материалам разбора…';
+        }
         if (body.mode !== 'daily' && body.jobId && ['partial', 'failed'].includes(body.outcome)) {
           const job = db.prepare('SELECT status FROM jobs WHERE id=? AND user=?').get(body.jobId,user.id);
           if (job) {
@@ -627,6 +671,16 @@ export async function answer(store, user, b, env = process.env, send = fetch, jo
     if (activeCase && screen.product !== activeCase.product) throw Error('Выбранный экран относится к другому продукту');
     b = {...b,screen:{calc:b.screen.calc,cards:b.screen.cards,full:screen.full,asOf:screen.cut,
       requested:screen.requested,control:screen.summary?.[1]?.product}};
+  }
+  const presentation = presentationCase(db, user, b, scope);
+  if (presentation === null) return {
+    mode: 'presentation', outcome: 'clarification',
+    text: 'Откройте карточку нужного разбора и попросите собрать презентацию в её чате.',
+  };
+  if (presentation) {
+    const version = store.tx(() => queueChatPresentation(db, user, presentation, job));
+    return { mode: 'presentation', caseId: presentation, presentationId: version.id,
+      text: 'Презентация добавлена в материалы разбора.', outcome: 'done' };
   }
   const range=b.rangeId && (access(db,user,b.rangeId,shared),readRange(db,user,b.rangeId));
   const attachments=(b.materialIds || []).map(id=>readMaterial(db,user,id,shared));
@@ -934,7 +988,7 @@ function briefConclusion(text, findings) {
 }
 
 function completeMaterials(store, user, job, b, result) {
-  if (['daily','source-value','archive','release-observation','web','public-page','competitor-check'].includes(result.mode)) return result;
+  if (['daily','source-value','archive','release-observation','web','public-page','competitor-check','presentation'].includes(result.mode)) return result;
   if (result.chartChoices) return { ...result, materials: [] };
   const db = store.db;
   const r = JSON.parse(db.prepare('SELECT body FROM job_research WHERE job=?').get(job)?.body || 'null');
@@ -1048,8 +1102,13 @@ function completeMaterials(store, user, job, b, result) {
 export function resumeJob(db, user, id) {
   const j = db.prepare('SELECT * FROM jobs WHERE id=? AND user=?').get(id, user.id);
   if (!j) throw Error('Поручение недоступно');
-  if (!['failed', 'partial'].includes(j.status)) return { id };
-  if (JSON.parse(j.result || '{}').retryExhausted) throw Error('Для следующей попытки уточните вопрос.');
+  const previous = JSON.parse(j.result || 'null');
+  const body = JSON.parse(j.body);
+  const scope = thread(db,user,j.thread).scope;
+  const repair = previous && missingPresentation(db,user,j,previous,scope);
+  if (!['failed','partial'].includes(j.status) && !(j.status === 'done' && repair)) return { id };
+  if (previous?.retryExhausted && !repair) throw Error('Для следующей попытки уточните вопрос.');
+  if (repair) queueChatPresentation(db,user,presentationCase(db,user,body,scope),id,{rebuild:true});
   const row = db.prepare('SELECT body FROM agent_turns WHERE job=?').get(id);
   if (row) {
     const state = JSON.parse(row.body);

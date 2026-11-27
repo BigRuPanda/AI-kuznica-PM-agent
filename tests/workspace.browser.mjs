@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import { once } from 'node:events';
-import { mkdtemp, readFile, cp, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, cp, rm, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -14,6 +14,7 @@ import { createTeamApp } from '../server/team-http.mjs';
 import { digest, facts, importDocs } from '../server/evidence.mjs';
 import { saveMetricRule } from '../server/metric-rules.mjs';
 import { addUserMessage, enqueue, initWorkbench, openCaseThread, openReleaseThread, saveReleaseDecisionContext, workJobs } from '../server/workbench.mjs';
+import { workPresentations } from '../server/presentations.mjs';
 import { workspaceOperation } from '../server/workspace-operations.mjs';
 import { readMaterial, saveMaterial } from '../server/materials.mjs';
 import { seedWorkspace, fixtureEnv } from './workspace-fixture.mjs';
@@ -513,6 +514,107 @@ function transport(url, options) {
     return tool('build_chart', {spec: {title:'Время до оплаты', field:'duration', stat:'median', start:'invoice', end:'payment'}});
   return respond({content:'Расчёт проверен по сохранённым данным.'});
 }
+
+test('versioned case presentations in the browser and both downloads', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'softline-presentations-ui-'));
+  const env = {
+    ...fixtureEnv, DATA_PROFILE: 'local', LLM_BACKEND: 'api', LLM_DATA_MODE: 'analysis',
+    LLM_BASE_URL: 'http://127.0.0.1/v1', LLM_MODEL: 'fixture', PM_BROWSER_PATH: process.env.PM_BROWSER_PATH,
+  };
+  const noModel = () => assert.fail('Local presentation should never use a model or a web service');
+  const app = createTeamApp({ base: join(dir, 'releases.sqlite'), background: false, env, send: noModel });
+  let browser;
+  t.after(async () => {
+    try { await browser?.close(); }
+    finally {
+      await app.close();
+      await rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    }
+  });
+  const register = (login, code) => app.accounts.register({
+    login, name: login, password: 'fixture-password', code,
+  }, env);
+  const { user: owner, token } = await register('presentation-owner', env.ADMIN_INVITE_KEY);
+  const { token: peerToken } = await register('presentation-peer', app.accounts.invite('team'));
+  const store = app.space('team'), db = store.db;
+  const caseId = 'presentation-fixture', title = 'Оформление заказа';
+  db.prepare('INSERT INTO cases VALUES(?,?,?,?,?)').run(caseId, 'Интернет-магазин', title, 'Исследуем',
+    JSON.stringify({ owner: owner.id, plan: { hypothesis: 'Клиенты прерывают оформление.', success: 'Измерить завершение заказа.' } }));
+  const file = 'Показатели заказа.xlsx';
+  const facts = [0.32, 0.41, 0.48].map((value, i) => ({
+    kind: 'metrics', loc: 'Показатели!H' + (i + 2), text: 'Завершение заказа',
+    row: { metric_id: 'checkout_rate', product: 'Интернет-магазин', segment: 'Все клиенты',
+      unit: 'ratio', date: '2026-11-0' + (i + 1), value },
+  }));
+  const dictionary = { kind: 'dictionary', loc: 'Словарь!A2', text: 'Завершение заказа',
+    row: { metric_id: 'checkout_rate', metric_name: 'Доля завершённых заказов' } };
+  importDocs(store, [{ file, facts: [...facts, dictionary] }], { notify: false });
+  const { version } = db.prepare('SELECT version FROM documents WHERE file=?').get(file);
+  const caseThread = digest(owner.id + '/' + caseId);
+  db.prepare("INSERT INTO conversations VALUES(?,?,'private',?)").run(caseThread, owner.id, title);
+  db.prepare("INSERT INTO chat_items(thread,author,role,body,created) VALUES(?,'Агент','assistant',?,?)").run(
+    caseThread, JSON.stringify({ text: 'Доля завершённых заказов выросла с 32% до 48%.',
+      readSources: facts.map(f => ({ label: f.loc, url: '#knowledge-source/' + version + '/' + encodeURIComponent(f.loc) })) }), Date.now());
+
+  await new Promise((resolve, reject) => app.server.once('error', reject).listen(0, '127.0.0.1', resolve));
+  const base = 'http://127.0.0.1:' + app.server.address().port;
+  const edge = 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe';
+  browser = await chromium.launch({ headless: true, executablePath: env.PM_BROWSER_PATH || (existsSync(edge) ? edge : undefined) });
+  const context = await browser.newContext({ viewport: { width: 390, height: 844 }, reducedMotion: 'reduce', locale: 'ru-RU' });
+  await context.addCookies([{ name: 'pm_session', value: token, url: base }]);
+  const page = await context.newPage();
+  await page.goto(base + '/#case/' + caseId);
+  await submit(page, 'presentation-create', () => role(page, 'Собрать презентацию').click());
+  const dialog = page.getByRole('dialog', { name: 'Презентация разбора' });
+  await visible(dialog.getByText('Собираем слайды', { exact: false }));
+  await workPresentations(store, env, noModel);
+  await visible(dialog.getByRole('link', { name: 'Скачать PDF' }));
+  await role(dialog, 'Следующий слайд').click();
+  assert.equal(await field(dialog, 'Выбрать слайд').inputValue(), '1');
+  assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
+  const exports = {};
+  for (const [format, label, signature] of [['pptx', 'Скачать PPTX', 'PK'], ['pdf', 'Скачать PDF', '%PDF']]) {
+    const href = await dialog.getByRole('link', { name: label }).getAttribute('href');
+    const response = await page.request.get(base + href);
+    assert.equal(response.status(), 200);
+    const buffer = await response.body();
+    assert.equal(buffer.subarray(0, signature.length).toString(), signature);
+    assert.equal((await fetch(base + href, { headers: { Cookie: 'pm_session=' + peerToken } })).status, 404);
+    exports[format] = href;
+    if (process.env.PM_PRESENTATION_OUTPUT_DIR)
+      await writeFile(join(process.env.PM_PRESENTATION_OUTPUT_DIR, 'case-presentation.' + format), buffer);
+  }
+  assert.equal(exports.pptx.replace(/pptx$/, 'pdf'), exports.pdf);
+  await role(dialog, 'Закрыть').click();
+  await visible(page.getByRole('heading', { name: 'Презентации разбора' }));
+  await page.getByRole('button', { name: /Отчёт на/ }).click();
+  assert.equal(await dialog.getByRole('link', { name: 'Скачать PDF' }).getAttribute('href'), exports.pdf);
+  await role(dialog, 'Закрыть').click();
+
+  await role(page, 'Обсудить').click();
+  await field(page, 'Вопрос агенту').fill('Сделай презентацию');
+  await submit(page, 'ask', () => role(page, 'Отправить').click());
+  await workJobs(store, app.accounts, env, noModel);
+  await visible(page.getByText('Собираю презентацию по материалам разбора…', { exact: true }));
+  await workPresentations(store, env, noModel);
+  const bubble = page.locator('.bubble.assistant').filter({ hasText: 'Презентация разбора готова.' });
+  await visible(bubble);
+  const chatPdf = await bubble.getByRole('link', { name: 'Скачать PDF' }).getAttribute('href');
+  assert.notEqual(chatPdf, exports.pdf);
+  assert.equal((await bubble.getByRole('link', { name: 'Скачать PPTX' }).getAttribute('href')).replace(/pptx$/, 'pdf'), chatPdf);
+  await role(bubble, 'Открыть презентацию').click();
+  assert.equal(await dialog.getByRole('link', { name: 'Скачать PDF' }).getAttribute('href'), chatPdf);
+  await role(dialog, 'Закрыть').click();
+  await page.reload();
+  await role(page, 'Обсудить').click();
+  await visible(bubble.getByRole('link', { name: 'Скачать PPTX' }));
+  db.prepare('UPDATE presentations SET deck=NULL WHERE id=?').run(chatPdf.split('/').at(-2));
+  const unavailable = page.locator('.bubble.assistant').filter({ hasText: 'Презентация недоступна.' });
+  await submit(page, 'resume-job', () => role(unavailable, 'Собрать презентацию').click());
+  await workJobs(store, app.accounts, env, noModel);
+  await workPresentations(store, env, noModel);
+  assert.equal(await bubble.getByRole('link', { name: 'Скачать PDF' }).getAttribute('href'), chatPdf);
+});
 
 test('Softline workspace, upgrade and browser journeys', async t => {
   const dir = await mkdtemp(join(tmpdir(), 'softline-workspace-'));

@@ -227,6 +227,9 @@ export type Msg = {
     checks?: string[];
     jobId?: string;
     canResume?: boolean;
+    missingPresentation?: boolean;
+    presentationId?: string;
+    presentationStatus?: 'queued' | 'running' | 'ready' | 'failed';
     mode?: string;
     outcome?: string;
     calc?: string;

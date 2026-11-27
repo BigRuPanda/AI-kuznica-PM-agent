@@ -56,6 +56,7 @@ import { PanelResizeHandle, useDiscussionDock, usePanelSize, usePanelSpace } fro
 import { BrandLogo } from './brand-logo';
 import { ProfileEntry, ProfilePage } from './profile';
 import { NotificationSettings } from './notifications';
+import { ChatPresentation, PresentationMaterials } from './presentations';
 import './team.css';
 import './tracking.css';
 import './chat.css';
@@ -674,6 +675,10 @@ function Chat({
               </div>
             ))}
             <CompletedChecks body={m.body} />
+            {m.body.presentationId && m.body.presentationStatus === 'ready' &&
+              <ChatPresentation id={m.body.presentationId} />}
+            {m.body.mode === 'presentation' && m.body.outcome === 'clarification' &&
+              <a href="#cases">Открыть разборы</a>}
             {m.body.warning && !m.body.text.includes(m.body.warning) && <small>{m.body.warning}</small>}
             {m.body.canResume && (
               <button
@@ -685,7 +690,7 @@ function Chat({
                   })
                 }
               >
-                Продолжить с сохранённого шага
+                {m.body.missingPresentation ? 'Собрать презентацию' : 'Продолжить с сохранённого шага'}
               </button>
             )}
             {m.body.calc && !m.body.materials?.length && (
@@ -1196,6 +1201,8 @@ function Investigation({
     [updating, setUpdating] = useState(false),
     [preparingSignalIssue, setPreparingSignalIssue] = useState(false),
     [draftToFocus, setDraftToFocus] = useState('');
+  const [presentationAction, setPresentationAction] = useState<HTMLSpanElement | null>(null);
+  const [versionFromChat, setVersionFromChat] = useState<string>();
   const updateViewState = useCallback((next: typeof viewState) => {
     const previous = currentView.current;
     const before = previous.preferences || {}, after = next.preferences || {};
@@ -1269,6 +1276,7 @@ function Investigation({
   }, [id]);
   const result = useCallback(
     (m: Msg['body']) => {
+      if (m.presentationId) setVersionFromChat(m.presentationId);
       if (m.mode !== 'analysis' && m.cards && !m.rangeId) {
         const pinned = currentView.current.preferences?.pinned || [];
         updatePreferences({
@@ -1389,6 +1397,7 @@ function Investigation({
     });
   };
   const caseActions = <div className={researchAvailable ? 'actions investigation-tools' : 'actions'}>
+    <span ref={setPresentationAction} />
     {signal && !withdrawn && (redmine.local || redmine.connected) && (
       <button disabled={updating || preparingSignalIssue} aria-busy={preparingSignalIssue} onClick={() =>
         action(async () => {
@@ -1562,6 +1571,7 @@ function Investigation({
             </section>
           )}
           <PinnedMaterials caseId={id} />
+          <PresentationMaterials key={id} caseId={id} actionSlot={presentationAction} versionFromChat={versionFromChat} />
           <Tracking headingRef={taskTitle}
             documentation={documentation}
             caseId={id}

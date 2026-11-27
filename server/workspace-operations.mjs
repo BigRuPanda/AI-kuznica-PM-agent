@@ -33,6 +33,7 @@ import { saveMaterial } from './materials.mjs';
 import { aggregateMetric, describeMetricSeries, observationWithin } from './metric-observations.mjs';
 import { measurementSpec, measuredSignal, legacyOrderMetric, startMeasurementWatch, watchKind } from './watch-measurement.mjs';
 import { makeObservationPlan, observationOptions, observedEffect, validateEffectCutoff } from './effect-plan.mjs';
+import { listPresentations, readPresentation, startPresentation } from './presentations.mjs';
 
 const text = z.string().min(1).max(2400),
   id = z.string().min(1).max(150),
@@ -509,6 +510,12 @@ export function workspaceOperation(
       const draftId = digest(JSON.stringify(['release-decision', user.id, caseId, b.releaseId, b.key, target, proposed.description]));
       return prepareTracker(store, user, 'issue', body, env, send, draftId);
     });
+  }
+  if (op === 'presentation-create') return startPresentation(store, user, b.caseId, b.request);
+  if (op === 'presentation-list') return { items: listPresentations(db, user, b.caseId) };
+  if (op === 'presentation-status') {
+    const { deck, ...version } = readPresentation(db, user, b.id);
+    return { ...version, slides: deck?.slides.map(slide => slide.title) || [] };
   }
   if (op === 'knowledge-sources') return excelSources(db);
   if (op === 'knowledge-source') return sourceRows(db,b.version,b.offset,b.loc);

@@ -1,0 +1,13 @@
+.presentation-heading,.presentation-exports,.presentation-viewer nav,.presentation-version{display:flex;align-items:center;gap:.75rem}
+.presentation-heading,.presentation-version{justify-content:space-between;flex-wrap:wrap}
+.presentation-heading h3{margin:0}
+.presentation-version{width:100%;margin-top:.6rem;text-align:left}
+.presentation-version small,.presentation-exports span,.presentation-notice{color:var(--muted,#686b70)}
+.presentation-exports{flex-wrap:wrap;margin-bottom:.8rem}
+.presentation-exports span{margin-right:auto}
+.presentation-exports a{font-weight:600}
+.presentation-viewer iframe{display:block;background:white;width:100%;aspect-ratio:16/9;border:1px solid #d6d6d7;border-radius:3px}
+.presentation-viewer nav{margin-top:.75rem;justify-content:center}
+.presentation-viewer select{min-width:0;max-width:62%}
+.presentation-viewer nav span{white-space:nowrap;font-variant-numeric:tabular-nums}
+.presentation-notice{font-size:.87rem;margin:0 0 .75rem}
