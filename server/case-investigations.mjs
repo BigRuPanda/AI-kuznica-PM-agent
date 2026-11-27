@@ -9,11 +9,7 @@ import { getCase, digest } from './evidence.mjs';
 import { captureInvestigation, runInvestigationStage } from './investigation-engine.mjs';
 import { effectiveResearchMode } from './investigation-settings.mjs';
 
-const stages = {
-  lead: ['lead'],
-  review: ['lead', 'reviewer'],
-  roles: ['analyst', 'researcher', 'lead', 'reviewer'],
-};
+import { stageOrder, ensureStages, initStages, states, eligible, updateRunProgress } from './investigation-stages.mjs';
 const leaseDuration = 6 * 60_000;
 const providerWait = 5 * 60_000;
 const revisionOf = "COALESCE(json_extract(c.body,'$.signal.revision'), 0)";
@@ -56,6 +52,7 @@ export function initInvestigations(db) {
     CREATE TABLE IF NOT EXISTS costs (id INTEGER PRIMARY KEY, job TEXT, model TEXT, elapsed INTEGER, input INTEGER, output INTEGER);`);
     if (!db.prepare('PRAGMA table_info(case_investigations)').all().some(({ name }) => name === 'published_by'))
       db.exec('ALTER TABLE case_investigations ADD COLUMN published_by TEXT');
+    initStages(db);
   });
   for (const table of ['documents', 'facts', 'feedback', 'research_file_versions']) {
     for (const action of ['INSERT', 'UPDATE', 'DELETE']) {
@@ -89,6 +86,9 @@ export function syncInvestigations(db, caseId) {
       WHERE lease IS NOT NULL${runScope} AND EXISTS (
         SELECT 1 FROM cases WHERE id=r.case_id AND state='Завершено'
       )`).run(...args);
+    db.prepare(`UPDATE case_investigation_role_state SET status='queued',lease=NULL,lease_until=0
+      WHERE lease IS NOT NULL AND run_id IN (SELECT r.id FROM case_investigations r JOIN cases c ON c.id=r.case_id
+        WHERE (r.status='superseded' OR c.state='Завершено')${runScope})`).run(...args);
   });
 }
 
@@ -229,17 +229,31 @@ function modelWait(env) {
   return null;
 }
 
-function nextRun(db, now, modelReason, generation) {
-  return db.prepare(`SELECT r.* FROM case_investigations r JOIN cases c ON c.id=r.case_id
-    WHERE ${caseActive} AND r.revision=${revisionOf} AND (r.next<=? OR (r.wait_for='provider' AND ? IS NOT NULL))
-      AND r.lease_until<=?
-      AND (r.status IN ('queued','running','retry') OR (r.status='waiting' AND (
-        (r.wait_for='data' AND r.source_generation<>?) OR (r.wait_for='model' AND r.reason IS NOT ?) OR
-        r.wait_for='provider' OR (r.wait_for='parent' AND EXISTS (
-          SELECT 1 FROM case_investigations p WHERE p.id=r.parent_id AND json_extract(p.capture,'$.measurable')=1
-        ))
-      )))
-    ORDER BY r.created, r.rowid LIMIT 1`).get(now, modelReason, now, generation, modelReason);
+export function listInvestigationWork(store, env, now, runId = null) {
+  const {db} = store;
+  const modelReason = modelWait(env);
+  const {generation} = db.prepare('SELECT generation FROM case_investigation_sources WHERE id=1').get();
+  const rows = db.prepare(`SELECT r.id,r.case_id,r.prepared,r.wait_for,r.reason,r.source_generation,r.parent_id
+    FROM case_investigations r JOIN cases c ON c.id=r.case_id
+    WHERE ${caseActive} AND r.revision=${revisionOf} AND r.status NOT IN ('ready','superseded')
+      AND r.lease_until<=? AND r.next<=? ${runId ? 'AND r.id=?' : ''}
+    ORDER BY r.created,r.rowid`).all(now, now, ...(runId ? [runId] : []));
+  const work = [];
+  for (const r of rows) {
+    const item = {caseId:r.case_id, runId:r.id};
+    if (r.wait_for === 'data' && r.source_generation === generation) continue;
+    if (r.wait_for === 'model' && r.reason === modelReason) continue;
+    if (r.wait_for === 'parent' && !db.prepare("SELECT 1 FROM case_investigations WHERE id=? AND json_extract(capture,'$.measurable')=1").get(r.parent_id)) continue;
+    if (!r.prepared || modelReason || r.wait_for) {
+      work.push({...item, kind:'prepare'});
+      continue;
+    }
+    const siblings = states(db, r.id);
+    for (const stage of siblings) {
+      if (eligible(stage, siblings, now)) work.push({...item, kind:'role',role:stage.role});
+    }
+  }
+  return work;
 }
 
 function setWaiting(db, id, waitFor, reason, next = 0) {
@@ -253,10 +267,9 @@ function setRetry(db, row, now, reason) {
     lease=NULL, lease_until=0 WHERE id=?`).run(reason, next, row.id);
 }
 
-function saveStage(db, row, stage, ordinal, result, usage, elapsed, env, now) {
-  if (!result && !usage) return;
-  db.prepare(`INSERT INTO case_investigation_stages(run_id,ordinal,role,output,usage,elapsed,completed)
-    VALUES(?,?,?,?,?,?,?)`).run(row.id, ordinal, stage, result && JSON.stringify(result), usage && JSON.stringify(usage), elapsed, now);
+function saveStage(db, row, stage, ordinal, result, usage, elapsed, env, now, attempt, failure) {
+  db.prepare(`INSERT INTO case_investigation_stages(run_id,ordinal,role,output,usage,elapsed,completed,attempt,failure)
+    VALUES(?,?,?,?,?,?,?,?,?)`).run(row.id, ordinal, stage, result && JSON.stringify(result), usage && JSON.stringify(usage), elapsed, now, attempt, failure);
   if (usage) {
     db.prepare('INSERT INTO costs(job,model,elapsed,input,output) VALUES(?,?,?,?,?)')
       .run(row.id, env.LLM_MODEL || env.LLM_BACKEND || 'api', elapsed, usage.input ?? null, usage.output ?? null);
@@ -287,7 +300,7 @@ async function attachRequestedWeb(store,job,env,send,pageOptions) {
     }
   } catch(error) { reason=error.message; }
   return store.tx(()=>{
-    if(getRun(store.db,row.case_id,row.id)?.lease!==lease) return false;
+    if(!ownsPreparation(store.db,row,lease,job.now())) return false;
     const records=findings.map((f,i)=>({...f,id:'public-'+(i+1),kind:'lookup',source:f.url}));
     const context={...capture.context,findings:[...(capture.context.findings||[]),...records]};
     const raw=JSON.stringify(context), calcId=digest(raw);
@@ -303,98 +316,161 @@ async function attachRequestedWeb(store,job,env,send,pageOptions) {
   });
 }
 
-export async function workInvestigation(store, env = process.env, send = fetch, options = {}) {
-  const { db } = store;
-  const { now = Date.now, leaseMs = leaseDuration, capture: captureInputs = captureInvestigation,
-    execute = runInvestigationStage, reconcile = true } = options;
-  const modelReason = modelWait(env);
-  const job = store.tx(() => {
-    if (reconcile) syncInvestigations(db);
-    const start = now();
-    const { generation } = db.prepare('SELECT generation FROM case_investigation_sources WHERE id=1').get();
-    const row = nextRun(db, start, modelReason, generation);
-    if (!row) return null;
-    const mode = row.mode || effectiveResearchMode(db, row.owner);
-    const c = getCase(db, row.case_id);
-    const question = row.question || c.body.plan?.question || c.body.plan?.hypothesis || c.title;
-    db.prepare('UPDATE case_investigations SET mode=?, question=? WHERE id=?').run(mode, question, row.id);
-    const saved = () => publicRun(db, getRun(db, row.case_id, row.id));
-    const prior = completed(db, row.id);
-    const run = {
-      ...publicRun(db, { ...row, mode, question }, prior), caseState: c.state, signal: c.body.signal,
-      origin: c.body.origin, measurement: c.body.watch?.measurement || c.body.plan?.measurement,
-      period: {
-        from: c.body.plan?.from, through: c.body.plan?.through, control: c.body.plan?.control,
-        ...(c.body.period || c.body.origin?.requested),
-      },
-    };
-    let capture = parse(row.capture);
-    if (!capture?.measurable) {
-      const parent = getRun(db, row.case_id, row.parent_id);
-      const parentCapture = parse(parent?.capture);
-      if (row.parent_id && !parentCapture?.measurable) {
-        setWaiting(db, row.id, 'parent', 'Ожидаем расчёт родительской версии.');
-        return { saved: saved() };
-      }
-      try {
-        capture = transaction(db, () => {
-          const value = captureInputs(db, { ...run, parentCapture });
-          db.prepare('UPDATE case_investigations SET capture=?, source_generation=? WHERE id=?')
-            .run(JSON.stringify(value), generation, row.id);
-          grant(db, value.calcId, row.owner ? 'user' : 'case', row.owner || row.case_id);
-          return value;
-        });
-      } catch {
-        setRetry(db, row, now(), 'Не удалось подготовить расчёт. Проверка будет повторена.');
-        return { saved: saved() };
-      }
-    }
-    if (!capture.measurable) {
-      setWaiting(db, row.id, 'data', capture.reason || 'Ожидаем данные для расчёта.');
-      return { saved: saved() };
-    }
-    if (modelReason) {
-      setWaiting(db, row.id, 'model', modelReason);
-      return { saved: saved() };
-    }
-    const ordinal = prior.length;
-    const stage = stages[mode][ordinal];
-    const lease = randomUUID();
-    db.prepare(`UPDATE case_investigations SET status='running', wait_for=NULL, reason=NULL, lease=?, lease_until=?
-      WHERE id=?`).run(lease, now() + leaseMs, row.id);
-    return { row, run, capture, prior, mode, stage, ordinal, lease, start };
-  });
-  if (!job || job.saved) return job?.saved || null;
+function currentRevision(db, row) {
+  const c = getCase(db, row.case_id);
+  return active(c) && row.revision === (c.body.signal?.revision ?? 0);
+}
 
-  const { row, run, capture, prior, mode, stage, ordinal, lease, start } = job;
-  const final = ordinal === stages[mode].length - 1;
-  let output, usage, providerStatus;
+function ownsPreparation(db, row, lease, now) {
+  const current = getRun(db,row.case_id,row.id);
+  return current?.lease === lease && current.lease_until > now && currentRevision(db,row);
+}
+
+function prepareJob(db, row, env, options, start) {
+  const {capture:captureInputs = captureInvestigation, now = Date.now, leaseMs = leaseDuration} = options;
+  const modelReason = modelWait(env);
+  const {generation} = db.prepare('SELECT generation FROM case_investigation_sources WHERE id=1').get();
+  const mode = row.mode || effectiveResearchMode(db, row.owner);
+  const c = getCase(db, row.case_id);
+  const question = row.question || c.body.plan?.question || c.body.plan?.hypothesis || c.title;
+  db.prepare('UPDATE case_investigations SET mode=?, question=? WHERE id=?').run(mode, question, row.id);
+  const saved = () => publicRun(db, getRun(db, row.case_id, row.id));
+  const prior = completed(db, row.id);
+  const run = {
+    ...publicRun(db, { ...row, mode, question }, prior), caseState: c.state, signal: c.body.signal,
+    origin: c.body.origin, measurement: c.body.watch?.measurement || c.body.plan?.measurement,
+    period: {
+      from: c.body.plan?.from, through: c.body.plan?.through, control: c.body.plan?.control,
+      ...(c.body.period || c.body.origin?.requested),
+    },
+  };
+  let capture = parse(row.capture);
+  if (!capture?.measurable) {
+    const parent = getRun(db, row.case_id, row.parent_id);
+    const parentCapture = parse(parent?.capture);
+    if (row.parent_id && !parentCapture?.measurable) {
+      setWaiting(db, row.id, 'parent', 'Ожидаем расчёт родительской версии.');
+      return { saved: saved() };
+    }
+    try {
+      capture = transaction(db, () => {
+        const value = captureInputs(db, { ...run, parentCapture });
+        db.prepare('UPDATE case_investigations SET capture=?, source_generation=? WHERE id=?')
+          .run(JSON.stringify(value), generation, row.id);
+        grant(db, value.calcId, row.owner ? 'user' : 'case', row.owner || row.case_id);
+        return value;
+      });
+    } catch {
+      setRetry(db, row, now(), 'Не удалось подготовить расчёт. Проверка будет повторена.');
+      return { saved: saved() };
+    }
+  }
+  if (!capture.measurable) {
+    setWaiting(db, row.id, 'data', capture.reason || 'Ожидаем данные для расчёта.');
+    return { saved: saved() };
+  }
+  if (modelReason) {
+    setWaiting(db, row.id, 'model', modelReason);
+    return { saved: saved() };
+  }
+
+  const lease = randomUUID();
+  db.prepare("UPDATE case_investigations SET status='running',reason=NULL,wait_for=NULL,lease=?,lease_until=? WHERE id=?")
+    .run(lease,start + leaseMs,row.id);
+  return {row,run,capture,mode,lease,now};
+}
+
+async function finishPreparation(store, job, env, send, options) {
+  const {db} = store;
+  const {row,mode,lease,now} = job;
   try {
     if (!await attachRequestedWeb(store,job,env,send,options.pageOptions)) return null;
-    const candidate = await execute({ env, send, stage, run, capture, prior });
-    usage = candidate?.usage;
-    if (candidate?.check && (!final || candidate.result)) output = candidate;
+    return store.tx(() => {
+      if (!ownsPreparation(db,row,lease,now())) return null;
+      ensureStages(db,row.id,mode);
+      db.prepare('UPDATE case_investigations SET prepared=1,lease=NULL,lease_until=0,next=0,attempts=0 WHERE id=?').run(row.id);
+      updateRunProgress(db,row.id);
+      return publicRun(db,getRun(db,row.case_id,row.id));
+    });
   } catch (error) {
-    usage = error?.usage;
-    providerStatus = error?.status;
+    return store.tx(() => {
+      if (!ownsPreparation(db,row,lease,now())) return null;
+      setRetry(db,row,now(),'Не удалось подготовить расчёт. Проверка будет повторена.');
+      return publicRun(db,getRun(db,row.case_id,row.id));
+    });
   }
+}
+
+function claimRole(db,row,stage,start,leaseMs) {
+  const state = states(db,row.id).find(s => s.role === stage);
+  const lease = randomUUID();
+  db.prepare(`UPDATE case_investigation_role_state SET status='running',lease=?,lease_until=?,attempt=attempt+1,
+    next=0,reason=NULL WHERE run_id=? AND role=?`).run(lease,start+leaseMs,row.id,stage);
+  updateRunProgress(db,row.id);
+  const outputs = completed(db,row.id);
+  const prior = ['lead','reviewer'].includes(stage) ? outputs : [];
+  const capture = parse(row.capture);
+  const run = publicRun(db,row,outputs);
+  return {row,stage,ordinal:state.ordinal,attempt:state.attempt+1,lease,start,prior,capture,run};
+}
+
+async function executeRole(store, job, env, send, options) {
+  const {row,stage,ordinal,attempt,lease,start,prior,capture,run} = job;
+  const {now = Date.now, execute = runInvestigationStage} = options;
+  const final = stage === stageOrder[row.mode].at(-1);
+  let output, usage, failure, providerDenied = false;
+  try {
+    const candidate = await execute({env,send,stage,run,capture,prior});
+    usage = candidate?.usage;
+    if (!candidate?.check || (['lead','reviewer'].includes(stage) && !candidate.result))
+      throw Error('Некорректный результат проверки.');
+    output = candidate;
+  } catch (error) {
+    usage ??= error?.usage;
+    providerDenied = [401,403,404].includes(error?.status);
+    failure = providerDenied ? 'Провайдер отклонил подключение. Ожидаем доступа к модели.' : 'Не удалось завершить проверку. Этап будет повторён.';
+  }
+  const {db} = store;
   return store.tx(() => {
-    syncInvestigations(db, row.case_id);
     const finished = now();
-    const current = getRun(db, row.case_id, row.id);
-    if (!current) return null;
-    const ownsLease = current.lease === lease && current.lease_until > finished;
-    saveStage(db, row, stage, ordinal, ownsLease && output ? output : null, usage || null,
-      Math.max(0, finished - start), env, finished);
-    if (!ownsLease) return null;
-    if (output) {
-      db.prepare(`UPDATE case_investigations SET status=?, result=?, attempts=0, next=0, lease=NULL, lease_until=0
-        WHERE id=?`).run(final ? 'ready' : 'running', final ? JSON.stringify(output.result) : null, row.id);
-    } else if ([401, 403, 404].includes(providerStatus)) {
-      setWaiting(db, row.id, 'provider', 'Провайдер отклонил подключение. Ожидаем доступа к модели.', finished + providerWait);
-    } else {
-      setRetry(db, current, finished, 'Не удалось завершить проверку. Этап будет повторён.');
-    }
-    return publicRun(db, getRun(db, row.case_id, row.id));
+    syncInvestigations(db,row.case_id);
+    const state = states(db,row.id).find(s => s.role === stage);
+    const owns = state?.lease === lease && state.lease_until > finished && currentRevision(db,row);
+    saveStage(db,row,stage,ordinal,owns && output ? output : null,usage || null,
+      Math.max(0,finished-start),env,finished,attempt,owns ? failure || null : 'Истёк срок попытки.');
+    if (!owns) return null;
+    const delay = providerDenied ? providerWait : Math.min(300_000,15_000 * 2 ** Math.min(attempt-1,5));
+    db.prepare(`UPDATE case_investigation_role_state SET status=?,reason=?,next=?,lease=NULL,lease_until=0
+      WHERE run_id=? AND role=?`).run(output ? 'done' : 'retry',failure || null,output ? 0 : finished+delay,row.id,stage);
+    if (final && output)
+      db.prepare("UPDATE case_investigations SET status='ready',reason=NULL,result=? WHERE id=?").run(JSON.stringify(output.result),row.id);
+    else updateRunProgress(db,row.id);
+    return publicRun(db,getRun(db,row.case_id,row.id));
   });
+}
+
+export function tryStartInvestigation(store,work,env,send,options = {}) {
+  const now = options.now || Date.now;
+  const job = store.tx(() => {
+    const start = now();
+    if (!listInvestigationWork(store,env,start,work.runId).some(w => w.kind === work.kind && w.role === work.role)) return null;
+    const row = getRun(store.db,work.caseId,work.runId);
+    if (!row) return null;
+    return work.kind === 'prepare' ? prepareJob(store.db,row,env,options,start)
+      : claimRole(store.db,row,work.role,start,options.leaseMs ?? leaseDuration);
+  });
+  if (!job) return null;
+  if (job.saved) return Promise.resolve(job.saved);
+  return work.kind === 'prepare' ? finishPreparation(store,job,env,send,options) : executeRole(store,job,env,send,options);
+}
+
+export async function workInvestigation(store, env = process.env, send = fetch, options = {}) {
+  if (options.reconcile !== false) syncInvestigations(store.db);
+  const now = options.now || Date.now;
+  const work = listInvestigationWork(store,env,now())[0];
+  if (!work) return null;
+  const run = await tryStartInvestigation(store,work,env,send,options);
+  if (!run || work.kind === 'role') return run;
+  const role = listInvestigationWork(store,env,now(),work.runId).find(w => w.kind === 'role');
+  return role ? tryStartInvestigation(store,role,env,send,options) : run;
 }

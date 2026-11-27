@@ -44,6 +44,64 @@ function fixture(overrides = {}) {
   };
   return (store, env = enabled) => workInvestigation(store, env, noSend, options);
 }
+test('independent roles complete out of order and keep deterministic inputs', async t => {
+  const store = open();
+  t.after(() => store.close());
+  add(store.db, 'parallel');
+  const arrived = Promise.withResolvers(), release = Promise.withResolvers(), inputs = {};
+  const work = fixture({async execute({stage, prior}) {
+    inputs[stage] = prior.map(p => p.check.role);
+    if (stage === 'analyst') { arrived.resolve(); await release.promise; }
+    return {check:{role:stage}, result:{stage}};
+  }});
+  const analyst = work(store);
+  await arrived.promise;
+  try {
+    const second = await work(store);
+    assert.equal(second?.checks.at(-1).role, 'researcher');
+    assert.equal(await work(store), null);
+  } finally { release.resolve(); await analyst; }
+  await drain(store, work);
+  assert.deepEqual(inputs, {analyst:[], researcher:[], lead:['analyst','researcher'], reviewer:['analyst','researcher','lead']});
+});
+
+test('legacy retries resume once across restart with completed evidence intact', async t => {
+  const dir = mkdtempSync(join(tmpdir(),'legacy-role-'));
+  const path = join(dir,'team.sqlite');
+  let store=open(path);
+  t.after(()=>{store.close(); rmSync(dir,{recursive:true,force:true,maxRetries:3});});
+  for (let i=0;i<4;i++) add(store.db,'threshold-'+i);
+  add(store.db,'partial');
+  syncInvestigations(store.db);
+  const partial=readInvestigations(store.db,anna,'partial').current.id;
+  store.db.exec(`DROP TABLE case_investigation_role_state;
+    ALTER TABLE case_investigations DROP COLUMN prepared;
+    ALTER TABLE case_investigation_stages DROP COLUMN attempt;
+    ALTER TABLE case_investigation_stages DROP COLUMN failure;
+    UPDATE case_investigations SET status='retry',mode='roles',attempts=13,next=900000,
+      reason='Не удалось подготовить расчёт. Проверка будет повторена.';`);
+  const snapshot={calcId:'legacy',measurable:true,context:{version:1},checks:[]};
+  store.db.prepare("UPDATE case_investigations SET capture=?,next=100,attempts=4,reason='Сбой этапа' WHERE id=?")
+    .run(JSON.stringify(snapshot),partial);
+  const insert=store.db.prepare('INSERT INTO case_investigation_stages(run_id,ordinal,role,output,elapsed,completed) VALUES(?,?,?,?,1,1)');
+  for(const [index,role] of ['analyst','researcher'].entries())
+    insert.run(partial,index,role,JSON.stringify({check:{role}}));
+  store.close();
+  store=open(path);
+  initInvestigations(store.db);
+  assert.equal(store.db.prepare("SELECT count(*) n FROM case_investigations WHERE case_id LIKE 'threshold-%' AND next=0").get().n,4);
+  const starts=[];
+  await drain(store,fixture({now:()=>101,async execute({stage,run}) {
+    starts.push([run.id,stage]);
+    return {check:{role:stage},result:{stage}};
+  }}));
+  assert.deepEqual(starts.filter(([id])=>id===partial).map(([,role])=>role),['lead','reviewer']);
+  assert.equal(starts.length,18);
+  assert.equal(readInvestigations(store.db,anna,'partial').current.calcId,'legacy');
+  store.close(); store=open(path);
+  assert.equal(await fixture()(store),null);
+});
+
 async function drain(store, work) {
   for (let i = 0; i < 40; i++) if (!(await work(store))) return;
   assert.fail('queue did not drain');
@@ -128,6 +186,7 @@ test('a late response cannot commit after a replacement, withdrawal or lease tak
   const store = open(), { db } = store;
   t.after(() => db.close());
   add(db, 'case', { signal: { revision: 1, status: 'confirmed' } });
+  saveResearchSettings(db, { ...anna, role:'admin' }, {scope:'team',mode:'lead'});
   let now = 10, started, finish;
   const arrived = new Promise(resolve => { started = resolve; });
   const blocked = fixture({ now: () => now, leaseMs: 100,
@@ -141,11 +200,11 @@ test('a late response cannot commit after a replacement, withdrawal or lease tak
   await arrived;
   assert.equal(await work(store), null);
   now += 101;
-  assert.equal((await work(store)).checks.at(-1).role, 'analyst');
+  assert.equal((await work(store)).checks.at(-1).role, 'lead');
   finish();
   await pending;
   const original = readInvestigations(db, anna, 'case').current;
-  assert.equal(original.checks.at(-1).role, 'analyst');
+  assert.equal(original.checks.at(-1).role, 'lead');
   db.exec("UPDATE cases SET body=json_set(body,'$.signal.revision',2)");
   syncInvestigations(db);
   const corrected = readInvestigations(db, anna, 'case');
