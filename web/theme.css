@@ -1,6 +1,63 @@
 @import '@fontsource-variable/inter';
 @import './palette.css';
 
+#root { position: relative; z-index: 1; }
+.workspace-backdrop {
+  position: fixed;
+  inset: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+.workspace-backdrop span {
+  --turn: 0deg;
+  position: absolute;
+  border: 1px solid color-mix(in srgb, var(--accent-text) 14%, transparent);
+  background: color-mix(in srgb, var(--accent-text) 3%, transparent);
+  transform: rotate(var(--turn));
+  animation: backdrop-drift 17s ease-in-out infinite alternate;
+}
+.workspace-backdrop span:nth-child(1) {
+  width: clamp(150px, 28vw, 410px);
+  aspect-ratio: 1;
+  top: -14%;
+  right: -4%;
+  border-radius: 50%;
+}
+.workspace-backdrop span:nth-child(2) {
+  --turn: 19deg;
+  width: clamp(92px, 14vw, 210px);
+  aspect-ratio: 1;
+  bottom: 7%;
+  left: 12%;
+  border-radius: 22%;
+  animation-delay: -9s;
+}
+.workspace-backdrop span:nth-child(3) {
+  --turn: -24deg;
+  width: clamp(94px, 15vw, 225px);
+  aspect-ratio: 2 / 1;
+  left: 41%;
+  top: 17%;
+  border-radius: var(--pill);
+  animation-delay: -5s;
+}
+.workspace-backdrop span:nth-child(4) {
+  --turn: 38deg;
+  width: clamp(72px, 12vw, 165px);
+  aspect-ratio: 1;
+  right: 5%;
+  bottom: 12%;
+  border-radius: 24%;
+  animation-delay: -12s;
+}
+@keyframes backdrop-drift {
+  from { transform: translate3d(0, 0, 0) rotate(var(--turn)); }
+  to { transform: translate3d(18px, -22px, 0) rotate(calc(var(--turn) + 9deg)); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .workspace-backdrop span { animation: none; }
+}
+
 .theme-switch {
   display: inline-flex;
   justify-content: center;
@@ -141,6 +198,10 @@ input::file-selector-button:hover { background: var(--surface-hover); }
   from { opacity: .2; transform: translateY(4px); }
   to { opacity: 1; transform: translateY(0); }
 }
+@keyframes workspace-fade {
+  from { opacity: .2; }
+  to { opacity: 1; }
+}
 summary {
   position: relative;
   padding-inline-start: 1.15em;
@@ -152,12 +213,13 @@ summary::-webkit-details-marker { display: none; }
 summary::before {
   position: absolute;
   inset-inline-start: .18em;
-  inset-block-start: .49em;
+  inset-block-start: 50%;
   width: .43em;
   height: .43em;
   border: solid currentColor;
   border-width: 0 2px 2px 0;
   content: '';
+  translate: 0 -50%;
   transform: rotate(-45deg);
   transition: transform var(--panel-motion) var(--ease-out);
 }

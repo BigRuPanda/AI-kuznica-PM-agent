@@ -32,7 +32,7 @@ import { Cards, initialCards, labels } from './work-cards';
 import { InterviewSearch } from './interview-search';
 import { Icon } from './icons';
 import { Dialog } from './dialog';
-import { ChatMenu } from './chat-menu';
+import { ChatThreadRow } from './chat-thread-row';
 import type { ChatAction } from './chat-menu';
 import { ThemeProvider, ThemeSwitch } from './theme-switch';
 import { MetricRules } from './metric-rules';
@@ -47,7 +47,7 @@ import { styleFormValidation } from './form-validation';
 import { menuLayoutKey, readMenuLayout } from './menu-layout';
 import type { MenuLayout } from './menu-layout';
 import { minSidebarWidth, SidebarResizeHandle, useSidebarWidth } from './sidebar-width';
-import { PanelResizeHandle, usePanelSize, usePanelSpace, useViewportHeight } from './panel-size';
+import { PanelResizeHandle, useDiscussionDock, usePanelSize, usePanelSpace } from './panel-size';
 import { BrandLogo } from './brand-logo';
 import './team.css';
 import './tracking.css';
@@ -1017,17 +1017,8 @@ function ChatWorkspace({ home, id, action, refresh, onRename, onDelete }: {
             </label>
             <nav className="thread-list" aria-label="Переписки">
               {threads.map((t) => (
-                <div className="thread-row" key={t.id}>
-                  <a
-                    aria-current={activeId === t.id ? 'page' : undefined}
-                    href={'#chats/' + t.id}
-                    onClick={() => toggleList(false)}
-                  >
-                    <span className="thread-icon"><Icon name={t.scope === 'group' ? 'people' : 'chat'} /></span>
-                    <span className="thread-title" title={t.title}>{t.title}</span>
-                  </a>
-                  <ChatMenu thread={t} onAction={openAction} />
-                </div>
+                <ChatThreadRow key={t.id} thread={t} current={activeId === t.id}
+                  onSelect={() => toggleList(false)} onAction={openAction} />
               ))}
               {!threads.length && <p className="muted">{query ? 'Чаты не найдены' : 'Пока нет чатов'}</p>}
             </nav>
@@ -1202,11 +1193,9 @@ function Investigation({
   const [focusDiscussion, requestDiscussionFocus] = useState(false);
   const discussion = useRef<HTMLDivElement>(null);
   const { available, observe } = usePanelSpace();
-  const viewportHeight = useViewportHeight();
   const discussionWidth = usePanelSize('pm-case-chat-width', (available || 940) * .34, 232,
     available ? Math.max(232, Math.min(540, Math.floor(available - 300))) : 540);
-  const discussionHeight = usePanelSize('pm-case-chat-height', viewportHeight * .67, 340,
-    Math.max(1, viewportHeight - 36));
+  useDiscussionDock(discussion, !!d && !!tid);
   const [editingMeasurement, editMeasurement] = useState(false);
   const taskTitle = useRef<HTMLHeadingElement>(null);
   const effectSection = useRef<HTMLDetailsElement>(null);
@@ -1342,25 +1331,24 @@ function Investigation({
         </div>
         {!researchAvailable && caseActions}
       </div>
-      {research.investigation && <CaseInvestigation investigation={research.investigation} error={research.error}
-        refresh={research.refresh} userId={home.user.id} canExplore={!withdrawn && !completed}
-        canPublish={!withdrawn && !completed && !c.body.owner}
-        canDraft={!!(redmine.local || redmine.connected)} onDraft={draftId => action(() => onDraft(draftId))}
-        measurement={measurementEditor}
-        next={!withdrawn && (showEffect || scheduleEffect) ? {
-          label: showEffect ? 'Посмотреть результат проверки эффекта' : 'Назначить проверку эффекта', open: openNext,
-        } : undefined} />}
-      {researchAvailable && caseActions}
-      {tid && (
-        <button className="mobile-toggle" aria-expanded={mobileChat} onClick={() => moveView(() => chatMode(!mobileChat))}>
-          <Icon name="down" /> {mobileChat ? 'К разбору' : 'Обсудить'}
-        </button>
-      )}
-      <div className={'case-layout ' + (mobileChat && tid ? 'show-chat' : '')} ref={observe} style={{
+      <div className={'case-layout ' + (mobileChat && tid ? 'show-chat' : '')} ref={observe} data-discussion={!!tid} style={{
         '--discussion-width': discussionWidth.size + 'px',
-        '--discussion-height': discussionHeight.size + 'px',
       } as React.CSSProperties}>
         <div className="case-main" aria-busy={updating}>
+          {research.investigation && <CaseInvestigation investigation={research.investigation} error={research.error}
+            refresh={research.refresh} userId={home.user.id} canExplore={!withdrawn && !completed}
+            canPublish={!withdrawn && !completed && !c.body.owner}
+            canDraft={!!(redmine.local || redmine.connected)} onDraft={draftId => action(() => onDraft(draftId))}
+            measurement={measurementEditor}
+            next={!withdrawn && (showEffect || scheduleEffect) ? {
+              label: showEffect ? 'Посмотреть результат проверки эффекта' : 'Назначить проверку эффекта', open: openNext,
+            } : undefined} />}
+          {researchAvailable && caseActions}
+          {tid && (
+            <button className="mobile-toggle" aria-expanded={mobileChat} onClick={() => moveView(() => chatMode(!mobileChat))}>
+              <Icon name="down" /> {mobileChat ? 'К разбору' : 'Обсудить'}
+            </button>
+          )}
           {err && <p role="alert">{err}</p>}
           {c.body.origin && <p>
             <a href={'#snapshot/' + c.body.origin.calc + '/' + (c.body.origin.cards || initialCards).join(',')}>
@@ -1582,8 +1570,6 @@ function Investigation({
           <div id="case-discussion" className="case-discussion" ref={discussion}>
             <PanelResizeHandle panel={discussionWidth} className="discussion-width"
               label="Ширина обсуждения" controls="case-discussion" direction={-1} />
-            <PanelResizeHandle panel={discussionHeight} className="discussion-height"
-              label="Высота обсуждения" controls="case-discussion" axis="y" direction={-1} />
             <Chat
               id={tid}
               userId={home.user.id}

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useLayoutEffect, useRef, useState, type RefObject } from 'react';
 
 export function usePanelSpace() {
   const [available, setAvailable] = useState(0);
@@ -11,14 +11,40 @@ export function usePanelSpace() {
   return { available, observe };
 }
 
-export function useViewportHeight() {
-  const [height, setHeight] = useState(() => window.innerHeight);
-  useEffect(() => {
-    const measure = () => setHeight(window.innerHeight);
-    window.addEventListener('resize', measure);
-    return () => window.removeEventListener('resize', measure);
-  }, []);
-  return height;
+export function useDiscussionDock(ref: RefObject<HTMLDivElement | null>, mounted: boolean) {
+  useLayoutEffect(() => {
+    const dock = ref.current;
+    const layout = dock?.parentElement;
+    if (!mounted || !dock || !layout) return;
+    const topMenu = dock.closest('.team-app[data-menu="top"]')?.querySelector('.side');
+    const wide = matchMedia('(min-width: 821px)');
+    let frame = 0;
+    function measure() {
+      if (!dock || !layout || !wide.matches) return;
+      const inset = 16;
+      const stickyTop = (topMenu?.getBoundingClientRect().height ?? 0) + inset;
+      const top = Math.max(stickyTop, layout.getBoundingClientRect().top);
+      dock.style.setProperty('--discussion-top', stickyTop + 'px');
+      dock.style.setProperty('--discussion-height', Math.max(0, window.innerHeight - top - inset) + 'px');
+    }
+    function schedule() {
+      cancelAnimationFrame(frame);
+      frame = requestAnimationFrame(measure);
+    }
+    const observer = new ResizeObserver(schedule);
+    observer.observe(layout);
+    if (layout.previousElementSibling) observer.observe(layout.previousElementSibling);
+    if (topMenu) observer.observe(topMenu);
+    window.addEventListener('resize', schedule);
+    window.addEventListener('scroll', schedule, { passive: true });
+    measure();
+    return () => {
+      observer.disconnect();
+      cancelAnimationFrame(frame);
+      window.removeEventListener('resize', schedule);
+      window.removeEventListener('scroll', schedule);
+    };
+  }, [ref, mounted]);
 }
 
 export function usePanelSize(key: string, initial: number, minimum: number, maximum: number) {
@@ -40,17 +66,15 @@ export function usePanelSize(key: string, initial: number, minimum: number, maxi
   return { size: constrain(preview ?? saved ?? initial), min, max: maximum, constrain, setPreview, commit };
 }
 
-export function PanelResizeHandle({ panel, className, label, controls, axis = 'x', direction = 1 }: {
+export function PanelResizeHandle({ panel, className, label, controls, direction = 1 }: {
   panel: ReturnType<typeof usePanelSize>;
   className: string;
   label: string;
   controls: string;
-  axis?: 'x' | 'y';
   direction?: 1 | -1;
 }) {
   const drag = useRef<{ id: number; point: number; size: number } | null>(null);
   const [resizing, setResizing] = useState(false);
-  const point = (event: { clientX: number; clientY: number }) => axis === 'x' ? event.clientX : event.clientY;
   function stop(id: number) {
     if (drag.current?.id !== id) return;
     drag.current = null;
@@ -60,25 +84,25 @@ export function PanelResizeHandle({ panel, className, label, controls, axis = 'x
 
   return <div className={'panel-resizer ' + className}
     role="separator" tabIndex={0} aria-label={label} aria-controls={controls}
-    aria-orientation={axis === 'x' ? 'vertical' : 'horizontal'}
+    aria-orientation="vertical"
     aria-valuemin={panel.min} aria-valuemax={panel.max} aria-valuenow={panel.size}
-    data-axis={axis} data-resizing={resizing}
+    data-resizing={resizing}
     onPointerDown={event => {
       if (!event.isPrimary || event.button !== 0 || drag.current) return;
       event.preventDefault();
       event.currentTarget.focus({ preventScroll: true });
       event.currentTarget.setPointerCapture(event.pointerId);
-      drag.current = { id: event.pointerId, point: point(event), size: panel.size };
+      drag.current = { id: event.pointerId, point: event.clientX, size: panel.size };
       setResizing(true);
     }}
     onPointerMove={event => {
       const start = drag.current;
-      if (start?.id === event.pointerId) panel.setPreview(start.size + (point(event) - start.point) * direction);
+      if (start?.id === event.pointerId) panel.setPreview(start.size + (event.clientX - start.point) * direction);
     }}
     onPointerUp={event => {
       const start = drag.current;
       if (start?.id !== event.pointerId) return;
-      const next = panel.constrain(start.size + (point(event) - start.point) * direction);
+      const next = panel.constrain(start.size + (event.clientX - start.point) * direction);
       if (next !== start.size) panel.commit(next);
       stop(event.pointerId);
     }}
@@ -95,9 +119,7 @@ export function PanelResizeHandle({ panel, className, label, controls, axis = 'x
         return;
       }
       if (event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
-      const previous = axis === 'x' ? 'ArrowLeft' : 'ArrowUp';
-      const next = axis === 'x' ? 'ArrowRight' : 'ArrowDown';
-      const sizes = { [previous]: panel.size - 8 * direction, [next]: panel.size + 8 * direction,
+      const sizes: Record<string, number> = { ArrowLeft: panel.size - 8 * direction, ArrowRight: panel.size + 8 * direction,
         Home: panel.min, End: panel.max };
       if (!Object.hasOwn(sizes, event.key)) return;
       event.preventDefault();

@@ -128,10 +128,10 @@ function Checks({ run }: { run: InvestigationRun }) {
   </details>;
 }
 
-function RunSummary({ run }: { run: InvestigationRun }) {
+function RunSummary({ run, active = false }: { run: InvestigationRun; active?: boolean }) {
   return <>
     {run.status !== 'ready' && <p className="investigation-status" role={run.status === 'superseded' ? undefined : 'status'}>
-      <strong>{runStatus[run.status]}</strong>{run.reason && ' · ' + run.reason}
+      <strong>{active && run.status === 'queued' ? 'Очередь' : runStatus[run.status]}</strong>{run.reason && ' · ' + run.reason}
     </p>}
     {(run.result?.summary || run.summary) && <p className="investigation-text">{run.result?.summary || run.summary}</p>}
   </>;
@@ -226,11 +226,14 @@ export function CaseInvestigation({ investigation, error, refresh, userId, canEx
   const [prompt, setPrompt] = useState<InvestigationRun>();
   const [selected, select] = useState('');
   const ready = current?.status === 'ready' ? current.result : undefined;
+  const compactQueue = current?.status === 'queued' && !current.summary && !current.reason &&
+    !current.period && !current.unit && !current.calcId && !current.checks.length && !error;
   const currentMeasurement = ready && current ? measurement?.(current) : undefined;
   const publishable = (run: InvestigationRun) => canPublish && run.owner === userId
     && !run.published && run.status === 'ready' && !!run.result;
   return <div className="case-investigation">
-    {(current || canExplore || next || error) && <section className="paper investigation-decision" aria-label="Исследование">
+    {(current || canExplore || next || error) && <section className="paper investigation-decision" aria-label="Исследование"
+      data-compact-queue={compactQueue}>
       {current ? <>
         {current.owner && <p className="investigation-visibility muted">
           <span>{current.published ? 'Опубликовано для команды' : 'Личное исследование'}</span>
@@ -239,7 +242,7 @@ export function CaseInvestigation({ investigation, error, refresh, userId, canEx
         <RunMeta run={current} />
         <div aria-live="polite">
           {ready && <h2>Вывод</h2>}
-          <RunSummary run={current} />
+          <RunSummary run={current} active />
         </div>
         {ready && canExplore && ((!next && ready.action) || currentMeasurement) && <div className="investigation-recommendation">
           {!next && <><h3>Что делать ПМу</h3>

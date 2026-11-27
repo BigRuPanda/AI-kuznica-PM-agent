@@ -70,6 +70,7 @@
   min-height: 0;
   overflow: auto;
 }
+.thread-slot { min-width: 0; min-height: 44px; }
 .thread-row {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
@@ -77,7 +78,15 @@
   border-radius: var(--button-radius);
   transition: background-color var(--fast);
 }
-.thread-row:has(> a[aria-current='page']) { background: var(--accent-soft); }
+.thread-row:is(:hover, :focus-within, [data-expanded='true'], :has(> a[aria-current='page'], > button[aria-expanded='true'])) {
+  --thread-ink: var(--accent-text);
+  background: var(--accent-soft);
+}
+.thread-row[data-expanded='true'] {
+  position: fixed;
+  z-index: 3;
+  box-shadow: var(--elevation);
+}
 .thread-list a {
   display: grid;
   align-items: center;
@@ -85,12 +94,14 @@
   min-height: 44px;
   gap: 7px;
   padding: 6px;
-  color: var(--fg);
+  color: var(--thread-ink, var(--fg));
   border-radius: var(--button-radius);
   transition: color var(--fast), background-color var(--fast);
 }
-.thread-list a[aria-current='page'] { color: var(--accent-text); font-weight: 620; }
+.thread-list a[aria-current='page'] { font-weight: 620; }
 .thread-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.thread-title-text { white-space: nowrap; }
+.thread-row[data-expanded='true'] .thread-title { overflow-x: auto; scrollbar-width: thin; text-overflow: clip; }
 .thread-icon { display: grid; place-items: center; }
 .thread-menu-trigger {
   display: inline-grid;
@@ -109,7 +120,11 @@
   color: var(--accent-text);
 }
 .thread-menu-trigger .ui-icon { width: 17px; height: 17px; }
-.thread-row .thread-menu-trigger { margin-inline-end: 5px; }
+.thread-row .thread-menu-trigger {
+  margin-inline-end: 5px;
+  color: var(--thread-ink, var(--fg-muted));
+  background: transparent;
+}
 .thread-row .thread-menu-trigger:focus-visible { outline-offset: -2px; }
 @media (hover: hover) and (pointer: fine) {
   .thread-row:where(:not(:hover):not(:focus-within)) .thread-menu-trigger:where(:not([aria-expanded='true'])) {
@@ -167,22 +182,16 @@
 .panel-resizer {
   position: absolute;
   z-index: 1;
+  inset-block: 8px;
+  width: 12px;
+  cursor: col-resize;
   touch-action: none;
   user-select: none;
-}
-.panel-resizer[data-axis='x'] { inset-block: 8px; width: 10px; cursor: col-resize; }
-.panel-resizer[data-axis='y'] { inset-inline: 8px; height: 10px; cursor: row-resize; }
-.panel-resizer::before {
-  position: absolute;
-  inset: 3px;
   border-radius: var(--pill);
-  background: var(--control-border);
-  content: '';
 }
-.panel-resizer:is(:hover, :focus-visible, [data-resizing='true'])::before { background: var(--accent); }
-.threads-resizer { inset-inline-end: -12px; }
-.discussion-width { inset-inline-start: -12px; }
-.discussion-height { inset-block-start: -12px; }
+.panel-resizer:focus-visible { outline-offset: -3px; }
+.threads-resizer { inset-inline-end: -7px; }
+.discussion-width { inset-inline-start: -6px; }
 
 .chat-box {
   display: flex;
@@ -195,15 +204,17 @@
   background: var(--surface);
 }
 .case-discussion {
-  --discussion-inset: 20px;
   position: sticky;
-  top: max(16px, calc(100dvh - var(--discussion-height) - var(--discussion-inset)));
+  top: var(--discussion-top, 16px);
   min-width: 0;
 }
 .case-discussion .chat-box {
-  height: var(--discussion-height);
+  height: var(--discussion-height, calc(100dvh - 32px));
   min-height: 0;
+  overflow: auto;
+  overscroll-behavior: contain;
 }
+.case-discussion .chat-box > :is(.conversation-heading, .chat-composer) { flex-shrink: 0; }
 .standalone-chat {
   height: var(--chat-height);
 }

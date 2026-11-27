@@ -176,12 +176,6 @@ p {
   min-height: 100dvh;
   transition: --sidebar-width var(--panel-motion) var(--ease-out);
 }
-.team-app, .login-wrap {
-  background-image: repeating-radial-gradient(ellipse at 100% 0, transparent 0 32px, var(--brand-line) 33px 34px, transparent 35px 47px);
-  background-size: min(46vw, 690px) 380px;
-  background-position: top right;
-  background-repeat: no-repeat;
-}
 .side {
   background: var(--surface);
   color: var(--fg);
@@ -392,6 +386,7 @@ p {
   overflow-wrap: anywhere;
   animation: page-in var(--panel-motion) var(--ease-out);
 }
+.workspace-page:is([data-route='case'], [data-route='chats']) { animation-name: workspace-fade; }
 .page-head,
 .row-between,
 .toolbar,
@@ -481,6 +476,7 @@ p {
   gap: 20px;
   align-items: start;
 }
+.case-layout[data-discussion='false'] { grid-template-columns: minmax(0, 1fr); }
 .case-main { min-width: 0; }
 .toolbar {
   flex-wrap: wrap;
@@ -533,7 +529,6 @@ p {
 }
 .card-foot > .proof { margin: 0; min-width: 0; }
 .card-foot > .proof > summary { width: fit-content; padding-block: 7px; font-weight: 650; color: var(--fg); }
-.card-foot > .proof > summary::before { inset-block-start: calc(7px + .49em); }
 .team-plot {
   width: 100%;
   display: block;
@@ -832,6 +827,7 @@ p {
 }
 @media (min-width: 821px) {
   .team-app[data-menu='top'] { display: block; }
+  .content:has(.workspace-page[data-route='case']) { padding-block-end: 16px; }
   .team-app[data-menu='top'] .side {
     height: auto;
     z-index: 5;
@@ -906,7 +902,7 @@ p {
   .case-layout.show-chat > .case-discussion {
     display: block;
   }
-  .case-layout.show-chat .case-main {
+  .case-layout.show-chat .case-main > :not(.case-investigation, .investigation-tools, .mobile-toggle, [role='alert']) {
     display: none;
   }
   .mobile-toggle {

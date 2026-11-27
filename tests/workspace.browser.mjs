@@ -141,51 +141,96 @@ test('Softline workspace, upgrade and browser journeys', async t => {
       const draft = field(admin,'Вопрос агенту');
       await draft.fill('Черновик для проверки панели');
       const width = admin.getByRole('separator',{name:'Ширина списка чатов'});
+      await admin.mouse.move(10,10);
       await width.press('Home');
       assert.ok(await title.evaluate(el => el.scrollWidth > el.clientWidth && getComputedStyle(el).whiteSpace === 'nowrap'));
       assert.equal(await title.getAttribute('title'),await title.textContent());
       const before = Number(await width.getAttribute('aria-valuenow'));
       const edge = await width.boundingBox();
+      const panel = await admin.locator('.threads-panel').boundingBox();
+      assert.ok(Math.abs(edge.x + edge.width / 2 - panel.x - panel.width) <= 2);
+      assert.ok(await width.evaluate(el => getComputedStyle(el,'::before').content === 'none'));
       await admin.mouse.move(edge.x + edge.width / 2, edge.y + edge.height / 2);
       await admin.mouse.down();
       await admin.mouse.move(edge.x + edge.width / 2 + 32, edge.y + edge.height / 2, {steps:4});
       await admin.mouse.up();
       const resized = Number(await width.getAttribute('aria-valuenow'));
       assert.ok(resized > before);
+      await width.press('Home');
+      const chatBounds = await admin.locator('.standalone-chat').boundingBox();
+      await row.hover();
+      await row.locator('.thread-title').evaluate(el => el.getBoundingClientRect());
+      const expanded = await row.boundingBox();
+      assert.ok(expanded.x + expanded.width > chatBounds.x);
+      assert.equal(await title.evaluate(el => getComputedStyle(el).whiteSpace),'nowrap');
+      assert.equal(await title.evaluate(el => getComputedStyle(el).color),await menu.evaluate(el => getComputedStyle(el).color));
+      assert.deepEqual(await admin.locator('.standalone-chat').boundingBox(),chatBounds);
+      await menu.click();
+      await visible(admin.getByRole('menuitem',{name:'Переименовать'}));
+      await admin.keyboard.press('Escape');
+      await admin.mouse.move(10,10);
+      await row.getByRole('link').focus();
+      assert.ok((await row.boundingBox()).width > before);
+      await width.press('ArrowRight');
+      const persisted = Number(await width.getAttribute('aria-valuenow'));
       await role(admin,'Свернуть список чатов').click();
       await rows.waitFor({state:'hidden'});
       assert.equal(await draft.inputValue(),'Черновик для проверки панели');
       await role(admin,'Развернуть список чатов').click();
       await admin.reload();
-      assert.equal(Number(await width.getAttribute('aria-valuenow')),resized);
+      assert.equal(Number(await width.getAttribute('aria-valuenow')),persisted);
       await draft.fill('');
 
       await go(admin,caseRoute);
+      await admin.evaluate(() => window.scrollTo(0,0));
       const discussion = admin.getByRole('region',{name:'Переписка'});
-      const chatHeight = admin.getByRole('separator',{name:'Высота обсуждения'});
       const chatWidth = admin.getByRole('separator',{name:'Ширина обсуждения'});
       const checkDock = async () => {
-        const bounds = await discussion.boundingBox();
-        assert.ok(bounds && Math.abs(admin.viewportSize().height - bounds.y - bounds.height) <= 30);
+        await admin.waitForFunction(() => Math.abs(innerHeight -
+          document.querySelector('#case-discussion .chat-box').getBoundingClientRect().bottom) <= 20);
         assert.ok(await admin.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
       };
       await visible(discussion);
-      await discussion.evaluate(el => window.scrollBy(0, Math.max(120, el.getBoundingClientRect().top)));
       await checkDock();
-      const heightBefore = Number(await chatHeight.getAttribute('aria-valuenow'));
-      await chatHeight.press('ArrowUp');
-      const heightAfter = Number(await chatHeight.getAttribute('aria-valuenow'));
-      assert.ok(heightAfter > heightBefore);
+      await visible(admin.getByText('Очередь',{exact:true}).first());
+      const atOpen = await discussion.boundingBox();
+      const investigation = await admin.getByRole('region',{name:'Исследование'}).boundingBox();
+      assert.ok(Math.abs(atOpen.y - investigation.y) <= 2);
+      assert.equal(await admin.getByRole('separator',{name:'Высота обсуждения'}).count(),0);
+      await admin.evaluate(() => window.scrollBy(0,370));
+      await checkDock();
+      assert.ok((await discussion.boundingBox()).height > atOpen.height);
+      const handle = await chatWidth.boundingBox();
+      const bounds = await discussion.boundingBox();
+      assert.ok(Math.abs(handle.x + handle.width / 2 - bounds.x) <= 2);
       const widthBefore = Number(await chatWidth.getAttribute('aria-valuenow'));
       await chatWidth.press('ArrowLeft');
       const widthAfter = Number(await chatWidth.getAttribute('aria-valuenow'));
       assert.ok(widthAfter > widthBefore);
       await admin.reload();
-      assert.equal(Number(await chatHeight.getAttribute('aria-valuenow')),heightAfter);
       assert.equal(Number(await chatWidth.getAttribute('aria-valuenow')),widthAfter);
       await admin.setViewportSize({width:900,height:844});
       await discussion.evaluate(el => window.scrollBy(0, Math.max(120, el.getBoundingClientRect().top)));
       await checkDock();
+      await go(admin,'settings/personal');
+      await role(admin,'Сверху').click();
+      await go(admin,caseRoute);
+      await visible(discussion);
+      await admin.evaluate(() => window.scrollTo(0,450));
+      await checkDock();
+      const topMenu = await admin.locator('#workspace-sidebar').boundingBox();
+      assert.ok(Math.abs((await discussion.boundingBox()).y - topMenu.y - topMenu.height - 16) <= 2);
+      await go(admin,'settings/personal');
+      await role(admin,'Слева').click();
+      await admin.setViewportSize({width:900,height:340});
+      await go(admin,caseRoute);
+      await visible(discussion);
+      await admin.evaluate(() => window.scrollTo(0,0));
+      await checkDock();
+      const shortComposer = field(admin,'Вопрос агенту');
+      await shortComposer.scrollIntoViewIfNeeded();
+      const shortBounds = await shortComposer.boundingBox();
+      assert.ok(shortBounds && shortBounds.y + shortBounds.height <= admin.viewportSize().height);
     } finally {
       await admin.setViewportSize({width:1440,height:900});
     }
@@ -194,10 +239,18 @@ test('Softline workspace, upgrade and browser journeys', async t => {
     });
     const { promise: threadGate, resolve: releaseThread } = Promise.withResolvers();
     try {
+      await touch.setViewportSize({width:1024,height:844});
+      await touch.getByRole('separator',{name:'Ширина списка чатов'}).press('Home');
+      const touchMenu = touch.getByRole('button',{name:'Действия чата «Исходная переписка»'});
+      await touchMenu.tap();
+      await visible(touch.getByRole('menuitem',{name:'Переименовать'}));
+      assert.equal(await touchMenu.evaluate(el => el.closest('.thread-row').dataset.expanded),'false');
+      await touch.keyboard.press('Escape');
+      await touch.setViewportSize({width:390,height:844});
       await role(touch,'Развернуть список чатов').tap();
       const rows = touch.getByRole('navigation',{name:'Переписки'});
       const active = rows.getByRole('link',{name:'Исходная переписка'});
-      await touch.getByRole('button',{name:'Действия чата «Исходная переписка»'}).tap();
+      await touchMenu.tap();
       await visible(touch.getByRole('menuitem',{name:'Переименовать'}));
       await touch.keyboard.press('Escape');
       await active.tap();
@@ -288,6 +341,25 @@ test('Softline workspace, upgrade and browser journeys', async t => {
     assert.equal(await admin.getByRole('link',{name:'Настройки команды'}).getAttribute('aria-current'),'page');
     for (const name of ['Подключения команды','Правило уведомления','Мониторинг продуктовых метрик','Доставка уведомлений'])
       await visible(admin.getByRole('heading',{name}));
+    const rules = admin.getByRole('region',{name:'Мониторинг продуктовых метрик'});
+    const ctr = rules.locator('details').filter({ hasText:'CTR рекомендаций ЛК' });
+    await visible(ctr.getByText('Недостаточно данных',{exact:true}));
+    await visible(ctr.getByText('Выберите релиз для четырёхнедельной базы.',{exact:true}));
+    const ruleSummary = ctr.locator('summary');
+    const checkChevron = () => ruleSummary.evaluate(el => (
+      Math.abs(parseFloat(getComputedStyle(el,'::before').top) - el.getBoundingClientRect().height / 2) < 1
+    ));
+    assert.ok(await checkChevron());
+    await ruleSummary.click();
+    for (const group of ['Продукт и источник','База сравнения','Условия уведомления'])
+      await visible(ctr.getByRole('group',{name:group}));
+    assert.ok(await checkChevron());
+    await ruleSummary.click();
+    const shapes = admin.locator('.workspace-backdrop > span');
+    await shapes.first().waitFor({state:'attached'});
+    assert.equal(await shapes.first().evaluate(el => getComputedStyle(el).animationPlayState),'running');
+    const quiet = member.locator('.workspace-backdrop > span').first();
+    assert.equal(await quiet.evaluate(el => getComputedStyle(el).animationName),'none');
     assert.equal(await role(admin,'Сверху').count(),0);
     assert.equal(await role(admin,'Выпустить ключ MCP').count(),0);
     await submit(admin,'invite',()=>role(admin,'Пригласить участника').click());
@@ -298,6 +370,11 @@ test('Softline workspace, upgrade and browser journeys', async t => {
     await submit(admin,'save-research-settings',()=>role(admin,'Сохранить режим').click());
     await go(member,'settings');
     await visible(member.getByText('Ведущий и рецензент',{exact:true}));
+    const memberRule = member.getByRole('region',{name:'Мониторинг продуктовых метрик'})
+      .locator('details').filter({hasText:'CTR рекомендаций ЛК'});
+    await memberRule.locator('summary').click();
+    await visible(memberRule.getByText('Весь трафик',{exact:true}));
+    assert.equal(await role(memberRule,'Сохранить правило').count(),0);
     assert.equal(await role(member,'Сохранить режим').count(),0);
     await member.getByRole('link',{name:'Мои настройки'}).click();
     const personalMode = field(member,'Режим моих поручений');
@@ -804,6 +881,12 @@ test('Softline workspace, upgrade and browser journeys', async t => {
     saveMetricRule(store.db, {metric, product, sourceId, segment:'desktop', releaseId});
     load(Array.from({length:6}, (_, i) => [report(i, 'desktop', i < 4 ? 10 : 3), report(i, 'mobile', 8)]).flat());
     const autoCase = store.db.prepare("SELECT id FROM cases WHERE product=?").get(product).id;
+    await go(admin,'settings');
+    const monitored = admin.getByRole('region',{name:'Мониторинг продуктовых метрик'})
+      .locator('details').filter({hasText:'CTR рекомендаций ЛК'});
+    await visible(monitored.getByText('Отклонение подтверждено',{exact:true}));
+    await visible(monitored.locator('summary').getByText(/Размещение рекомендаций · /));
+    await visible(monitored.getByText('Последняя проверенная неделя',{exact:true}));
     await go(admin,'cases');
     await admin.locator('a[href="#case/' + autoCase + '"]').click();
     await admin.locator('.card-evidence').getByRole('button',{name:/^Метрики/}).click();
