@@ -1,10 +1,11 @@
-import { useEffect, useState } from 'react';
+import { createContext, useContext, useEffect, useState, type ReactNode } from 'react';
 import { Icon } from './icons';
 
 type Theme = 'light' | 'dark';
 const storageKey = 'pm-theme';
+const ThemeContext = createContext<{ theme: Theme; toggle: () => void } | null>(null);
 
-export function ThemeSwitch() {
+export function ThemeProvider({ children }: { children: ReactNode }) {
   const root = document.documentElement;
   const [theme, setTheme] = useState<Theme>(() => root.dataset.theme === 'dark' ? 'dark' : 'light');
 
@@ -37,6 +38,19 @@ export function ThemeSwitch() {
     };
   }, [root]);
 
+  function toggle() {
+    const next = theme === 'dark' ? 'light' : 'dark';
+    root.dataset.theme = next;
+    root.dataset.themeOverride = 'true';
+    setTheme(next);
+    try { localStorage.setItem(storageKey, next); } catch {}
+  }
+
+  return <ThemeContext.Provider value={{ theme, toggle }}>{children}</ThemeContext.Provider>;
+}
+
+export function ThemeSwitch() {
+  const { theme, toggle } = useContext(ThemeContext)!;
   return (
     <button
       className="theme-switch"
@@ -44,13 +58,7 @@ export function ThemeSwitch() {
       aria-pressed={theme === 'dark'}
       aria-label="Тёмная тема"
       title={theme === 'dark' ? 'Включить светлую тему' : 'Включить тёмную тему'}
-      onClick={() => {
-        const next = theme === 'dark' ? 'light' : 'dark';
-        root.dataset.theme = next;
-        root.dataset.themeOverride = 'true';
-        setTheme(next);
-        try { localStorage.setItem(storageKey, next); } catch {}
-      }}
+      onClick={toggle}
     >
       <Icon name={theme === 'dark' ? 'moon' : 'sun'} />
       <span className="menu-label">Тема</span>

@@ -30,7 +30,7 @@ import { Icon } from './icons';
 import { Dialog } from './dialog';
 import { ChatMenu } from './chat-menu';
 import type { ChatAction } from './chat-menu';
-import { ThemeSwitch } from './theme-switch';
+import { ThemeProvider, ThemeSwitch } from './theme-switch';
 import { MetricRules } from './metric-rules';
 import { InvestigationSettings } from './investigation-settings';
 import { CaseInvestigation, InvestigationSnapshot, useCaseInvestigation } from './case-investigation';
@@ -43,6 +43,7 @@ import { styleFormValidation } from './form-validation';
 import { menuLayoutKey, readMenuLayout } from './menu-layout';
 import type { MenuLayout } from './menu-layout';
 import { minSidebarWidth, SidebarResizeHandle, useSidebarWidth } from './sidebar-width';
+import { PanelResizeHandle, usePanelSize, usePanelSpace, useViewportHeight } from './panel-size';
 import { BrandLogo } from './brand-logo';
 import './team.css';
 import './tracking.css';
@@ -273,7 +274,6 @@ function Chat({
   attachment,
   screen,
   onAttachFocus,
-  headerActions,
 }: {
   id: string;
   userId: string;
@@ -286,7 +286,6 @@ function Chat({
   attachment?: Attachment;
   screen?: { calc: string; full: boolean; control?: string; cards: string[] };
   onAttachFocus?: () => void;
-  headerActions?: React.ReactNode;
 }) {
   const { open: openMaterial, load: loadMaterial, listen } = useMaterials();
   const [progress, setProgress] = useState<string[]>([]);
@@ -479,7 +478,6 @@ function Chat({
           <h3>{caseId ? 'Обсудить разбор' : activeThread?.title || 'Чат'}</h3>
           <small>{isGroup ? 'Командный чат' : 'Личный чат'}</small>
         </div>
-        {headerActions}
       </header>
       <div className="conversation-body">
         <div
@@ -926,11 +924,14 @@ function ChatWorkspace({ home, id, action, refresh, onRename, onDelete }: {
 }) {
   const [query, search] = useState('');
   const [listOpen, toggleList] = useState(false);
+  const [listCollapsed, collapseList] = useState(false);
   const [creating, create] = useState(false);
   const [saving, save] = useState(false);
   const [editing, edit] = useState<{ thread: Thread; action: ChatAction } | null>(null);
+  const { available, observe } = usePanelSpace();
+  const listWidth = usePanelSize('pm-chat-list-width', 228, 164,
+    available ? Math.max(164, Math.min(368, Math.floor(available - 314))) : 368);
   const activeId = id || 'group';
-  const activeThread = home.threads.find((thread) => thread.id === activeId);
   const term = query.trim().toLocaleLowerCase('ru');
   const threads = home.threads.filter((thread) => thread.title.toLocaleLowerCase('ru').includes(term));
   const openAction = (thread: Thread, action: ChatAction) => edit({ thread, action });
@@ -956,11 +957,23 @@ function ChatWorkspace({ home, id, action, refresh, onRename, onDelete }: {
           <Icon name="plus" /> Новый чат
         </button>
       </div>
-      <div className="chat-layout">
+      <div className="chat-layout" ref={observe} data-list-collapsed={listCollapsed}
+        style={{ '--thread-width': listWidth.size + 'px' } as React.CSSProperties}>
         <aside className="threads-panel" aria-label="Чаты" data-open={listOpen}>
+          <div className="threads-heading">
+            {!listCollapsed && <h2>Список чатов</h2>}
+            <button type="button" className="threads-collapse"
+              aria-label={listCollapsed ? 'Развернуть список чатов' : 'Свернуть список чатов'}
+              title={listCollapsed ? 'Развернуть список чатов' : 'Свернуть список чатов'}
+              aria-expanded={!listCollapsed} aria-controls="thread-panel-content"
+              onClick={() => collapseList(value => !value)}>
+              <Icon name={listCollapsed ? 'right' : 'left'} />
+            </button>
+          </div>
           <button
             type="button"
             className="threads-toggle"
+            aria-label={listOpen ? 'Свернуть список чатов' : 'Развернуть список чатов'}
             aria-expanded={listOpen}
             aria-controls="thread-panel-content"
             onClick={() => toggleList(!listOpen)}
@@ -982,7 +995,7 @@ function ChatWorkspace({ home, id, action, refresh, onRename, onDelete }: {
                     onClick={() => toggleList(false)}
                   >
                     <span className="thread-icon"><Icon name={t.scope === 'group' ? 'people' : 'chat'} /></span>
-                    <span className="thread-title">{t.title}</span>
+                    <span className="thread-title" title={t.title}>{t.title}</span>
                   </a>
                   <ChatMenu thread={t} onAction={openAction} />
                 </div>
@@ -990,6 +1003,8 @@ function ChatWorkspace({ home, id, action, refresh, onRename, onDelete }: {
               {!threads.length && <p className="muted">{query ? 'Чаты не найдены' : 'Пока нет чатов'}</p>}
             </nav>
           </div>
+          {!listCollapsed && <PanelResizeHandle panel={listWidth} className="threads-resizer"
+            label="Ширина списка чатов" controls="thread-panel-content" />}
         </aside>
         <Chat
           key={activeId}
@@ -997,7 +1012,6 @@ function ChatWorkspace({ home, id, action, refresh, onRename, onDelete }: {
           id={activeId}
           threads={home.threads}
           action={action}
-          headerActions={activeThread && <ChatMenu thread={activeThread} onAction={openAction} />}
         />
       </div>
       {creating && (
@@ -1156,6 +1170,14 @@ function Investigation({
     [pinned, prefix],
   );
   const [mobileChat, chatMode] = useState(false);
+  const [focusDiscussion, requestDiscussionFocus] = useState(false);
+  const discussion = useRef<HTMLDivElement>(null);
+  const { available, observe } = usePanelSpace();
+  const viewportHeight = useViewportHeight();
+  const discussionWidth = usePanelSize('pm-case-chat-width', (available || 940) * .34, 232,
+    available ? Math.max(232, Math.min(540, Math.floor(available - 300))) : 540);
+  const discussionHeight = usePanelSize('pm-case-chat-height', viewportHeight * .67, 340,
+    Math.max(1, viewportHeight - 36));
   const [editingMeasurement, editMeasurement] = useState(false);
   const taskTitle = useRef<HTMLHeadingElement>(null);
   const effectSection = useRef<HTMLDetailsElement>(null);
@@ -1170,6 +1192,11 @@ function Investigation({
     document.getElementById('case-draft-' + draftToFocus)?.focus();
     setDraftToFocus('');
   }, [draftToFocus]);
+  useLayoutEffect(() => {
+    if (!focusDiscussion || !tid) return;
+    discussion.current?.querySelector<HTMLTextAreaElement>('.chat-composer textarea')?.focus();
+    requestDiscussionFocus(false);
+  }, [focusDiscussion, tid]);
   if (!d) return <p className={err ? 'error' : 'empty'} role={err ? 'alert' : 'status'}>{err || 'Загружаем разбор…'}</p>;
   const v = d.view,
     c = d.case;
@@ -1300,7 +1327,10 @@ function Investigation({
           <Icon name="down" /> {mobileChat ? 'К разбору' : 'Обсудить'}
         </button>
       )}
-      <div className={'case-layout ' + (mobileChat ? 'show-chat' : '')}>
+      <div className={'case-layout ' + (mobileChat && tid ? 'show-chat' : '')} ref={observe} style={{
+        '--discussion-width': discussionWidth.size + 'px',
+        '--discussion-height': discussionHeight.size + 'px',
+      } as React.CSSProperties}>
         <div className="case-main" aria-busy={updating}>
           {err && <p role="alert">{err}</p>}
           {c.body.origin && <p>
@@ -1374,6 +1404,7 @@ function Investigation({
             onAsk={(x) => {
               ask(x);
               chatMode(true);
+              requestDiscussionFocus(true);
             }}
             onPin={(k) => {
               const next = pinned.includes(k) ? pinned.filter((p) => p !== k) : [...pinned, k];
@@ -1519,22 +1550,28 @@ function Investigation({
           )}
         </div>
         {tid && (
-          <Chat
-            id={tid}
-            userId={home.user.id}
-            caseId={id}
-            threads={home.threads}
-            action={action}
-            context={ctx}
-            attachment={attachment}
+          <div id="case-discussion" className="case-discussion" ref={discussion}>
+            <PanelResizeHandle panel={discussionWidth} className="discussion-width"
+              label="Ширина обсуждения" controls="case-discussion" direction={-1} />
+            <PanelResizeHandle panel={discussionHeight} className="discussion-height"
+              label="Высота обсуждения" controls="case-discussion" axis="y" direction={-1} />
+            <Chat
+              id={tid}
+              userId={home.user.id}
+              caseId={id}
+              threads={home.threads}
+              action={action}
+              context={ctx}
+              attachment={attachment}
               screen={{ calc: v.id, full, control: peer || v.summary[1]?.product, cards: caseCards }}
-            clearContext={() => {
-              ask('');
-              attach(undefined);
-            }}
-            onResult={result}
-            onAttachFocus={() => chatMode(true)}
-          />
+              clearContext={() => {
+                ask('');
+                attach(undefined);
+              }}
+              onResult={result}
+              onAttachFocus={() => chatMode(true)}
+            />
+          </div>
         )}
       </div>
       {confirmation && (
@@ -1770,6 +1807,10 @@ function Settings({ home, action, refresh, menu, changeMenu, scope }: {
         </section>
       )}
       {scope === 'personal' && <>
+        <section className="paper" aria-labelledby="appearance-title">
+          <h3 id="appearance-title">Оформление</h3>
+          <ThemeSwitch />
+        </section>
         <section className="paper menu-preference" aria-labelledby="menu-preference-title">
           <h3 id="menu-preference-title">Положение меню</h3>
           <div className="actions menu-preference-options">
@@ -2016,7 +2057,6 @@ function Workspace({ user, onLogout }: { user: User; onLogout: () => void }) {
           <a className="menu-command" href="#settings" aria-label="Настройки" title="Настройки" aria-current={settings ? 'page' : undefined}>
             <Icon name="settings" /><span className="menu-label">Настройки</span>
           </a>
-          <ThemeSwitch />
           <span className="session-role" title={user.role === 'admin' ? 'Администратор' : undefined}>
             {user.role === 'admin' ? <><span className="full-role">Администратор</span><span className="short-role">Админ</span></> :
               user.role === 'judge' ? 'Демо · жюри' : 'Участник'}
@@ -2241,4 +2281,4 @@ function Root() {
   );
 }
 styleFormValidation();
-createRoot(document.getElementById('root')!).render(<Root />);
+createRoot(document.getElementById('root')!).render(<ThemeProvider><Root /></ThemeProvider>);

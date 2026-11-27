@@ -1,13 +1,13 @@
 import { RangeChart, WEEK } from './range-chart';
 import type { Attachment } from './range-chart';
 import React, { useState } from 'react';
-import { num, sourceText } from './team-data';
+import { num } from './team-data';
 import type { View, Issue, MetricSeries } from './team-data';
 import { analysisPeriods, changeLabel } from './case-periods';
 import { SignalEvidence } from './signal-evidence';
-import { WatchSummary } from './measurement';
+import { metricName, WatchSummary } from './measurement';
 import { Icon } from './icons';
-import { moveView } from './motion';
+import { Dialog } from './dialog';
 export const labels: Record<string, string> = {
   summary: 'Сравнение периодов',
   trend: 'Индекс заказов',
@@ -22,51 +22,103 @@ export const labels: Record<string, string> = {
 };
 export const initialCards = ['summary', 'trend', 'evidence', 'timeline', 'backlog'];
 
+const sourceKinds = [
+  { key: 'metrics', label: 'Метрики', icon: 'trend' },
+  { key: 'competitor', label: 'Конкуренты', icon: 'overview' },
+  { key: 'interview', label: 'Исследования', icon: 'people' },
+  { key: 'backlog', label: 'Связанные задачи', icon: 'cases' },
+] as const;
+
+type MetricSourceRow = { label: string; date?: string; value?: string; source: string; partial?: boolean };
+
+function metricSourceRows(view: View): MetricSourceRow[] {
+  const orders = view.summary.flatMap(series => series.rows.map(row => ({
+    label: 'Индекс заказов · ' + series.product,
+    date: row.week, value: num(row.value) + ' п.', source: row.source, partial: row.partial,
+  })));
+  const signal = view.signal;
+  const signalLabel = signal?.metric && metricName(signal.metric);
+  const observed = signalLabel && signal.evidence
+    ? [...signal.evidence.baseline, signal.evidence.latest].flatMap(week => week.rows.map(row => ({
+      label: signalLabel + (row.segment && row.segment !== 'all' ? ' · ' + row.segment : ''),
+      date: row.date,
+      value: row.n != null && row.d != null && row.d > 0
+        ? num(row.n / row.d * 100) + '% (' + num(row.n) + ' / ' + num(row.d) + ')' : undefined,
+      source: row.source,
+    })))
+    : [];
+  const observations = new Set(observed.map(row => row.source));
+  const ratios = [
+    { label: metricName('lk_reco_ctr'), sources: view.ctr?.sources },
+    { label: metricName('cfg_reach_rate'), sources: view.reach?.sources },
+  ].flatMap(({label, sources}) => [...new Set(sources)].filter(source => label !== signalLabel || !observations.has(source))
+    .map(source => ({ label, source })));
+  return [...orders, ...observed, ...ratios];
+}
+
 function Sources({ view }: { view: View }) {
-  const metric = view.summary.find((row) => row.product === view.product);
-  const files = [...new Set(metric?.rows.map((row) => row.source) || [])];
-  const kinds = [
-    { key: 'competitor', label: 'Конкуренты', icon: 'overview' },
-    { key: 'interview', label: 'Исследования', icon: 'people' },
-    { key: 'backlog', label: 'Связанные задачи', icon: 'cases' },
-  ];
+  const [category, setCategory] = useState<typeof sourceKinds[number]>();
+  const metrics = category?.key === 'metrics';
+  const rows = metrics ? metricSourceRows(view) : [];
+  const entries = category && !metrics ? view.evidence.filter(item => item.kind === category.key) : [];
+  const hasMetrics = view.summary.some(series => series.rows.length) || view.signal?.evidence ||
+    !!view.ctr?.sources?.length || !!view.reach?.sources?.length;
   return (
     <div className="sources-grid">
-      <section className="source-group">
-        <h4><Icon name="trend" /> Метрики</h4>
-        <p>{metric?.baseWeeks && metric.weeks ? 'Индекс заказов · ' + view.product : 'Нет сравнения по индексу.'}</p>
-        {files.length > 0 && (
-          <details>
-            <summary>Источники расчёта</summary>
-            {files.map((file) => <small key={file}>{file}</small>)}
-          </details>
-        )}
-      </section>
-      {kinds.map(({ key, label, icon }) => {
-        const entries = view.evidence.filter((item) => item.kind === key);
-        if (key === 'backlog' && !entries.length) return null;
+      {sourceKinds.map(kind => {
+        const count = view.evidence.filter(item => item.kind === kind.key).length;
+        if (kind.key === 'backlog' && !count) return null;
         return (
-          <section className="source-group" key={key}>
-            <h4><Icon name={icon} /> {label}</h4>
-            {entries.length ? (
-              <>
-                <p className="source-preview">{sourceText(entries[0])}</p>
-                <details>
-                  <summary>Выдержки ({entries.length})</summary>
-                  {entries.map((item) => (
-                    <div className="excerpt" key={item.key}>
-                      <small>{item.source}</small>
-                      {item.metadata?.question && <small>Вопрос исследования · {item.metadata.question}</small>}
-                      {item.metadata?.hypothesis && <small>Гипотеза «{item.metadata.hypothesis}» · {item.metadata.relation}</small>}
-                      <p>{sourceText(item)}</p>
-                    </div>
-                  ))}
-                </details>
-              </>
-            ) : <p className="muted">Нет материалов.</p>}
-          </section>
+          <button type="button" key={kind.key} className="source-group" aria-haspopup="dialog"
+            onClick={event => {
+              event.currentTarget.focus({ preventScroll: true });
+              setCategory(kind);
+            }}>
+            <span className="source-group-title"><Icon name={kind.icon} /> {kind.label} <Icon name="right" /></span>
+            <small>{kind.key === 'metrics' && hasMetrics ? 'Данные расчёта' :
+              count ? 'Материалов: ' + count : 'Нет материалов.'}</small>
+          </button>
         );
       })}
+      {category && (
+        <Dialog title={category.label} close={() => setCategory(undefined)} wide>
+          {(metrics ? rows.length : entries.length) > 0 ? (
+            <div className="source-table-scroll" role="region" aria-label="Таблица источников" tabIndex={0}>
+              <table className={'source-table' + (metrics ? ' metric-source-table' : '')}>
+                <thead><tr>
+                  {metrics ? <><th scope="col">Показатель</th><th scope="col">Дата</th><th scope="col">Значение</th></>
+                    : <th scope="col">Материал</th>}
+                  <th scope="col">Источник</th>
+                </tr></thead>
+                <tbody>
+                  {metrics ? rows.map((row, index) => (
+                    <tr key={row.source + '/' + index}>
+                      <td>{row.label}</td>
+                      <td>{row.date || '—'}{row.partial && <small>Неполная неделя</small>}</td>
+                      <td>{row.value || '—'}</td>
+                      <td>{row.source}</td>
+                    </tr>
+                  )) : entries.map(item => (
+                    <tr key={item.key}>
+                      <td>
+                        {typeof item.data === 'string' ? <div>{item.data}</div> : <>
+                          {item.data.title && <strong>{item.data.title}</strong>}
+                          <div>{item.data.description || item.data.description_short}</div>
+                        </>}
+                        {item.metadata?.question && <small>Вопрос · {item.metadata.question}</small>}
+                        {item.metadata?.date && <small>Дата · {item.metadata.date}</small>}
+                        {item.metadata?.hypothesis && <small>Гипотеза · {item.metadata.hypothesis}</small>}
+                        {item.metadata?.relation && <small>Связь с гипотезой · {item.metadata.relation}</small>}
+                      </td>
+                      <td>{item.source}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          ) : <p className="muted">Нет материалов.</p>}
+        </Dialog>
+      )}
       {view.corrections.length > 0 && (
         <details className="source-corrections">
           <summary>Поправки к источникам</summary>
@@ -98,7 +150,6 @@ export function Cards({
   onMetricSeries?: (card: 'ctr' | 'reach', series: MetricSeries | undefined) => void;
   pinned?: string[];
 }) {
-  const [proof, setProof] = useState('');
   const periods = analysisPeriods(view);
   const hasPartial = view.summary.some((s) => s.rows.some((r) => r.partial));
   return (
@@ -238,11 +289,7 @@ export function Cards({
             <p>Период наблюдения и критерий успеха указаны в разделе «Проверка эффекта».</p>)}
           {k === 'signal' && view.signal?.metric && <SignalEvidence signal={view.signal} />}
           {k !== 'watch' && <div className="card-foot">
-            <button aria-expanded={proof === k} onClick={() => moveView(() => setProof(proof === k ? '' : k))}>Расчёт</button>
-            {onAsk && <button onClick={() => onAsk(labels[k])}>Спросить</button>}
-          </div>}
-          {proof === k && (
-            <details open className="proof">
+            <details className="proof">
               <summary>Источники и период</summary>
               {['summary', 'trend', 'ctr', 'reach', 'timeline'].includes(k) && (
                 <p>
@@ -256,7 +303,7 @@ export function Cards({
                 (view.reach.sources || []).map((s) => <small key={s}>{s}</small>)
               ) : k === 'timeline' ? (
                 view.timeline.map((s) => (
-                  <small key={s.loc}>
+                  <small key={s.file + '/' + s.loc}>
                     {s.file} · {s.loc}
                   </small>
                 ))
@@ -269,7 +316,7 @@ export function Cards({
                   </small>
                 ))
               ) : k === 'evidence' ? (
-                view.evidence.map((s) => <small key={s.source}>{s.source}</small>)
+                view.evidence.map((s) => <small key={s.kind + '/' + s.key}>{s.source}</small>)
               ) : (
                 view.summary.map((s) => (
                   <details key={s.product}>
@@ -284,7 +331,8 @@ export function Cards({
               )}
               <a href={'#snapshot/' + view.id}>Открыть версию расчёта</a>
             </details>
-          )}
+            {onAsk && <button type="button" onClick={() => onAsk(labels[k])}>Спросить</button>}
+          </div>}
         </section>
       ))}
     </>

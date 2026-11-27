@@ -119,13 +119,145 @@ test('Softline workspace, upgrade and browser journeys', async t => {
     }
   });
 
+  await journey('chat panels fit the workspace and preserve the current conversation', async () => {
+    await admin.setViewportSize({width:1280,height:900});
+    try {
+      await go(admin,'chats/'+fixture.thread);
+      const rows = admin.getByRole('navigation',{name:'Переписки'});
+      const row = rows.locator('.thread-row').filter({has:admin.locator('[aria-current="page"]')});
+      const title = row.locator('.thread-title');
+      assert.equal(await title.evaluate(el => getComputedStyle(el).textOverflow),'ellipsis');
+      const menu = row.locator('.thread-menu-trigger');
+      assert.equal(await menu.evaluate(el => getComputedStyle(el).pointerEvents),'none');
+      assert.equal(await admin.locator('.conversation-heading .thread-menu-trigger').count(),0);
+      await row.hover();
+      await menu.click();
+      await visible(admin.getByRole('menuitem',{name:'Переименовать'}));
+      await admin.keyboard.press('Escape');
+      await menu.press('ArrowDown');
+      await visible(admin.getByRole('menuitem',{name:'Переименовать'}));
+      await admin.keyboard.press('Escape');
+
+      const draft = field(admin,'Вопрос агенту');
+      await draft.fill('Черновик для проверки панели');
+      const width = admin.getByRole('separator',{name:'Ширина списка чатов'});
+      await width.press('Home');
+      assert.ok(await title.evaluate(el => el.scrollWidth > el.clientWidth && getComputedStyle(el).whiteSpace === 'nowrap'));
+      assert.equal(await title.getAttribute('title'),await title.textContent());
+      const before = Number(await width.getAttribute('aria-valuenow'));
+      const edge = await width.boundingBox();
+      await admin.mouse.move(edge.x + edge.width / 2, edge.y + edge.height / 2);
+      await admin.mouse.down();
+      await admin.mouse.move(edge.x + edge.width / 2 + 32, edge.y + edge.height / 2, {steps:4});
+      await admin.mouse.up();
+      const resized = Number(await width.getAttribute('aria-valuenow'));
+      assert.ok(resized > before);
+      await role(admin,'Свернуть список чатов').click();
+      await rows.waitFor({state:'hidden'});
+      assert.equal(await draft.inputValue(),'Черновик для проверки панели');
+      await role(admin,'Развернуть список чатов').click();
+      await admin.reload();
+      assert.equal(Number(await width.getAttribute('aria-valuenow')),resized);
+      await draft.fill('');
+
+      await go(admin,caseRoute);
+      const discussion = admin.getByRole('region',{name:'Переписка'});
+      const chatHeight = admin.getByRole('separator',{name:'Высота обсуждения'});
+      const chatWidth = admin.getByRole('separator',{name:'Ширина обсуждения'});
+      const checkDock = async () => {
+        const bounds = await discussion.boundingBox();
+        assert.ok(bounds && Math.abs(admin.viewportSize().height - bounds.y - bounds.height) <= 30);
+        assert.ok(await admin.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
+      };
+      await visible(discussion);
+      await discussion.evaluate(el => window.scrollBy(0, Math.max(120, el.getBoundingClientRect().top)));
+      await checkDock();
+      const heightBefore = Number(await chatHeight.getAttribute('aria-valuenow'));
+      await chatHeight.press('ArrowUp');
+      const heightAfter = Number(await chatHeight.getAttribute('aria-valuenow'));
+      assert.ok(heightAfter > heightBefore);
+      const widthBefore = Number(await chatWidth.getAttribute('aria-valuenow'));
+      await chatWidth.press('ArrowLeft');
+      const widthAfter = Number(await chatWidth.getAttribute('aria-valuenow'));
+      assert.ok(widthAfter > widthBefore);
+      await admin.reload();
+      assert.equal(Number(await chatHeight.getAttribute('aria-valuenow')),heightAfter);
+      assert.equal(Number(await chatWidth.getAttribute('aria-valuenow')),widthAfter);
+      await admin.setViewportSize({width:900,height:844});
+      await discussion.evaluate(el => window.scrollBy(0, Math.max(120, el.getBoundingClientRect().top)));
+      await checkDock();
+    } finally {
+      await admin.setViewportSize({width:1440,height:900});
+    }
+    const touch = await login('admin','#chats/'+fixture.thread, {
+      viewport:{width:390,height:844}, hasTouch:true, isMobile:true, reducedMotion:'reduce',
+    });
+    const { promise: threadGate, resolve: releaseThread } = Promise.withResolvers();
+    try {
+      await role(touch,'Развернуть список чатов').tap();
+      const rows = touch.getByRole('navigation',{name:'Переписки'});
+      const active = rows.getByRole('link',{name:'Исходная переписка'});
+      await touch.getByRole('button',{name:'Действия чата «Исходная переписка»'}).tap();
+      await visible(touch.getByRole('menuitem',{name:'Переименовать'}));
+      await touch.keyboard.press('Escape');
+      await active.tap();
+      await rows.waitFor({state:'hidden'});
+      await touch.route('**/api/team/case-thread',async route => {
+        await threadGate;
+        await route.continue();
+      });
+      await go(touch,caseRoute);
+      const ask = role(touch.locator('.card-evidence'),'Спросить');
+      await ask.tap();
+      assert.ok(await ask.isVisible(), 'Разбор остаётся видимым, пока загружается чат');
+      releaseThread();
+      const composer = field(touch,'Вопрос агенту');
+      await visible(composer);
+      await composer.evaluate(el => new Promise(resolve => requestAnimationFrame(resolve)));
+      assert.ok(await composer.evaluate(el => el === document.activeElement));
+      assert.ok(await touch.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
+    } finally {
+      releaseThread();
+      await touch.context().close();
+    }
+  });
+
+  await journey('source categories open readable tables in live and saved views', async () => {
+    for (const route of [caseRoute,'snapshot/'+fixture.calc+'/evidence']) {
+      await go(admin,route);
+      const sources = admin.locator('.card-evidence');
+      const metrics = sources.getByRole('button',{name:/^Метрики/});
+      const dialog = admin.getByRole('dialog');
+      await metrics.click();
+      await visible(dialog.getByRole('columnheader',{name:'Источник'}));
+      await visible(dialog.getByText(/Synthetic evaluation\.xlsx · Kaspersky!A\d+/).first());
+      await admin.keyboard.press('Escape');
+      await dialog.waitFor({state:'hidden'});
+      assert.ok(await metrics.evaluate(el => el === document.activeElement));
+
+      await sources.getByRole('button',{name:/^Исследования/}).click();
+      await visible(dialog.getByRole('cell',{name:/участнику синтетического примера непонятен выбор версии лицензии/}));
+      await role(dialog,'Закрыть').click();
+      await dialog.waitFor({state:'hidden'});
+      await sources.getByRole('button',{name:/^Конкуренты/}).click();
+      await visible(dialog.getByText('Нет материалов.',{exact:true}));
+      await admin.keyboard.press('Escape');
+      await dialog.waitFor({state:'hidden'});
+    }
+    await go(admin,'material/'+fixture.report);
+  });
+
   await journey('old links, personal access, navigation and themes', async () => {
+    await go(admin,'material/'+fixture.report);
     await visible(admin.getByRole('heading',{name:'Исходный отчёт'}));
     await visible(member.getByText('Снимок недоступен', {exact:false}).first());
     await go(member, 'snapshot/'+fixture.calc+'/trend');
     await visible(member.locator('.card-trend'));
     assert.equal(await member.locator('.card-summary').count(),0);
     assert.equal(await member.locator('html').getAttribute('data-theme'),'dark');
+    assert.equal(await role(member,'Тёмная тема').count(),0);
+    await go(member,'settings/personal');
+    await visible(member.getByRole('heading',{name:'Оформление'}));
     await role(member,'Тёмная тема').click();
     assert.equal(await member.locator('html').getAttribute('data-theme'),'light');
     assert.ok(await member.evaluate(()=>document.documentElement.scrollWidth <= innerWidth));
@@ -155,6 +287,7 @@ test('Softline workspace, upgrade and browser journeys', async t => {
     await submit(member,'save-research-settings',()=>role(member,'Сохранить режим').click());
     await member.reload();
     assert.equal(await personalMode.inputValue(),'lead');
+    assert.equal(await member.locator('html').getAttribute('data-theme'),'light');
     await teamMode.selectOption('roles');
     await submit(admin,'save-research-settings',()=>role(admin,'Сохранить режим').click());
     await personalMode.selectOption('inherit');
@@ -400,7 +533,8 @@ test('Softline workspace, upgrade and browser journeys', async t => {
     assert.equal(await filter.isChecked(),true);
 
     const proof = admin.locator('.card-summary');
-    await role(proof,'Расчёт').click();
+    assert.equal(await role(proof,'Расчёт').count(),0);
+    await proof.getByText('Источники и период',{exact:true}).click();
     await visible(proof.getByText(`База с ${from},`,{exact:false}));
     const snapshot = proof.getByRole('link',{name:'Открыть версию расчёта'});
     const href = await snapshot.getAttribute('href');
@@ -438,7 +572,7 @@ test('Softline workspace, upgrade and browser journeys', async t => {
     ]);
     await go(admin,href.slice(1));
     await visible(admin.getByRole('heading',{name:'Сохранённый расчёт'}));
-    await role(proof,'Расчёт').click();
+    await proof.getByText('Источники и период',{exact:true}).click();
     await visible(proof.getByText('срез по '+through,{exact:false}));
     await visible(proof.getByText('Только полные недели.',{exact:false}));
   });
@@ -468,7 +602,9 @@ test('Softline workspace, upgrade and browser journeys', async t => {
     await dialog.locator('select').selectOption(fixture.caseId);
     await submit(admin,'pin-material',()=>role(dialog,'Добавить в разбор').click());
     await dialog.waitFor({state:'hidden'});
-    await admin.locator('.conversation-heading .thread-menu-trigger').click();
+    const activeMenu = admin.locator('.thread-row').filter({has:admin.locator('a[aria-current="page"]')});
+    await activeMenu.hover();
+    await activeMenu.locator('.thread-menu-trigger').click();
     await admin.getByRole('menuitem',{name:/Удалить/}).click();
     await submit(admin,'delete-thread',()=>role(admin.getByRole('dialog'),'Удалить чат').click());
     await go(admin,caseRoute);
@@ -476,7 +612,8 @@ test('Softline workspace, upgrade and browser journeys', async t => {
     await visible(admin.getByRole('dialog').locator('.material-detail'));
     await admin.keyboard.press('Escape');
     await go(admin,'chats/'+fixture.thread);
-    await admin.locator('.conversation-heading .thread-menu-trigger').click();
+    await activeMenu.hover();
+    await activeMenu.locator('.thread-menu-trigger').click();
     await admin.getByRole('menuitem',{name:/Удалить/}).click();
     await submit(admin,'delete-thread',()=>role(admin.getByRole('dialog'),'Удалить чат').click());
     await go(admin,'material/'+fixture.report);
@@ -515,8 +652,14 @@ test('Softline workspace, upgrade and browser journeys', async t => {
     await field(dlg,'Главный вопрос').fill('Сколько дней до оплаты?');
     await role(dlg,'Создать релиз').click();
     await visible(admin.getByRole('heading',{name:'Релиз приёмки',exact:true}));
+    await admin.locator('summary').filter({hasText:/^Первый разбор · /}).waitFor({state:'attached'});
     await field(admin,'Спросить агента').fill('Сколько дней до оплаты? Построй график.');
-    await role(admin,'Отправить вопрос').click();
+    const [reply] = await Promise.all([
+      admin.waitForResponse(r => r.url().endsWith('/api/chat')),
+      role(admin,'Отправить вопрос').click(),
+    ]);
+    assert.ok(reply.ok(), await reply.text());
+    assert.ok((await reply.json()).refs.some(ref => ref.op === 'build_chart'));
     await admin.getByRole('button',{name:/Раскрыть график/}).first().click();
     dlg=admin.getByRole('dialog');
     await field(dlg,'Дашборд релиза').fill('Проверенные расчёты');
@@ -642,6 +785,12 @@ test('Softline workspace, upgrade and browser journeys', async t => {
     const autoCase = store.db.prepare("SELECT id FROM cases WHERE product=?").get(product).id;
     await go(admin,'cases');
     await admin.locator('a[href="#case/' + autoCase + '"]').click();
+    await admin.locator('.card-evidence').getByRole('button',{name:/^Метрики/}).click();
+    const metricSources = admin.getByRole('dialog');
+    await visible(metricSources.getByRole('cell',{name:/^CTR рекомендаций/}).first());
+    await visible(metricSources.getByRole('cell',{name:'CTR для приёмки.xlsx · desktop/' + week(0),exact:true}).first());
+    await admin.keyboard.press('Escape');
+    await metricSources.waitFor({state:'hidden'});
     const panel = admin.locator('.effect-panel');
     await panel.locator(':scope > summary').click();
     await panel.getByText('Базовый период и контроль', {exact:true}).click();
