@@ -97,7 +97,7 @@ test('Softline workspace, upgrade and browser journeys', async t => {
     await field(p,'Логин').fill('fixture-'+user);
     await field(p,'Пароль').fill('fixture-password');
     await role(p,'Войти').click();
-    await visible(p.locator('.session-role'));
+    await visible(p.getByRole('link',{name:'Профиль',exact:true}));
     return p;
   }
   const admin = await login('admin','#material/'+fixture.report);
@@ -117,6 +117,34 @@ test('Softline workspace, upgrade and browser journeys', async t => {
       console.error(name, admin.url(), alerts, error.message);
       throw error;
     }
+  });
+
+  await journey('the profile groups account details, settings and sign-out', async () => {
+    for (const [page, name, accountRole] of [
+      [admin,'fixture-admin','Администратор'], [member,'fixture-member','Участник'], [judge,'fixture-judge','Демо · жюри'],
+    ]) {
+      const sidebar = page.locator('#workspace-sidebar');
+      assert.equal(await sidebar.getByRole('link',{name:'Настройки',exact:true}).count(),0);
+      assert.equal(await role(sidebar,'Выйти').count(),0);
+      const profile = sidebar.getByRole('link',{name:'Профиль',exact:true});
+      await profile.click();
+      await visible(page.getByRole('heading',{name:'Профиль',exact:true}));
+      assert.equal(await profile.getAttribute('aria-current'),'page');
+      const account = page.getByRole('region',{name:'Учётная запись'});
+      await visible(account.getByRole('heading',{name,exact:true}));
+      await visible(account.getByText(accountRole,{exact:true}));
+      await visible(role(page,'Выйти'));
+      assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
+    }
+    const settings = admin.getByRole('navigation',{name:'Настройки профиля'});
+    await settings.getByRole('link',{name:/^Мои настройки/}).click();
+    await visible(admin.getByRole('heading',{name:'Оформление'}));
+    await admin.getByRole('link',{name:'Вернуться в профиль'}).click();
+    await settings.getByRole('link',{name:/^Настройки команды/}).click();
+    await visible(admin.getByRole('heading',{name:'Подключения команды'}));
+    await go(admin,'material/'+fixture.report);
+    await go(member,'material/'+fixture.report);
+    await go(judge,'overview');
   });
 
   await journey('chat panels fit the workspace and preserve the current conversation', async () => {
@@ -347,7 +375,6 @@ test('Softline workspace, upgrade and browser journeys', async t => {
     await role(member,'Тёмная тема').click();
     assert.equal(await member.locator('html').getAttribute('data-theme'),'dark');
     assert.ok(await member.evaluate(()=>document.documentElement.scrollWidth <= innerWidth));
-    await visible(judge.getByText('Демо · жюри',{exact:true}));
     await go(admin,'cases/settings');
     await visible(role(admin,'Пригласить участника'));
     assert.equal(await admin.getByRole('link',{name:'Настройки команды'}).getAttribute('aria-current'),'page');
@@ -1083,11 +1110,12 @@ test('Softline workspace, upgrade and browser journeys', async t => {
       await visible(member.locator('.chat-composer .range-attachment'));
       // Both users must share the same tab storage for this to test account isolation.
       async function switchAccount(user) {
+        await admin.getByRole('link',{name:'Профиль',exact:true}).click();
         await role(admin, 'Выйти').click();
         await field(admin, 'Логин').fill('fixture-' + user);
         await field(admin, 'Пароль').fill('fixture-password');
         await role(admin, 'Войти').click();
-        await visible(admin.locator('.session-role'));
+        await visible(admin.getByRole('link',{name:'Профиль',exact:true}));
         await go(admin, 'chats/group');
         await visible(input(admin));
       }

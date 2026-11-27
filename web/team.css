@@ -286,7 +286,7 @@ p {
   .team-app[data-menu='left'] > .side :is(nav, .side-bottom) {
     grid-template-columns: minmax(0, 1fr);
   }
-  .team-app[data-menu='left'] > .side :is(nav a, .menu-command) {
+  .team-app[data-menu='left'] > .side nav a {
     min-inline-size: 0;
     max-inline-size: 100%;
     padding-inline: 0 var(--menu-end-padding);
@@ -294,20 +294,13 @@ p {
     gap: 0;
   }
   .team-app[data-menu='left'] > .side nav a > .ui-icon { margin-inline: 14px; }
-  .team-app[data-menu='left'] > .side .menu-command > .ui-icon { margin-inline: 15px; }
-  .team-app[data-menu='left'] > .side :is(.menu-label, .side-bottom small) {
+  .team-app[data-menu='left'] > .side .menu-label {
     min-inline-size: 0;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-  }
-  .team-app[data-menu='left'] > .side .menu-label {
     font-family: 'Menu Ellipsis', var(--font);
     opacity: clamp(0, calc((var(--sidebar-expansion) - 22px) / 5px), 1);
-  }
-  .team-app[data-menu='left'] > .side .side-bottom small {
-    max-inline-size: var(--sidebar-expansion);
-    padding-inline: min(.72rem, calc(var(--sidebar-expansion) / 4));
   }
 
   .team-app:has(> .sidebar-resizer[data-resizing='true']) { transition: none; }
@@ -367,24 +360,7 @@ p {
 .side-bottom {
   margin-top: auto;
   display: grid;
-  gap: 0.35rem;
 }
-.side-bottom small {
-  color: var(--fg-muted);
-  padding: 0.3rem 0.72rem;
-}
-.side-bottom button {
-  color: var(--fg);
-  border: 0;
-  background: none;
-  text-align: left;
-}
-.side-bottom .menu-command {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-}
-.menu-command .ui-icon { width: 16px; height: 16px; }
 .content {
   padding: clamp(18px, 3.2vw, 50px);
   width: 100%;
@@ -862,7 +838,6 @@ p {
     margin: 0;
   }
   .team-app[data-menu='top'] .side nav { justify-content: center; flex: 1 1 auto; }
-  .team-app[data-menu='top'] .side-bottom small { display: none; }
 }
 @media (max-width: 820px) {
   .menu-preference { display: none; }
@@ -892,19 +867,9 @@ p {
     padding: 0.38rem 0.55rem;
   }
   .side-bottom {
-    display: flex;
     grid-column: 2;
     grid-row: 1;
-    align-items: center;
     margin: 0;
-    gap: 3px;
-  }
-  .side-bottom small {
-    display: none;
-  }
-  .side-bottom :is(button, a) {
-    font-size: 0.77rem;
-    padding-inline: 6px;
   }
   .content {
     padding: 18px 12px;
@@ -952,21 +917,9 @@ p {
   .source-actions button { width: 100%; }
 }
 @media (max-width: 430px) {
-  .side-bottom .menu-command { justify-content: center; min-width: 38px; min-height: 38px; }
-  .menu-command span { display: none; }
   .side nav a { gap: 6px; }
 }
 
-.session-role { align-self: center; font-size: .78rem; font-weight: 600; color: var(--accent-text); overflow-wrap: anywhere; }
-.short-role { display: none; }
-.side[data-compact-logo='true'] .full-role { display: none; }
-.side[data-compact-logo='true'] .short-role { display: inline; }
 .modal > form, .modal details[open] label { display: grid; gap: .55rem; }
 .modal :is(textarea, select, input:not([type=checkbox])) { max-width: 100%; }
 .material-picker select { width: 100%; }
-@media (max-width: 560px) {
-  .side-bottom { flex-wrap: wrap; justify-content: flex-end; }
-  .session-role { white-space: nowrap; font-size: .75rem; }
-  .full-role { display: none; }
-  .short-role { display: inline; }
-}

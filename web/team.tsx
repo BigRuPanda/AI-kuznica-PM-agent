@@ -49,6 +49,7 @@ import type { MenuLayout } from './menu-layout';
 import { minSidebarWidth, SidebarResizeHandle, useSidebarWidth } from './sidebar-width';
 import { PanelResizeHandle, useDiscussionDock, usePanelSize, usePanelSpace } from './panel-size';
 import { BrandLogo } from './brand-logo';
+import { ProfileEntry, ProfilePage } from './profile';
 import './team.css';
 import './tracking.css';
 import './chat.css';
@@ -1810,6 +1811,7 @@ function Settings({ home, action, refresh, menu, changeMenu, scope }: {
   const admin = home.user.role === 'admin';
   return (
     <>
+      <a className="crumb" href="#profile" aria-label="Вернуться в профиль">← Профиль</a>
       <div className="page-head">
         <h1>Настройки</h1>
       </div>
@@ -2119,27 +2121,7 @@ function Workspace({ user, onLogout }: { user: User; onLogout: () => void }) {
           })}
         </nav>
         <div className="side-bottom">
-          <a className="menu-command" href="#settings" aria-label="Настройки" title="Настройки" aria-current={settings ? 'page' : undefined}>
-            <Icon name="settings" /><span className="menu-label">Настройки</span>
-          </a>
-          <span className="session-role" title={user.role === 'admin' ? 'Администратор' : undefined}>
-            {user.role === 'admin' ? <><span className="full-role">Администратор</span><span className="short-role">Админ</span></> :
-              user.role === 'judge' ? 'Демо · жюри' : 'Участник'}
-          </span>
-          <small>{user.name}</small>
-          <button
-            className="menu-command"
-            aria-label="Выйти"
-            title="Выйти"
-            onClick={() =>
-              action(async () => {
-                await post('logout');
-                onLogout();
-              })
-            }
-          >
-            <Icon name="logout" /><span className="menu-label">Выйти</span>
-          </button>
+          <ProfileEntry user={user} current={route === 'profile' ? 'page' : settings ? 'location' : undefined} />
         </div>
       </aside>
       {menu === 'left' && <SidebarResizeHandle {...sidebar} />}
@@ -2150,7 +2132,12 @@ function Workspace({ user, onLogout }: { user: User; onLogout: () => void }) {
           </p>
         )}
         <div className="workspace-page" data-route={route} key={route === 'chats' ? route : [route, id, selected].join('/')}>
-        {!home ? (
+        {route === 'profile' ? (
+          <ProfilePage user={user} onLogout={() => action(async () => {
+            await post('logout');
+            onLogout();
+          })} />
+        ) : !home ? (
           <p className="empty" role="status">Загрузка…</p>
         ) : route === 'demo-page' || route === 'demo-issue' ? (
           <DemoObject key={route+id} service={route} id={id}/>
