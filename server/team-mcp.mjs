@@ -33,6 +33,8 @@ export function teamTools(server, store, user, env = process.env, send = fetch) 
       thread: z.string(),
       question: z.string().max(2400),
       caseId: z.string().optional(),
+      webSearch: z.boolean().optional(),
+      sourceCell:z.object({version:z.string(),loc:z.string()}).optional(),
       requestId: z.string().optional(),
       rangeId: z.string().optional(),
       selection: operations.range_compare[1].selection.optional(),

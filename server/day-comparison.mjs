@@ -45,7 +45,7 @@ const countDays = (n) =>
       ? 'дня'
       : 'дней');
 
-function explicitDates(q, year) {
+export function explicitDates(q, year) {
   const pair = q.match(/(\d{1,2})\s*(?:–|—|-|и|по)\s*(\d{1,2})\s+([а-яё]+)(?:\s+(20\d\d))?/iu);
   const numeric = [...q.matchAll(/(?<!\d)(20\d\d-\d\d-\d\d|\d{1,2}\.\d{1,2}(?:\.20\d\d)?)(?!\d)/g)].map(
     (m) => {

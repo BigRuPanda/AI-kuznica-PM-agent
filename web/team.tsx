@@ -1,3 +1,4 @@
+import { SourceExtract } from './knowledge-source';
 import { ReleaseAnalytics } from './app';
 import { MetrikaJournal } from './metrika-status';
 import { ChatTrackerPreview, Connections, DemoObject, Tracking } from './tracking';
@@ -20,6 +21,9 @@ import {
 } from './materials';
 import React, { useState, useEffect, useLayoutEffect, useCallback, useRef } from 'react';
 import { createRoot } from 'react-dom/client';
+import { flushSync } from 'react-dom';
+import { ChatScenarioMenu } from './chat-scenario-menu';
+import { loadScenarioDraft, selectScenario, serializeScenarioDraft } from './chat-scenarios';
 import { post, jump, num } from './team-data';
 import type { Home, User, Case, Detail, View, Msg, Thread, InvestigationRun, RatioSelections } from './team-data';
 import { describeMeasurement, MeasurementFields, measurementPayload, metricName, WatchSummary } from './measurement';
@@ -165,6 +169,8 @@ function CaseList({ items }: { items: Case[] }) {
 }
 const stepNames: Record<string, string> = {
   overview: 'Открыт обзор',
+  web_search:'Поиск в Яндексе', read_public_page:'Прочитана публичная страница', competitor_check:'Проверено предложение продавца',
+  'knowledge-source':'Прочитаны строки книги', 'knowledge-sources':'Найдены книги', source_value:'Проверена ячейка',
   metrics: 'Проверен каталог метрик',
   selection_context: 'Проверен соседний период и источники',
   search: 'Найдены свидетельства',
@@ -292,6 +298,8 @@ function Chat({
   const [jobIssue, setJobIssue] = useState('');
   const [material, setMaterial] = useState<MaterialRef | null>(null);
   const [sharing, setSharing] = useState(false);
+  const [webSearch,setWebSearch]=useState(false);
+  useEffect(()=>setWebSearch(false),[id]);
   const focusHandler = useRef(onAttachFocus);
   focusHandler.current = onAttachFocus;
   const pendingKey = 'pm-pending/' + userId + '/' + id;
@@ -309,15 +317,19 @@ function Chat({
   };
   const [items, setItems] = useState<Msg[]>([]),
     [running, work] = useState(false),
-    [q, setQ] = useState(() => {
-      try { return sessionStorage.getItem(draftKey) || readPending()?.text || ''; }
-      catch { return ''; }
+    [draft, setDraft] = useState(() => {
+      try { return loadScenarioDraft(sessionStorage.getItem(draftKey), readPending()?.text || ''); }
+      catch { return {text: '', scenarioId: null}; }
     }),
     [err, setErr] = useState(''),
     [loaded, setLoaded] = useState(false),
     [away, setAway] = useState(false),
     [copied, setCopied] = useState<number>();
   const activeThread = threads.find((t) => t.id === id);
+  const q = draft.text;
+  function editText(text: string) {
+    setDraft(previous => ({text, scenarioId: text ? previous.scenarioId : null}));
+  }
   const isGroup = activeThread?.scope === 'group';
   // Private thread IDs are unique to the account; group IDs are shared, including "group".
   const storageId = isGroup ? userId + '/' + id : id;
@@ -451,10 +463,10 @@ function Chat({
   }, [q]);
   useEffect(() => {
     try {
-      if (q) sessionStorage.setItem(draftKey, q);
+      if (draft.text) sessionStorage.setItem(draftKey, serializeScenarioDraft(draft));
       else sessionStorage.removeItem(draftKey);
     } catch {}
-  }, [q, draftKey]);
+  }, [draft, draftKey]);
   useLayoutEffect(() => {
     if (follow.current && history.current && !document.querySelector('dialog[open]')) history.current.scrollTop = history.current.scrollHeight;
   }, [items.length, loaded, running]);
@@ -467,8 +479,16 @@ function Chat({
     });
   }
   function suggest(question: string) {
-    setQ(question);
+    setDraft({text: question, scenarioId: null});
     box.current?.focus();
+  }
+  function chooseScenario(scenarioId: string) {
+    flushSync(() => setDraft(previous => selectScenario(previous, scenarioId)));
+    const input = box.current;
+    if (input) {
+      input.focus();
+      input.setSelectionRange(input.value.length, input.value.length);
+    }
   }
   return (
     <section className={!caseId ? 'chat-box standalone-chat' : 'chat-box'} aria-label="Переписка">
@@ -524,6 +544,11 @@ function Chat({
             ) : (
               <p>{m.body.text}</p>
             )}
+            {m.body.readSources?.map(source => <div key={source.url}>
+              <a href={source.url} {...(/^https?:\/\//i.test(source.url) && {target:'_blank',rel:'noreferrer'})}>{source.label}</a>
+              {source.detail && <small> · {source.detail}</small>}
+            </div>)}
+            {m.body.checkedAt && <small>Проверено {new Date(m.body.checkedAt).toLocaleString('ru-RU')}</small>}
             {m.body.materials?.map((item) => (
               <MaterialCard key={item.id} item={item} />
             ))}
@@ -693,7 +718,8 @@ function Chat({
             setSending(true);
             const body = {
               thread: id,
-              question: (context ? 'О графике «' + context + '». ' : '') + q,
+              typedQuestion:q.trim(), webSearch:!groupMessage && webSearch,
+              question: (context && !webSearch ? 'О графике «' + context + '». ' : '') + q,
               caseId,
               screen,
               materialIds: [...new Set([material?.id, pasted].filter(Boolean))],
@@ -715,12 +741,13 @@ function Chat({
             }
             request.current = null;
             sessionStorage.removeItem(pendingKey);
+            setWebSearch(false);
             follow.current = true;
             setAway(false);
             clearAttachment();
             setMaterial(null);
             sessionStorage.removeItem('pm-material-draft/' + storageId);
-            setQ('');
+            setDraft(current => current === draft ? {text: '', scenarioId: null} : current);
             work(!groupMessage);
             clearContext?.();
           });
@@ -736,7 +763,7 @@ function Chat({
                 setMaterial(null);
                 sessionStorage.removeItem('pm-material-draft/' + storageId);
                 if (pasted)
-                  setQ(
+                  editText(
                     q
                       .split(/\s+/)
                       .filter((w) => pastedMaterial(w) !== pasted)
@@ -784,13 +811,14 @@ function Chat({
           Вопрос агенту
         </label>
         <div className="composer-row">
+          {!caseId && <ChatScenarioMenu onSelect={chooseScenario} />}
           <textarea
             ref={box}
             id={'q' + id}
             placeholder="Спросить помощника…"
             value={q}
             rows={1}
-            onChange={(e) => setQ(e.target.value)}
+            onChange={(e) => editText(e.target.value)}
             onKeyDown={(e) => {
               if (e.key !== 'Enter' || e.shiftKey || e.ctrlKey || e.altKey || e.metaKey || e.nativeEvent.isComposing) return;
               e.preventDefault();
@@ -802,6 +830,7 @@ function Chat({
             <Icon name="arrowUp" />
           </button>
         </div>
+        <label className="chat-web-search"><input type="checkbox" checked={webSearch} disabled={sending} onChange={e=>setWebSearch(e.target.checked)} /> Поиск в интернете</label>
         {isGroup && !attached && (
           <button type="submit" className="text-action team-send" value="message" disabled={sending || !q.trim()}>
             <Icon name="people" /> Написать команде
@@ -1656,8 +1685,44 @@ function Investigation({
     </>
   );
 }
+type SourceVersion = { version: string; created: number; total: number; origin: string | null; author: string | null; active: boolean };
+
+function SourceHistory({ file, current }: { file: string; current: string }) {
+  const [open, setOpen] = useState(false);
+  const [history, setHistory] = useState<SourceVersion[]>([]);
+  const [error, setError] = useState('');
+  useEffect(() => {
+    if (!open) return;
+    let active = true;
+    setHistory([]);
+    setError('');
+    post<{versions: SourceVersion[]}>('source-history', { file }).then(
+      value => { if (active) setHistory(value.versions); },
+      failure => { if (active) setError(failure.message); },
+    );
+    return () => { active = false; };
+  }, [file, current, open]);
+  return <details onToggle={event => setOpen(event.currentTarget.open)}>
+    <summary>История версий</summary>
+    {error && <p role="alert">{error}</p>}
+    {!history.length && !error && <p role="status">Загружаем версии…</p>}
+    {history.length > 0 && <ul>{history.map(version => <li key={version.version}>
+      <a href={'#knowledge-source/' + version.version}>{new Date(version.created).toLocaleString('ru-RU')} · {version.version.slice(0, 8)}</a>
+      {' · '}{version.origin || 'Ранее загруженная версия'}
+      {version.author && ' · ' + version.author}
+      {version.active && ' · Текущая'}
+    </li>)}</ul>}
+  </details>;
+}
+
 function Sources({ home, action, refresh }: { home: Home; action: Action; refresh: () => Promise<void> }) {
   const [notice, say] = useState('');
+  const [selected,select]=useState<File>();
+  const [origin,setOrigin]=useState('');
+  const [target,setTarget]=useState('');
+  const versionFile=home.archiveOnly && selected && /\.(xlsx|pptx)$/i.test(selected.name) ? selected : undefined;
+  const sourceFile=target || selected?.name || '';
+  const current=home.sources.find(s=>s.file===sourceFile);
   const admin = home.user.role === 'admin';
   return (
     <>
@@ -1674,7 +1739,7 @@ function Sources({ home, action, refresh }: { home: Home; action: Action; refres
                 say('Читаем материалы…');
                 const r = await fetch('/api/team/upload', {
                   method: 'POST',
-                  headers: { 'X-File-Name': encodeURIComponent(file.name) },
+                  headers: { 'X-File-Name': encodeURIComponent(versionFile?sourceFile:file.name) },
                   body: file,
                 });
                 const v = await r.json();
@@ -1686,8 +1751,21 @@ function Sources({ home, action, refresh }: { home: Home; action: Action; refres
           >
             <label>
               Книга, презентация или архив
-              <input name="file" type="file" accept=".xlsx,.pptx,.zip" required />
+              <input name="file" type="file" accept=".xlsx,.pptx,.zip" required onChange={e=>{select(e.currentTarget.files?.[0]);setTarget('');setOrigin('');}} />
             </label>
+            {versionFile && <>
+              <label>Версия книги<select value={sourceFile} onChange={e=>setTarget(e.target.value)}>
+                <option value={versionFile.name}>{versionFile.name}</option>
+                {home.sources.filter(s=>s.file.endsWith('/'+versionFile.name)).map(s=><option key={s.file}>{s.file}</option>)}
+              </select></label>
+              <label>Происхождение материала<input value={origin} onChange={e=>setOrigin(e.target.value)} maxLength={400}/></label>
+              <button type="button" disabled={!origin.trim()} onClick={()=>action(async()=>{
+                const bytes=await crypto.subtle.digest('SHA-256',await versionFile.arrayBuffer());
+                const sha=Array.from(new Uint8Array(bytes),n=>n.toString(16).padStart(2,'0')).join('');
+                await post('approve-source',{sha,file:sourceFile,origin,previous:current?.version??null});
+                say('Версия согласована. Можно загрузить книгу.');
+              })}>Согласовать версию</button>
+            </>}
             <div className="actions source-actions">
               <button className="primary">Загрузить и пересчитать</button>
               <button
@@ -1714,10 +1792,11 @@ function Sources({ home, action, refresh }: { home: Home; action: Action; refres
         <h3>Загруженные материалы</h3>
         {home.sources.map((s) => (
           <div className="event-row" key={s.file}>
-            <b>{s.file}</b>
+            <b>{/\.(xlsx|pptx)$/i.test(s.file) ? <a href={'#knowledge-source/'+s.version}>{s.file}</a> : s.file}</b>
             <small>
               Версий: {s.versions} · {new Date(s.updated).toLocaleDateString('ru-RU')}
             </small>
+            {s.versions>1 && /\.(xlsx|pptx)$/i.test(s.file) && <SourceHistory file={s.file} current={s.version}/>}
           </div>
         ))}
         {!home.sources.length && <p>Источники пока не загружены.</p>}
@@ -2104,6 +2183,8 @@ function Workspace({ user, onLogout }: { user: User; onLogout: () => void }) {
         ) : settings ? (
           <Settings home={home} action={action} refresh={refresh} menu={menu} changeMenu={changeMenu}
             scope={route === 'settings' && id === 'personal' ? 'personal' : 'team'} />
+        ) : route === 'knowledge-source' ? (
+          <SourceExtract key={id+selected} version={id} loc={selected && decodeURIComponent(selected)} />
         ) : route === 'sources' ? (
           <Sources home={home} action={action} refresh={refresh} />
         ) : route === 'chats' ? (

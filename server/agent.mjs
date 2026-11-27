@@ -39,8 +39,8 @@ function apiTools(){
     return {type:'function',function:{name:key,description,parameters}};
   });
 }
-export async function providerCall(env,messages,tools,choice='auto',send=fetch){
-  if(['gemini','vertex','vertex-express'].includes(env.LLM_BACKEND))return geminiCall(env,messages,tools,choice,send);
+export async function providerCall(env,messages,tools,choice='auto',send=fetch,limits={}){
+  if(['gemini','vertex','vertex-express'].includes(env.LLM_BACKEND))return geminiCall(env,messages,tools,choice,send,undefined,limits);
   checkModelTransport(env);
   const proxyapi = env.LLM_BACKEND === 'proxyapi';
   if(!apiConfigured(env))throw Error(proxyapi
@@ -51,9 +51,10 @@ export async function providerCall(env,messages,tools,choice='auto',send=fetch){
   const target=new URL(baseUrl.replace(/\/+$/,'')+'/chat/completions');
   if(target.protocol!=='https:'&&!(target.protocol==='http:'&&['localhost','127.0.0.1','[::1]'].includes(target.hostname)))throw Error('Для удалённого API модели требуется HTTPS.');
   let response;
+  const signal = AbortSignal.timeout(Math.max(1,Math.min(60000, limits.timeout ?? 60000)));
   const history = messages.map(({usage, googleParts, ...message}) => message);
-  try{response=await send(target,{method:'POST',redirect:'error',signal:AbortSignal.timeout(60000),headers:{'Content-Type':'application/json',...(key?{Authorization:'Bearer '+key}:{})},
-    body:JSON.stringify({model:env.LLM_MODEL,messages:history,tools,tool_choice:choice})});}catch{throw Object.assign(Error('Модель недоступна. Проверьте подключение и параметры .env.'),{retryable:true});}
+  try{response=await send(target,{method:'POST',redirect:'error',signal,headers:{'Content-Type':'application/json',...(key?{Authorization:'Bearer '+key}:{})},
+    body:JSON.stringify({model:env.LLM_MODEL,messages:history,...(tools.length?{tools,tool_choice:choice}:{}),...(limits.maxTokens?{max_tokens:limits.maxTokens}:{})})});}catch{if(signal.aborted)throw Object.assign(Error('Модель не успела ответить вовремя.'),{timedOut:true});throw Object.assign(Error('Модель недоступна. Проверьте подключение и параметры .env.'),{retryable:true});}
   if(!response.ok)throw Object.assign(Error('Провайдер модели вернул HTTP '+response.status+'.'),{status:response.status});
   const data=await response.json(),reply=data.choices?.[0]?.message;
   if(!reply)throw Error('Модель вернула пустой ответ.');return {...reply,usage:{input:data.usage?.prompt_tokens,output:data.usage?.completion_tokens}};

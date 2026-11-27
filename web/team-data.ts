@@ -79,7 +79,7 @@ export type Case = {
   effect?: Watch;
 };
 export type Thread = { id: string; title: string; scope: string; canRename: boolean; canDelete: boolean };
-export type Source = { file: string; versions: number; updated: number };
+export type Source = { file: string; version:string; versions: number; updated: number };
 export type Release = {
   release_id: string;
   release_date: string;
@@ -92,6 +92,7 @@ export type Home = {
   cases: Case[];
   threads: Thread[];
   sources: Source[];
+  archiveOnly?:boolean;
   metrikaSync?: import('./metrika-status').MetrikaStatus;
   products: string[];
   rules: { threshold: number; recovery: number };
@@ -211,6 +212,8 @@ export type Msg = {
     product?: string;
     rangeId?: string;
     selection?: import('./range-chart').GraphSelection;
+    checkedAt?: string;
+    readSources?: {url:string;label:string;detail?:string}[];
     suggestions?: { calc: string; cards: string[]; title: string; source?: string }[];
     actions?: {
       canConfirm?: boolean;

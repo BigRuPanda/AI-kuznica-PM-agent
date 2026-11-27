@@ -308,6 +308,11 @@ export function telegramParts(result, base) {
   const links = (result.materials || []).map(
     (m) => m.title + '\n' + base.replace(/\/$/, '') + '/#material/' + m.id,
   );
+  for(const source of result.readSources || []) {
+    if (/^https?:\/\//i.test(source.url) || /^#(?:knowledge-source|range|material)\//.test(source.url)) {
+      links.push(source.label+'\n'+new URL(source.url,base).href);
+    }
+  }
   const parts = [];
   let chunk = '';
   for (const token of [plain, ...links].join('\n\n').match(/\s+|\S+/gu) || []) {

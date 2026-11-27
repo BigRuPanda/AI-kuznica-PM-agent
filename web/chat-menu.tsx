@@ -1,4 +1,5 @@
 import { useEffect, useId, useRef, useState } from 'react';
+import type { ReactNode } from 'react';
 import { Icon } from './icons';
 import type { Thread } from './team-data';
 
@@ -7,6 +8,32 @@ export type ChatAction = 'rename' | 'delete';
 export function ChatMenu({ thread, onAction }: {
   thread: Thread;
   onAction: (thread: Thread, action: ChatAction) => void;
+}) {
+  if (!thread.canRename && !thread.canDelete) return null;
+  return (
+    <ChatPopupMenu label="Действия чата" triggerLabel={'Действия чата «' + thread.title + '»'} triggerContent={<Icon name="more" />}
+      triggerClass="thread-menu-trigger">
+      {close => <>
+        {thread.canRename && (
+          <button type="button" role="menuitem" onClick={() => { close(); onAction(thread, 'rename'); }}><Icon name="edit" />Переименовать</button>
+        )}
+        {thread.canDelete && (
+          <button type="button" role="menuitem" className="thread-menu-delete" onClick={() => { close(); onAction(thread, 'delete'); }}>
+            <Icon name="trash" />Удалить чат
+          </button>
+        )}
+      </>}
+    </ChatPopupMenu>
+  );
+}
+
+export function ChatPopupMenu({ label, triggerLabel = label, triggerContent, triggerClass, menuClass = '', children }: {
+  label: string;
+  triggerLabel?: string;
+  triggerContent: ReactNode;
+  triggerClass: string;
+  menuClass?: string;
+  children: (close: () => void) => ReactNode;
 }) {
   const id = useId();
   const trigger = useRef<HTMLButtonElement>(null);
@@ -26,8 +53,6 @@ export function ChatMenu({ thread, onAction }: {
       window.removeEventListener('resize', close);
     };
   }, [open]);
-
-  if (!thread.canRename && !thread.canDelete) return null;
 
   function show(last = false) {
     const menu = popup.current;
@@ -51,19 +76,14 @@ export function ChatMenu({ thread, onAction }: {
     trigger.current?.focus({ preventScroll: true });
   }
 
-  function run(action: ChatAction) {
-    close();
-    onAction(thread, action);
-  }
-
   return (
     <>
       <button
         ref={trigger}
         type="button"
-        className="thread-menu-trigger"
-        aria-label={'Действия чата «' + thread.title + '»'}
-        title="Действия чата"
+        className={triggerClass}
+        aria-label={triggerLabel}
+        title={label}
         aria-haspopup="menu"
         aria-controls={id}
         aria-expanded={open}
@@ -79,15 +99,15 @@ export function ChatMenu({ thread, onAction }: {
           show(event.key === 'ArrowUp');
         }}
       >
-        <Icon name="more" />
+        {triggerContent}
       </button>
       <div
         ref={popup}
         id={id}
         popover="auto"
         role="menu"
-        aria-label="Действия чата"
-        className="thread-menu"
+        aria-label={label}
+        className={'thread-menu ' + menuClass}
         onToggle={(event) => setOpen(event.newState === 'open')}
         onBlur={(event) => {
           if (event.relatedTarget !== trigger.current && !event.currentTarget.contains(event.relatedTarget)
@@ -110,14 +130,7 @@ export function ChatMenu({ thread, onAction }: {
           items[next]?.focus({ preventScroll: true });
         }}
       >
-        {thread.canRename && (
-          <button type="button" role="menuitem" onClick={() => run('rename')}><Icon name="edit" />Переименовать</button>
-        )}
-        {thread.canDelete && (
-          <button type="button" role="menuitem" className="thread-menu-delete" onClick={() => run('delete')}>
-            <Icon name="trash" />Удалить чат
-          </button>
-        )}
+        {children(close)}
       </div>
     </>
   );

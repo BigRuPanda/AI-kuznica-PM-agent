@@ -65,9 +65,9 @@ export function searchResearch(db, query, kinds, limit, asOf, excluded) {
     const tokens = terms([v.excerpt, v.question, v.product, v.hypothesis].filter(Boolean).join(' '));
     const hits = words.filter(w => tokens.some(t => w.length < 4 ? t === w : t.startsWith(w))).length;
     const metadata = typeof parsed === 'string' ? undefined : {
-      product: v.product, question: v.question, date: v.date, importedFrom: file + ' · ' + loc,
+      product: v.product, question: v.question, date: v.date, importedFrom: file + ' · ' + loc, sourceFile:v.sourceFile,sourceLoc:v.sourceLoc,
       hypothesis: v.hypothesis, relation: v.relation || 'упоминание',
     };
-    return {kind,key,version,source:display,data:v.excerpt,metadata,score:hits + Math.min(0.99, -rank/(1-rank))};
+    return {kind,key,version,file,loc,source:display,data:v.excerpt,metadata,score:hits + Math.min(0.99, -rank/(1-rank))};
   });
 }

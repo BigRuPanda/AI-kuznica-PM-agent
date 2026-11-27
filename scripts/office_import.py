@@ -67,6 +67,78 @@ def excerpt_row(cells, columns, title, n, epoch):
             raise ValueError("Проверьте дату исследования: " + location)
     return {"kind":"interview","loc":location,"row":row}
 
+# Verbatim excerpts are opt-in: every word in the whole cell must be non-identifying.
+# Other cells contribute only the existing thematic labels.
+INTERVIEW_WORDS = set("""
+я мы клиент покупатель клиенты он они через только или и а в на по из за у с со при
+не да нет когда если как что для без часто иногда обычно всегда сложно трудно удобно
+выбрать выбор выбора выборе подобрать подбор подбора нужную версию версии версий
+лицензию лицензии лицензий лицензия условия условиям цена цены срок редакцию
+менеджера менеджер менеджеру менеджером закупает покупает купить купили покупаем
+закупки заказ заказа онлайн самостоятельно консультация помощь информация информации
+нехватка недостаточно сложным лицензиям идеальный вариант остальное сдерживает
+запутанная политика по критика программное обеспечение касперский kaspersky astra
+linux cyberbackup
+""".split())
+
+def interview_excerpt(value):
+    if len(value) > 500 or re.search(r"[^\w\s.,:;!?()«»\"—–-]|[\d_]", value):
+        return None
+    if not set(re.findall(r"[\w]+", value.casefold())).issubset(INTERVIEW_WORDS):
+        return None
+    for phrase in re.split(r"[.!?;\n]", value):
+        phrase = phrase.strip()
+        if 15 <= len(phrase) <= 170 and re.search(r"сложн|запутан|выбор|подбор|нехватк", phrase, re.I):
+            return phrase
+    return None
+
+# Index structured research answers. Contact fields, recordings and raw transcripts
+# are outside the research corpus. A sheet row links answers from the same interview.
+PRIVATE_FIELD = re.compile(
+    r"контакт|телефон|мобильн(?:ый|ого)\b|телеграм|telegram|whatsapp|viber|skype|соцсет|никнейм|"
+    r"e[- ]?mail|почт[аовы]|адрес|фамили|отчеств|имя\b|ф[\W_]*и[\W_]*о\b|название компании|"
+    r"\b(?:name|phone|mobile|contact|handle|username|login|address|employer|company name)\b|"
+    r"инн|ссылка на|транскри|расшифров|запись интервью|реквизит|пароль|логин", re.I)
+RESEARCH_FIELD = re.compile(
+    r"роль\b|должност|модел|продукт|покуп|заказ|поставщик|цен[ауы]|лицензи|выбор|закуп|"
+    r"оплат|достав|предпочтен|преимуществ|проблем|потребност|затруднен|возражен|"
+    r"\b(?:product|purchase|buying|role|supplier|price|licen[cs]e|payment|delivery)\b", re.I)
+PRIVATE_VALUE = re.compile(r"https?://\S+|[\w.+-]+@[\w.-]+|(?<!\w)(?:\+7|8)[\s()-]*(?:\d[\s()-]*){10}(?!\d)|\b\d{9,}\b|@[\w.]+|\b(?:ООО|АО|ПАО|ИП)\s+[«\"][^»\"]+[»\"]", re.I)
+PERSON = re.compile(r"\b[А-ЯЁ][а-яё]+\s+[А-ЯЁ][а-яё]+(?:\s+[А-ЯЁ][а-яё]+)?\b|\b[А-ЯЁ][а-яё]+\s+[А-ЯЁ]\.\s*[А-ЯЁ]\.")
+
+def research_detail(field, value, identifiers):
+    if not isinstance(field, str) or PRIVATE_FIELD.search(field) or not RESEARCH_FIELD.search(field) or not isinstance(value, str):
+        return None
+    if len(field) > 500 or re.search(r"пароль|паспорт|транскрипт|расшифровка интервью|(?:^|\n)\s*(?:интервьюер|респондент)\s*:", value, re.I):
+        return None
+    cleaned = PERSON.sub("[скрыто]", PRIVATE_VALUE.sub("[скрыто]", value)).strip()
+    for word in identifiers:
+        cleaned = re.sub(r"\b"+re.escape(word)+r"\b", "[скрыто]", cleaned, flags=re.I)
+    if not cleaned or cleaned == "[скрыто]":
+        return None
+    return {"field": field.strip(), "answer": cleaned}
+
+def price_comparison(headers, cells, epoch):
+    fields = {name: cells.get(col) for col, name in headers.items()}
+    match = fields.get("Сопоставимый продукт у конкурента")
+    if match not in ("Да", "Частично"):
+        return None
+    merchant, product = fields.get("Конкурент"), fields.get("Продукт")
+    offered, store = fields.get("Цена конкурента, ₽"), fields.get("Цена store.softline.ru, ₽")
+    checked = fields.get("Дата проверки")
+    if not isinstance(merchant, str) or not isinstance(product, str) or not isinstance(checked, (int, float)):
+        return None
+    if not all(isinstance(v, (int, float)) and v > 0 for v in (offered, store)):
+        return None
+    if not 1 <= checked < 100000:
+        return None
+    description = fields.get("Описание сравниваемого продукта")
+    sku = re.search(r"артикул\s*:\s*([\w.-]+)", description or "", re.I)
+    return {"merchant": merchant, "product": product, "competitorPrice": offered, "storePrice": store,
+            "license": fields.get("Редакция / лицензия"), "terms": fields.get("Срок / кол-во"),
+            "match": match, "sku": sku.group(1) if sku else None,
+            "checked": (epoch + timedelta(days=checked)).date().isoformat()}
+
 def read(z, key):
     if z.getinfo(key).file_size > LIMIT:
         raise ValueError("Слишком большой файл внутри архива")
@@ -117,6 +189,34 @@ def normalize(row, epoch):
             row[k] = (epoch + timedelta(days=row[k])).date().isoformat()
     return row
 
+def hyperlink_targets(z, path):
+    rels = posixpath.join(posixpath.dirname(path), "_rels", posixpath.basename(path) + ".rels")
+    if rels not in z.namelist():
+        return {}
+    external = {r.get("Id"): r.get("Target") for r in xml(z, rels)
+                if r.get("TargetMode") == "External" and r.get("Type", "").endswith("/hyperlink")}
+    if not external:
+        return {}
+    targets = {}
+    for _, element in ET.iterparse(io.BytesIO(read(z, path)), events=("end",)):
+        if element.tag.rsplit("}", 1)[-1] == "hyperlink":
+            rel = next((v for k, v in element.attrib.items() if k.endswith("}id")), None)
+            if rel in external:
+                targets[element.get("ref")] = external[rel]
+        element.clear()
+    return targets
+
+def row_links(title, n, cells, targets, headers):
+    links = []
+    for col, value in cells.items():
+        if re.search(r"контакт|расшифров|запись интервью|пароль|логин|транскрипт", str(headers.get(col, "")), re.I):
+            continue
+        address = col + str(n)
+        url = targets.get(address, value)
+        if isinstance(url, str) and len(url) <= 2048 and re.fullmatch(r"https?://[^\s<>]+", url.strip(), re.I):
+            links.append({"loc": title + "!" + address, "url": url.strip()})
+    return links
+
 def book(z, name):
     strings = [text_nodes(item) for item in xml(z,"xl/sharedStrings.xml")] if "xl/sharedStrings.xml" in z.namelist() else []
     workbook = xml(z,"xl/workbook.xml")
@@ -135,8 +235,12 @@ def book(z, name):
         target=relations[rel]
         path=target.lstrip("/") if target.startswith("/") else posixpath.normpath(posixpath.join("xl",target))
         headers={}
+        targets = hyperlink_targets(z, path)
+        reference_cols = set()
+        survey = False
         excerpt_cols = None
         for n,cells in sheet_rows(z,path,strings):
+            prior = len(facts)
             if title in TABLES:
                 if not headers:
                     headers=cells
@@ -154,17 +258,66 @@ def book(z, name):
                                 if str(v).strip().lower() in EXCERPT_COLUMNS}
             elif title == "Исследования":
                 continue
+            elif reference_cols:
+                usable = {col:value for col,value in cells.items() if col in reference_cols}
+                links = row_links(title, n, usable, targets, headers)
+                for link in links:
+                    facts.append({"kind":"reference", "loc":link["loc"], "text": str(usable[re.sub(r".*!|[0-9]", "", link["loc"])])[:300], "links":[link]})
             elif competitor:
                 line=" · ".join(str(v)[:320] for v in cells.values())[:1600]
                 if not CONTACT.search(line):
-                    facts.append({"kind":"competitor","loc":f"{title}!A{n}","text":line})
-            elif n>=3:
-                for col,value in cells.items():
-                    if col in ("A","B") or not isinstance(value,str):
+                    fact={"kind":"competitor","loc":f"{title}!A{n}","text":line}
+                    if "Сопоставимый продукт у конкурента" in cells.values():
+                        headers=cells
+                    elif headers:
+                        comparison=price_comparison(headers,cells,epoch)
+                        if comparison: fact["comparison"]=comparison
+                        if "Цена конкурента, ₽" in headers.values():
+                            fields={label:cells.get(col) for col,label in headers.items()}
+                            if isinstance(fields.get("Конкурент"),str) and isinstance(fields.get("Продукт"),str):
+                                fact["prices"]={k:fields.get(k) for k in ("Конкурент","Продукт","Описание сравниваемого продукта",
+                                    "Сопоставимый продукт у конкурента","Цена конкурента, ₽","Цена store.softline.ru, ₽","Срок / кол-во")}
+                                checked=fields.get("Дата проверки")
+                                if isinstance(checked,(float,int)) and 1<=checked<100000:
+                                    fact["prices"]["Дата проверки"]=(epoch+timedelta(days=checked)).date().isoformat()
+                    facts.append(fact)
+            else:
+                if n <= 6 and not survey:
+                    headings=[v for v in cells.values() if isinstance(v,str)]
+                    survey=(len(headings)>=4 and (any(re.match(r"^(?:роль\b|должность\b|имя,|состав заказа$|выбор поставщика$|модель покупки$)",h,re.I)
+                                                      for h in headings) or sum("?" in h for h in headings)>=3))
+                    if survey:
+                        headers=cells
                         continue
-                    tags=[label for label,pattern in THEMES if re.search(pattern,value,re.I)]
-                    if tags:
-                        facts.append({"kind":"interview","loc":f"{title}!{col}{n}","text":"Темы ответа: "+", ".join(tags)})
+                    if not any(PRIVATE_FIELD.search(h) for h in headings) and "интервью" not in (name+" "+title).lower():
+                        reference_cols={col for col,value in cells.items() if isinstance(value,str) and
+                            re.fullmatch(r"(?:url|сайт|источник|ссылк[аи]|страница|карточка)(?: (?:на )?(?:источник|товар|продукт|сайт|страницу))?",value.strip(),re.I)}
+                        if reference_cols:
+                            headers=cells
+                            continue
+                    if n<=2:
+                        continue
+                identifiers = {word for col,value in cells.items() if isinstance(value,str) and
+                               PRIVATE_FIELD.search(str(headers.get(col,"")))
+                               for word in re.findall(r"\b[\w.-]{3,}\b",value)}
+                for col,value in cells.items():
+                    if not isinstance(value,str):
+                        continue
+                    if survey and PRIVATE_FIELD.search(str(headers.get(col, ""))):
+                        continue
+                    detail=research_detail(headers.get(col),value,identifiers) if survey else None
+                    tags=[label for label,pattern in THEMES if re.search(pattern,value,re.I)] if n>=3 and col not in ("A","B") else []
+                    if detail or tags:
+                        text="Темы ответа: "+", ".join(tags) if tags else detail["field"]
+                        excerpt=interview_excerpt(value) if tags else None
+                        if excerpt: text+="\nФрагмент записи: "+excerpt
+                        fact={"kind":"interview","loc":f"{title}!{col}{n}","text":text}
+                        if detail: fact["detail"]=detail
+                        facts.append(fact)
+            if (competitor or title in TABLES) and len(facts) > prior and facts[-1]["kind"] != "interview":
+                links = row_links(title, n, cells, targets, headers)
+                if links:
+                    facts[-1]["links"] = links
     return facts
 
 def extract(data, name, depth=0):

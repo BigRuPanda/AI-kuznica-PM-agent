@@ -1,3 +1,4 @@
+import { initSourcePolicy, approveSource, sourcePermission, importApproved, sourceHistory } from './source-policy.mjs';
 import { operations as catalog, workspaceOperation } from './workspace-operations.mjs';
 import { createServer } from 'node:http';
 import { dirname, join } from 'node:path';
@@ -67,9 +68,10 @@ export function createTeamApp({
     secure = urlBase.protocol === 'https:';
   function space(id) {
     if (!spaces.has(id)) {
-      const s = openStore(workspacePath(base, id));
+      const s = openStore(workspacePath(base, id),{seedDemo:!env.SOURCE_ARCHIVE_SHA256});
       initEvidence(s.db);
       initWorkbench(s.db);
+      initSourcePolicy(s.db);
       initMetrikaSync(s.db);
       reconciledAt.set(id, Date.now());
 
@@ -132,7 +134,7 @@ export function createTeamApp({
         await workJobs(s, accounts, env, send);
         const minutes = Number(env.METRIKA_SYNC_MINUTES || 0),
           sync = setting(s.db, 'last_metrika_sync', { at: 0 });
-        if (id === 'team' && env.METRIKA_TOKEN && minutes >= 5 && Date.now() - sync.at >= minutes * 60000) {
+        if (!env.SOURCE_ARCHIVE_SHA256 && id === 'team' && env.METRIKA_TOKEN && minutes >= 5 && Date.now() - sync.at >= minutes * 60000) {
           await syncMetrika(s, env, send).catch(() => {}); // The journal retains failures for each source.
         }
         for (const c of cases(s.db).filter((x) => x.state === 'Наблюдаем эффект' && x.body.watch)) {
@@ -283,10 +285,12 @@ export function createTeamApp({
           if (!/\.(xlsx|zip|pptx)$/i.test(name) || name.length > 250)
             throw Error('Выберите XLSX, PPTX или ZIP');
           const raw = await readBody(req, 32 * 1024 * 1024);
-          const docs = JSON.parse(await python('office_import.py', [name], raw, env));
+          const store=space(user.space);
+          const permission=sourcePermission(store.db,env.SOURCE_ARCHIVE_SHA256,raw,name);
+          const docs = permission?.alreadyImported?[]:JSON.parse(await python('office_import.py', [name], raw, env));
           return reply(
             200,
-            importDocs(space(user.space), docs, { notify: env.NOTIFICATIONS_ENABLED === 'true' && notificationChannels(env) }),
+            importApproved(store,docs,permission,env.NOTIFICATIONS_ENABLED === 'true' && notificationChannels(env)),
           );
         }
         if (!req.headers['content-type']?.startsWith('application/json'))
@@ -307,6 +311,13 @@ export function createTeamApp({
         }
         const store = space(user.space),
           db = store.db;
+        if(op==='source-history') return reply(200,{versions:sourceHistory(db,b.file)});
+        if(op==='approve-source') {
+          admin(user);
+          if(!env.SOURCE_ARCHIVE_SHA256) throw Error('Согласование доступно в защищённом пространстве.');
+          approveSource(store,b,user.name,env.SOURCE_ARCHIVE_SHA256);
+          return reply(200,{approved:true});
+        }
         if (op === 'investigation-status') return reply(200, readInvestigations(db, user, b.caseId));
         if (op === 'investigation-alternative') return reply(200, createAlternative(db, user, b));
         if (op === 'investigation-publish') return reply(200, publishInvestigation(db, user, b));
@@ -332,7 +343,7 @@ export function createTeamApp({
         if (op === 'integration-access') return reply(200, await personalConnection(db, user, b, env, send));
         if (op === 'overview')
           return reply(200, {
-            ...dashboard(db, user),
+            ...dashboard(db, user), archiveOnly:!!env.SOURCE_ARCHIVE_SHA256,
             metrikaSync: user.space === 'team' ? metrikaStatus(db, env) : { reports: [] },
             notificationsEnabled: user.space === 'team' && env.NOTIFICATIONS_ENABLED === 'true',
             notificationChannels: user.space === 'team' ? notificationChannels(env) : [],
@@ -494,11 +505,13 @@ export function createTeamApp({
           return reply(200, await workspaceOperation(store, user, op, b, env, send));
         if (op === 'metrika') {
           admin(user);
+          if(env.SOURCE_ARCHIVE_SHA256) throw Error('В этом пространстве используется архив организатора.');
           return reply(200, await syncMetrika(store, env, send));
         }
         if (op === 'status') {
           admin(user);
           return reply(200, {
+            webSearch: !!(env.YANDEX_SEARCH_FOLDER_ID && env.YANDEX_SEARCH_API_KEY),
             metrika: !!env.METRIKA_TOKEN,
             metrikaSync: metrikaStatus(db, env),
             integrations: connectionInfo(db,user),
@@ -512,6 +525,7 @@ export function createTeamApp({
       }
       if (p.startsWith('/api/')) {
         if (!user) return reply(401, { error: 'Войдите в приложение' });
+        if(env.SOURCE_ARCHIVE_SHA256 && method==='POST' && p==='/api/import') return reply(403,{error:'Используйте загрузку в разделе Источники.'});
         if (method === 'POST' && ['/api/import', '/api/releases'].includes(p) && user.role !== 'admin')
           return reply(403, { error: 'Импорт архива доступен администратору' });
         req.pmActor = user.name;
