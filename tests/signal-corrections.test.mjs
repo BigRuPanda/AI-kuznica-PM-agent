@@ -22,7 +22,7 @@ function fixture(t) {
   initEvidence(s.db);
   initWorkbench(s.db);
   const upload = values => importDocs(s,[salesDoc(values)]);
-  const env = {NOTIFICATIONS_ENABLED:'true',TELEGRAM_BOT_TOKEN:'fixture',TELEGRAM_CHAT_IDS:'first,second',SMTP_HOST:'smtp.invalid',SMTP_TO:'pm@example.invalid'};
+  const env = {NOTIFICATIONS_ENABLED:'true',TELEGRAM_BOT_TOKEN:'fixture',TELEGRAM_CHAT_IDS:'first,second',SMTP_HOST:'smtp.invalid',SMTP_FROM:'sender@example.invalid',SMTP_TO:'pm@example.invalid'};
   const sent = [];
   const tg = async (url, options) => {
     const {chat_id:dest, text} = JSON.parse(options.body);
@@ -152,7 +152,7 @@ test('legacy delivery without an archived SMTP recipient requires reconciliation
   assert.deepEqual(signalHistory(s.db,id).map(({revision,status})=>[revision,status]),[[0,'confirmed']]);
   importDocs(s,[salesDoc([100,100])]);
   const sent = [];
-  await deliver(s,{NOTIFICATIONS_ENABLED:'true',SMTP_HOST:'smtp.invalid',SMTP_TO:'new@example.invalid'},
+  await deliver(s,{NOTIFICATIONS_ENABLED:'true',SMTP_HOST:'smtp.invalid',SMTP_FROM:'sender@example.invalid',SMTP_TO:'new@example.invalid'},
     undefined,async text=>sent.push(text));
   const review = s.db.prepare("SELECT body FROM deliveries WHERE state='review'").get();
   assert.equal(JSON.parse(review.body).caseId,id);

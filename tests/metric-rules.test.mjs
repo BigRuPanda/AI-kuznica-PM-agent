@@ -156,7 +156,7 @@ test('first CTR episode exposes its measured sources and delivers one actionable
   const store = fixture(t,[release(ctr), ...[10,10,10,10].flatMap((n,i)=>weeklyCounts(ctr,i,n,100,'metrika:1:'+ctr))]);
   initWorkbench(store.db);
   const user = {id:'member', role:'member', space:'team'};
-  const env = {NOTIFICATIONS_ENABLED:'true',APP_BASE_URL:'http://127.0.0.1:8090',SMTP_HOST:'fixture.test',SMTP_TO:'product@example.test'};
+  const env = {NOTIFICATIONS_ENABLED:'true',APP_BASE_URL:'http://127.0.0.1:8090',SMTP_HOST:'fixture.test',SMTP_FROM:'sender@example.invalid',SMTP_TO:'product@example.test'};
   const messages = [];
   const sendUnexpected = () => assert.fail('Unexpected network request');
   const flush = () => deliver(store,env,sendUnexpected,async (text,{SMTP_TO}) => messages.push({text,to:SMTP_TO}));

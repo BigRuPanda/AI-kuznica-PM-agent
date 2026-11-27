@@ -248,7 +248,7 @@ test('SMTP-only notifications skip old queued Telegram notices and allow direct 
   insert.run('direct-reply','telegram',JSON.stringify({chat:'44',text:'Ответ в личку'}));
   insert.run('mail','smtp',JSON.stringify({text:'Новый сигнал'}));
   const channels={NOTIFICATION_CHANNELS:'smtp',NOTIFICATIONS_ENABLED:'true',TELEGRAM_BOT_TOKEN:'fixture',
-    SMTP_HOST:'localhost',SMTP_TO:'observer@example.invalid'};
+    SMTP_HOST:'localhost',SMTP_FROM:'sender@example.invalid',SMTP_TO:'observer@example.invalid'};
   const telegramChats=[],emails=[];
   for (let attempt=0;attempt<3;attempt++) {
     await deliver(s,channels,async (_url,init)=>{

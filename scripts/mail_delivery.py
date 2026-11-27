@@ -17,16 +17,40 @@ if c["SMTP_TLS"] == "plain":
             or c.get("LOCAL_SMTP_TARGET") != f"{c['SMTP_HOST']}:{port}"
             or c.get("SMTP_USER") or c.get("SMTP_PASSWORD")):
         sys.exit("SMTP_TLS=plain требует локальный тестовый приёмник без авторизации.")
-if c["SMTP_TLS"]=="implicit":
-    client=smtplib.SMTP_SSL(c["SMTP_HOST"],port,timeout=20,context=tls)
-else:
-    client=smtplib.SMTP(c["SMTP_HOST"],port,timeout=20)
-with client:
+client = None
+
+
+def rejected(codes):
+    if codes and all(400 <= code < 500 for code in codes):
+        sys.exit(75)
+    if codes and all(400 <= code < 600 for code in codes):
+        sys.exit(69)
+
+
+try:
+    if c["SMTP_TLS"] == "implicit":
+        client = smtplib.SMTP_SSL(c["SMTP_HOST"], port, timeout=20, context=tls)
+    else:
+        client = smtplib.SMTP(c["SMTP_HOST"], port, timeout=20)
     if c["SMTP_TLS"] not in ("implicit", "plain"):
         client.starttls(context=tls)
     if c["SMTP_USER"]:
-        client.login(c["SMTP_USER"],c["SMTP_PASSWORD"])
+        client.login(c["SMTP_USER"], c["SMTP_PASSWORD"])
     if "--check" in sys.argv:
         client.noop()
     else:
-        client.send_message(message)
+        refused = client.send_message(message)
+        if refused:
+            raise smtplib.SMTPException("SMTP accepted only some recipients")
+except smtplib.SMTPRecipientsRefused as error:
+    rejected([code for code, _ in error.recipients.values()])
+    raise
+except smtplib.SMTPResponseException as error:
+    rejected([error.smtp_code])
+    raise
+finally:
+    if client is not None:
+        try:
+            client.quit()
+        except (OSError, smtplib.SMTPException):
+            client.close()

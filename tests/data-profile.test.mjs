@@ -4,6 +4,7 @@ import { mkdtemp } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
+import { smtpConfigured, telegramConfigured } from '../server/connectors.mjs';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { apiConfigured, makeAgent, providerCall } from '../server/agent.mjs';
@@ -80,6 +81,18 @@ test('local integrations use the configured HTTP origin and restrict cleartext S
     { SMTP_HOST: 'mail.example.invalid', LOCAL_SMTP_TARGET: 'mail.example.invalid:11025' },
     { SMTP_HOST: 'localhost', LOCAL_SMTP_TARGET: 'localhost:11025' }, { LOCAL_SMTP_TARGET: '127.0.0.1:11026' },
   ]) await assert.rejects(mail('Вымышленное письмо', { ...smtp, ...overrides }), /SMTP.*(?:локальн|loopback)/);
+});
+
+test('contact readiness requires approved transports under the local data profile', () => {
+  const env = { DATA_PROFILE: 'local', TELEGRAM_BOT_TOKEN: 'fixture',
+    SMTP_HOST: '127.0.0.1', SMTP_PORT: '11025', SMTP_TLS: 'plain', SMTP_FROM: 'sender@example.invalid' };
+  assert.equal(telegramConfigured(env), false);
+  assert.equal(smtpConfigured(env), false);
+  assert.equal(telegramConfigured({ ...env, LOCAL_HTTP_ORIGINS: 'https://api.telegram.org' }), true);
+  const allowed = { ...env, LOCAL_SMTP_TARGET: '127.0.0.1:11025' };
+  assert.equal(smtpConfigured(allowed), true);
+  assert.equal(smtpConfigured({ ...allowed, SMTP_USER: 'fixture' }), false);
+  assert.equal(smtpConfigured({ ...allowed, SMTP_FROM: '' }), false);
 });
 
 test('HTTP chat, HTTP MCP and the release journal use saved calculations with zero model requests in local mode', async () => {

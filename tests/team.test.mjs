@@ -209,6 +209,7 @@ test('Telegram fans out once per recipient, SMTP gets one link and repeated work
       TELEGRAM_CHANNEL_ID: '22',
       TELEGRAM_BOT_TOKEN: 'fixture',
       SMTP_HOST: 'example.invalid',
+      SMTP_FROM: 'sender@example.invalid',
       SMTP_TO: 'demo@example.invalid',
       APP_BASE_URL: 'https://example.invalid',
     };

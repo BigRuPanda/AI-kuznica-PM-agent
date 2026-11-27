@@ -19,7 +19,8 @@ import {
 } from './evidence.mjs';
 import { apiConfigured, providerCall } from './agent.mjs';
 import { initTracking } from './tracker-workflow.mjs';
-import { mail, telegram } from './connectors.mjs';
+import { mail, smtpConfigured, telegram, telegramConfigured } from './connectors.mjs';
+import { destination } from './notification-contacts.mjs';
 import { notificationChannels } from './data-profile.mjs';
 import {
   initMaterials,
@@ -943,13 +944,15 @@ export async function workJobs(store, accounts, env, send, pageOptions) {
     }
   });
 }
-function claimDelivery(store, env) {
+function claimDelivery(store, env, accounts) {
   const db = store.db;
   const d = db
     .prepare(
       `SELECT * FROM deliveries d WHERE state='queued' AND next<=? AND
        ((?=1 AND channel IN (SELECT value FROM json_each(?))) OR
-        (json_extract(body,'$.chat') IS NOT NULL AND COALESCE(json_extract(body,'$.proactive'),0)=0))
+        (channel='telegram' AND json_extract(body,'$.chat') IS NOT NULL
+        AND json_extract(body,'$.caseId') IS NULL AND json_extract(body,'$.owner') IS NULL
+        AND COALESCE(json_extract(body,'$.proactive'),0)=0))
        AND (json_extract(body,'$.after') IS NULL OR EXISTS(SELECT 1 FROM deliveries prev WHERE prev.id=json_extract(d.body,'$.after') AND prev.state='delivered'))
        ORDER BY rowid LIMIT 1`,
     )
@@ -958,15 +961,36 @@ function claimDelivery(store, env) {
   const b = JSON.parse(d.body);
   const isTelegram = d.channel === 'telegram';
   const recipientKey = isTelegram ? 'chat' : 'emailTo';
+  const cancel = () => db.prepare("UPDATE deliveries SET state='cancelled' WHERE id=?").run(d.id);
+  const caseOwner = b.caseId && db.prepare("SELECT json_extract(body,'$.owner') owner FROM cases WHERE id=?").get(b.caseId)?.owner;
+  const named = b.caseId && b.broadcast !== true &&
+    (b.recipientLogin || b.awaitingOwner || env.SIGNAL_OWNER_LOGIN || env.SOURCE_ARCHIVE_SHA256);
+  const login = named ? String(b.recipientLogin || env.SIGNAL_OWNER_LOGIN || '').trim() : '';
+  const assigned = login && accounts?.prepare(
+    "SELECT id FROM users WHERE login=? COLLATE NOCASE AND space='team' AND role!='judge'",
+  ).get(login)?.id;
+  const owner = caseOwner || b.owner || b.recipientOwner || assigned;
+  const postpone = () => {
+    const pending = owner ? { ...b, recipientOwner: owner }
+      : login ? { ...b, recipientLogin: login }
+      : named ? { ...b, awaitingOwner: true } : b;
+    db.prepare('UPDATE deliveries SET next=?,body=? WHERE id=?')
+      .run(Date.now() + 60000, JSON.stringify(pending), d.id);
+  };
+  const personal = owner && accounts?.prepare(
+    "SELECT id FROM users WHERE id=? AND space='team' AND role!='judge'",
+  ).get(owner) && destination(accounts, owner, d.channel);
+  if (b.addressHash && (!personal || digest(personal) !== b.addressHash)) return void cancel();
+  if ((b.recipientOwner && owner !== b.recipientOwner) || (b.owner && owner !== b.owner)) return void cancel();
+  if ((owner || named) && b[recipientKey] && !b.recipientOwner && b[recipientKey] !== personal) return void cancel();
+  if ((owner || named) && !personal) return void postpone();
   const targets = isTelegram
     ? [...String(env.TELEGRAM_CHAT_IDS || '').split(','), env.TELEGRAM_CHANNEL_ID]
     : [env.SMTP_TO];
-  const destinations = b[recipientKey] ? [b[recipientKey]]
+  const destinations = personal ? [personal] : b[recipientKey] ? [b[recipientKey]]
     : [...new Set(targets.filter(Boolean).map(x => x.trim()).filter(Boolean))];
-  if (!destinations.length || !(isTelegram ? env.TELEGRAM_BOT_TOKEN : env.SMTP_HOST)) {
-    db.prepare('UPDATE deliveries SET next=? WHERE id=?').run(Date.now() + 60000, d.id);
-    return;
-  }
+  if (!destinations.length || !(isTelegram ? telegramConfigured(env) : smtpConfigured(env)))
+    return void postpone();
   // A correction can have both a new broadcast and an addressed follow-up in the queue.
   const addressed = db.prepare(`SELECT 1 FROM deliveries WHERE json_extract(body,'$.signalId')=?
     AND json_extract(body,'$.revision')=? AND channel=? AND json_extract(body,?)=?
@@ -974,8 +998,7 @@ function claimDelivery(store, env) {
   const unmatched = b.signalId && !b[recipientKey] ? destinations.filter(dest =>
     !addressed.get(b.signalId,b.revision,d.channel,'$.' + recipientKey,dest)) : destinations;
   if (!unmatched.length) {
-    db.prepare("UPDATE deliveries SET state='cancelled' WHERE id=?").run(d.id);
-    return;
+    return void cancel();
   }
   if (unmatched.length > 1) {
     const insert = db.prepare("INSERT OR IGNORE INTO deliveries(id,channel,state,body) VALUES(?,?,'queued',?)");
@@ -985,36 +1008,45 @@ function claimDelivery(store, env) {
     return;
   }
   const [recipient] = unmatched;
+  const addressedBody = { ...b, [recipientKey]: recipient, ...(owner && { recipientOwner: owner }) };
   db.prepare("UPDATE deliveries SET state='sending',body=?,attempts=attempts+1 WHERE id=?")
-    .run(JSON.stringify({...b,[recipientKey]:recipient}),d.id);
+    .run(JSON.stringify(addressedBody),d.id);
   return {d,b,recipient,recipientKey};
 }
 
-export async function deliver(store, env, send, mailSend = mail) {
+export async function deliver(store, env, send, mailSend = mail, accounts) {
   const db = store.db;
-  const claim = store.tx(() => claimDelivery(store, env));
+  const claim = store.tx(() => claimDelivery(store, env, accounts));
   if (!claim) return;
   const {d,b,recipient,recipientKey} = claim;
-  const text =
-    b.text + (b.caseId ? '\n' + (env.APP_BASE_URL || 'http://127.0.0.1:8090') + '/#case/' + b.caseId : '');
+  const links = [b.issueUrl, b.caseId && (env.APP_BASE_URL || 'http://127.0.0.1:8090') + '/#case/' + b.caseId]
+    .filter(link => {
+      const url = link && URL.parse(link);
+      return url && ['http:', 'https:'].includes(url.protocol);
+    });
+  const text = [b.text, ...links].join('\n');
   try {
-    if (d.channel === 'telegram') await telegram('sendMessage', { chat_id: recipient, text }, env, send);
-    else await mailSend(text, Object.assign(Object.create(env), {SMTP_TO:recipient}));
+    if (d.channel === 'telegram') {
+      const receipt = await telegram('sendMessage', { chat_id: recipient, text }, env, send);
+      if (!Number.isSafeInteger(receipt?.message_id)) throw Error('Telegram не подтвердил доставку');
+    } else await mailSend(text, Object.assign(Object.create(env), {SMTP_TO:recipient}), recipient);
     db.prepare("UPDATE deliveries SET state='delivered' WHERE id=?").run(d.id);
   } catch (e) {
     store.tx(() => {
-      const retry = e.status === 429;
+      const retry = e.status === 429 || e.exitCode === 75;
+      const rejected = retry || e.exitCode === 69 || [400, 401, 403, 404].includes(e.status);
       const waiting = db.prepare("SELECT id,body FROM deliveries WHERE state='queued' AND json_extract(body,'$.after')=? AND json_extract(body,'$.signalId') IS NOT NULL").all(d.id);
       const superseded = retry && b.signalId && db.prepare(`SELECT 1 FROM signal_revisions
         WHERE case_id=? AND revision>? AND json_extract(body,'$.event') IS NOT NULL LIMIT 1`)
         .get(b.signalId,b.revision ?? 0);
       db.prepare('UPDATE deliveries SET state=?,next=? WHERE id=?').run(
-        retry ? (superseded || waiting.length ? 'cancelled' : 'queued') : 'uncertain',Date.now()+60000,d.id);
+        retry ? (superseded || waiting.length ? 'cancelled' : 'queued') : rejected ? 'failed' : 'uncertain',
+        Date.now() + (e.retryAfter ? Math.max(1, e.retryAfter) * 1000 : 60000), d.id);
       for (const row of waiting) {
         const child = JSON.parse(row.body);
-        if (retry) delete child.after;
-        let state = retry ? 'queued' : 'review';
-        if (retry && child.event === 'withdrawn') {
+        if (rejected) delete child.after;
+        let state = rejected ? 'queued' : 'review';
+        if (rejected && child.event === 'withdrawn') {
           const receipt = db.prepare(`SELECT json_extract(body,'$.event') event FROM deliveries
             WHERE json_extract(body,'$.signalId')=? AND channel=? AND json_extract(body,?)=?
             AND state='delivered' ORDER BY rowid DESC LIMIT 1`).get(child.signalId,d.channel,'$.' + recipientKey,recipient);

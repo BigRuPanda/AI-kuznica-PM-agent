@@ -1,7 +1,7 @@
 import { spawn } from 'node:child_process';
 import { join } from 'node:path';
 import { root } from './config.mjs';
-import { integrationTransport, checkSmtp, localData } from './data-profile.mjs';
+import { integrationTransport, checkDestination, checkSmtp, localData } from './data-profile.mjs';
 import { ratioFields, reportDefinition } from './metric-observations.mjs';
 export async function python(script, args, input, env = process.env) {
   return new Promise((resolve, reject) => {
@@ -30,11 +30,11 @@ export async function python(script, args, input, env = process.env) {
       clearTimeout(timer);
       if (code !== 0)
         return reject(
-          Error(
+          Object.assign(Error(
             script === 'office_import.py'
               ? 'Ошибка чтения документа. ' + err
               : 'Не удалось выполнить операцию SMTP.',
-          ),
+          ), { exitCode: code }),
         );
       resolve(Buffer.concat(chunks).toString('utf8'));
     });
@@ -193,16 +193,44 @@ export async function metrika(env = process.env, send = fetch) {
     }
   return { docs: [{ file: replay ? 'Яндекс Метрика API · воспроизведение' : 'Яндекс Метрика API', facts }], samples };
 }
+const telegramOrigin = 'https://api.telegram.org';
+export function telegramConfigured(env) {
+  try {
+    checkDestination(env, telegramOrigin);
+    return !!env.TELEGRAM_BOT_TOKEN;
+  } catch {
+    return false;
+  }
+}
+
 export async function telegram(method, data, env = process.env, send = fetch) {
   send = integrationTransport(env, send);
-  const r = await request(
-    send,
-    'https://api.telegram.org/bot' + required(env, 'TELEGRAM_BOT_TOKEN') + '/' + method,
-    { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) },
-  );
-  return r.result;
+  const response = await send(telegramOrigin + '/bot' + required(env, 'TELEGRAM_BOT_TOKEN') + '/' + method, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data),
+    redirect: 'error', signal: AbortSignal.timeout(25000),
+  });
+  const payload = await response.json().catch(() => null);
+  if (!response.ok || payload?.ok === false || !payload || !Object.hasOwn(payload, 'result')) {
+    const status = response.ok ? payload?.error_code : response.status;
+    const delay = payload?.parameters?.retry_after ?? Number(response.headers.get('Retry-After'));
+    throw Object.assign(Error(status ? 'Telegram вернул ошибку ' + status : 'Telegram не подтвердил запрос'), {
+      status,
+      retryAfter: Number.isSafeInteger(delay) && delay > 0 ? delay : undefined,
+    });
+  }
+  return payload.result;
 }
-export async function mail(text, env = process.env) {
+
+export function smtpConfigured(env) {
+  try {
+    checkSmtp(env);
+    return !!(env.SMTP_HOST?.trim() && env.SMTP_FROM?.trim());
+  } catch {
+    return false;
+  }
+}
+
+export async function mail(text, env = process.env, recipient = env.SMTP_TO) {
   checkSmtp(env);
   const config = Object.fromEntries(
     ['SMTP_HOST', 'SMTP_PORT', 'SMTP_USER', 'SMTP_PASSWORD', 'SMTP_FROM', 'SMTP_TO', 'SMTP_TLS'].map((k) => [
@@ -210,7 +238,9 @@ export async function mail(text, env = process.env) {
       env[k] || '',
     ]),
   );
+  config.SMTP_TO = recipient || '';
   required(config, 'SMTP_HOST');
+  required(config, 'SMTP_FROM');
   required(config, 'SMTP_TO');
   await python('mail_delivery.py', [], JSON.stringify({ ...config, text, DATA_PROFILE:env.DATA_PROFILE,
     LOCAL_SMTP_TARGET:env.LOCAL_SMTP_TARGET }), env);

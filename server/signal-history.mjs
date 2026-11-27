@@ -60,6 +60,10 @@ function updateNotices(db, id, revision, event, summary, notify) {
     if (event === 'withdrawn' && body.event === 'withdrawn' && row.state === 'delivered') continue;
     const message = {...payload};
     if (dest) message[row.channel === 'telegram' ? 'chat' : 'emailTo'] = dest;
+    if (body.recipientOwner) {
+      message.recipientOwner = body.recipientOwner;
+      if (dest) message.addressHash = fingerprint(dest);
+    }
     if (row.state === 'sending') message.after = row.id;
     const state = !dest || row.state === 'uncertain' ? 'review' : 'queued';
     insert.run(id + '/' + revision + '/' + fingerprint(key).slice(0,24), row.channel, state, JSON.stringify(message));

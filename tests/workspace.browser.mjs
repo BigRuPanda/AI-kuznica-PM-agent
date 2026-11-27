@@ -196,10 +196,17 @@ test('Softline workspace, upgrade and browser journeys', async t => {
     for (const name of ['releases.sqlite','accounts.sqlite','workspaces'])
       await cp(join(original, name), join(dir, name), {recursive:true});
   } else fixture = await seedWorkspace(dir);
+  const mail = [];
   const env = {...fixtureEnv, INTEGRATION_KEY:Buffer.alloc(32, 1).toString('base64url'),
+    SMTP_HOST:'mail.invalid', SMTP_FROM:'sender@example.invalid',
+    TELEGRAM_BOT_TOKEN:'fixture', TELEGRAM_BOT_USERNAME:'signal_fixture_bot',
+    TELEGRAM_WEBHOOK_SECRET:'workspace-fixture-secret',
     LLM_BACKEND:'api', LLM_DATA_MODE:'analysis', PYTHON_BIN:process.env.PYTHON_BIN,
     LLM_BASE_URL:'http://localhost/v1', LLM_MODEL:'fixture'};
-  const start = () => createTeamApp({base:join(dir,'releases.sqlite'), background:false, env, send:transport});
+  const start = () => createTeamApp({
+    base:join(dir,'releases.sqlite'), background:false, env, send:transport,
+    sendMail:async (text, _env, to) => mail.push({ text, to }),
+  });
   for (let n = 0; n < 2; n++) {
     const app = start();
     try {
@@ -326,6 +333,42 @@ test('Softline workspace, upgrade and browser journeys', async t => {
       await visible(account.getByRole('heading',{name:'Член жюри по приглашению',exact:true}));
       await visible(account.getByText('Демо · жюри',{exact:true}));
     } finally { await guest.close(); }
+  });
+
+  await journey('verified notification contacts are personal and independently removable', async () => {
+    await go(member, 'settings/personal');
+    const contacts = member.getByRole('region', {name:'Мои уведомления'});
+    const address = 'fixture-member@example.invalid';
+    await field(contacts, 'Адрес почты').fill(address);
+    await submit(member, 'email-request', () => role(contacts, 'Получить код').click());
+    const sent = mail.at(-1);
+    assert.equal(sent.to, address);
+    await field(contacts, 'Код из письма на ' + address).fill(sent.text.match(/\b\d{8}\b/)[0]);
+    await submit(member, 'email-confirm', () => role(contacts, 'Подтвердить почту').click());
+    await visible(contacts.getByText(address, {exact:true}));
+
+    await submit(member, 'bind', () => role(contacts, 'Привязать Telegram').click());
+    const link = new URL(await contacts.getByRole('link', {name:'Открыть бота в Telegram'}).getAttribute('href'));
+    assert.equal(link.origin, 'https://t.me');
+    const response = await member.request.post(base + '/api/telegram', {
+      headers:{'x-telegram-bot-api-secret-token':env.TELEGRAM_WEBHOOK_SECRET},
+      data:{update_id:801, message:{chat:{id:801,type:'private'},from:{id:801},text:'/start ' + link.searchParams.get('start')}},
+    });
+    assert.equal(response.status(), 200);
+    await member.evaluate(() => window.dispatchEvent(new Event('focus')));
+    await visible(contacts.getByText('Личный чат подключён'));
+    await submit(member, 'contact-unlink', () => role(contacts, 'Отвязать почту').click());
+    await visible(contacts.getByText('Личный чат подключён'));
+    assert.equal(await contacts.getByText(address, {exact:true}).count(), 0);
+
+    await go(admin, 'settings/personal');
+    const adminContacts = admin.getByRole('region', {name:'Мои уведомления'});
+    await visible(role(adminContacts, 'Привязать Telegram'));
+    assert.equal(await adminContacts.getByText(address, {exact:true}).count(), 0);
+    await go(judge, 'settings/personal');
+    assert.equal(await judge.getByRole('region', {name:'Мои уведомления'}).count(), 0);
+    await submit(member, 'contact-unlink', () => role(contacts, 'Отвязать Telegram').click());
+    await visible(role(contacts, 'Привязать Telegram'));
   });
 
   await journey('settings sit above the profile and the account page keeps sign-out', async () => {
@@ -738,8 +781,11 @@ test('Softline workspace, upgrade and browser journeys', async t => {
     assert.equal(await admin.getByRole('heading',{name:'Правило уведомления'}).count(),0);
     await submit(admin,'mcp-key',()=>role(admin,'Выпустить ключ MCP').click());
     await visible(admin.locator('.notice').filter({hasText:/^Персональный ключ MCP/}));
-    await submit(admin,'bind',()=>role(admin,'Привязать Telegram').click());
-    await visible(admin.locator('.notice').filter({hasText:/^\/start /}));
+    const [bindingResponse] = await submit(admin,'bind',()=>role(admin,'Привязать Telegram').click());
+    const bindingLink = admin.getByRole('link',{name:'Открыть бота в Telegram'});
+    await visible(bindingLink);
+    const {command} = await bindingResponse.json();
+    assert.equal(new URL(await bindingLink.getAttribute('href')).searchParams.get('start'),command.slice(7));
     await role(admin,'Сверху').click();
     await admin.locator('[data-menu=top]').waitFor();
     await admin.reload();

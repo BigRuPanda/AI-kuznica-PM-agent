@@ -50,6 +50,7 @@ import { minSidebarWidth, SidebarResizeHandle, useSidebarWidth } from './sidebar
 import { PanelResizeHandle, useDiscussionDock, usePanelSize, usePanelSpace } from './panel-size';
 import { BrandLogo } from './brand-logo';
 import { ProfileEntry, ProfilePage } from './profile';
+import { NotificationSettings } from './notifications';
 import './team.css';
 import './tracking.css';
 import './chat.css';
@@ -1859,6 +1860,7 @@ function Settings({ home, action, refresh, menu, changeMenu, scope }: {
           </p>}
         </section>
       )}
+      {scope === 'personal' && home.user.role !== 'judge' && <NotificationSettings />}
       {scope === 'team' && <MetricRules admin={admin} refresh={refresh}/>}
       {scope === 'team' && admin && (
         <section className="paper">
@@ -1940,13 +1942,6 @@ function Settings({ home, action, refresh, menu, changeMenu, scope }: {
           >
             Выпустить ключ MCP
           </button>
-          {home.user.role !== 'judge' && (
-            <button
-              onClick={() => action(async () => say((await post<{ command: string }>('bind')).command))}
-            >
-              Привязать Telegram
-            </button>
-          )}
           </div>
         </section>
       </>}
