@@ -2002,5 +2002,172 @@ test('Softline workspace, upgrade and browser journeys', async t => {
       member.off('request', record);
     }
   });
+  await journey('personal investigation cards, filters and control survive reload, navigation and account changes', async () => {
+    const store = app.space('team');
+    const caseId = 'personal-view-case', otherId = 'personal-view-other';
+    const title = 'Проверка личного вида', otherTitle = 'Соседний разбор личного вида';
+    const defaults = ['summary','trend','evidence','timeline','backlog'];
+    const control = 'Zebra';
+    importDocs(store, [{ file:'Personal view.xlsx', facts: [
+      { kind:'sales', loc:'Продажи!A2', row:{product_family:control,week_start:'2026-09-07',orders_index:85} },
+      { kind:'interview', loc:'Интервью!A2', text:'Kaspersky · синтетический источник о переносе лицензии.' },
+    ] }], { notify:false });
+    const insertCase = store.db.prepare('INSERT INTO cases VALUES(?,?,?,?,?)');
+    insertCase.run(caseId,'Kaspersky',title,'Исследуем','{}');
+    insertCase.run(otherId,'Kaspersky',otherTitle,'Исследуем','{}');
+
+    const page = await login('admin','#cases');
+    const post = async (op, data={}) => {
+      const response = await page.request.post(base+'/api/team/'+op,{data});
+      assert.ok(response.ok(),op + ' ' + response.status());
+      return response.json();
+    };
+    const user = (await post('overview')).user;
+    const key = 'pm-view/'+user.id+'/'+caseId;
+    const viewRequest = (id, match=()=>true) => page.waitForResponse(r =>
+      r.url().endsWith('/api/team/view') && r.ok() &&
+      r.request().postDataJSON()?.caseId === id && match(r.request().postDataJSON()));
+    const open = async (id, name) => {
+      const [response] = await Promise.all([
+        viewRequest(id),
+        page.locator('a[href="#case/'+id+'"]').first().click(),
+      ]);
+      await visible(page.getByRole('heading',{name,exact:true}));
+      return response;
+    };
+    const backToCases = () => page.getByRole('link',{name:'← Разборы',exact:true}).click();
+    const card = name => page.locator('.case-main .card-'+name);
+    const cardOrder = () => page.locator('.case-main .analysis-card').evaluateAll(elements =>
+      elements.map(element => [...element.classList].find(name => name.startsWith('card-')).slice(5)));
+    const full = field(page,'Только полные недели');
+    const peer = field(page,'Контроль');
+    const query = 'Покажи источники о переносе лицензии';
+    const fields = response => {
+      const { control, sourceQuery, full } = response.request().postDataJSON();
+      return {control,sourceQuery,full};
+    };
+    const expected = {control,sourceQuery:query,full:true};
+    const initial = {control:undefined,sourceQuery:'',full:false};
+
+    await open(caseId,title);
+    assert.equal(await peer.locator('option').nth(1).textContent(),control);
+    await Promise.all([viewRequest(caseId,v => v.control === control), peer.selectOption(control)]);
+    await role(card('trend'),'Закрепить').click();
+    await field(page,'Вопрос агенту').fill(query);
+    await submit(page,'ask',()=>role(page,'Отправить').click());
+    const filtered = viewRequest(caseId,v => v.sourceQuery === query);
+    await workJobs(store,app.accounts,{...fixtureEnv,DATA_PROFILE:'local'},transport);
+    await filtered;
+    await visible(card('evidence'));
+    await role(card('evidence'),'Закрепить').click();
+    await Promise.all([viewRequest(caseId,v => v.full === true),full.check()]);
+    assert.deepEqual(await cardOrder(),['trend','evidence']);
+    await visible(role(card('evidence'),'Открепить'));
+
+    const [reloaded] = await Promise.all([viewRequest(caseId), page.reload()]);
+    assert.deepEqual(fields(reloaded),expected);
+    const saved = (await reloaded.json()).view;
+    const {id:calcId,...calculation} = saved;
+    assert.equal(saved.summary[1].product,control);
+    assert.equal(saved.full,true);
+    assert.ok(saved.evidence.some(row => row.file === 'Personal view.xlsx'));
+    assert.deepEqual(await post('calc',{id:calcId}),calculation);
+    const {key:mcpKey} = await post('mcp-key');
+    const connection = new Client({name:'personal-view-acceptance',version:'1'});
+    try {
+      await connection.connect(new StreamableHTTPClientTransport(new URL(base+'/mcp'),{
+        requestInit:{headers:{Authorization:'Bearer '+mcpKey}},
+      }));
+      const call = async (name,args) => {
+        const result = await connection.callTool({name,arguments:args});
+        assert.ok(!result.isError,result.content[0].text);
+        return JSON.parse(result.content[0].text);
+      };
+      assert.deepEqual(await call('calc',{id:calcId}),calculation);
+      assert.deepEqual(await call('analyze_case',{caseId,...expected}),saved);
+    } finally { await connection.close(); }
+
+    await visible(role(card('trend'),'Открепить'));
+    assert.deepEqual(await cardOrder(),['trend','evidence']);
+    await backToCases();
+    assert.deepEqual(fields(await open(otherId,otherTitle)),initial);
+    assert.deepEqual(await cardOrder(),defaults);
+    await backToCases();
+    assert.deepEqual(fields(await open(caseId,title)),expected);
+
+    async function switchAccount(user) {
+      await page.getByRole('link',{name:'Профиль',exact:true}).click();
+      await role(page,'Выйти').click();
+      await field(page,'Логин').fill('fixture-'+user);
+      await field(page,'Пароль').fill('fixture-password');
+      await role(page,'Войти').click();
+      await go(page,'cases');
+    }
+    await switchAccount('member');
+    assert.deepEqual(fields(await open(caseId,title)),initial);
+    assert.deepEqual(await cardOrder(),defaults);
+    await switchAccount('admin');
+    assert.deepEqual(fields(await open(caseId,title)),expected);
+    await visible(role(card('evidence'),'Открепить'));
+
+    // A response already in flight cannot restore an earlier calculation after a saved revision.
+    const captured = Promise.withResolvers(), release = Promise.withResolvers();
+    const viewUrl = '**/api/team/view';
+    const isEarlier = args => args.caseId === caseId && args.control === control && !args.full;
+    const delayEarlier = async route => {
+      if (!isEarlier(route.request().postDataJSON())) return route.continue();
+      const response = await route.fetch();
+      captured.resolve();
+      await release.promise;
+      await route.fulfill({response});
+    };
+    await page.route(viewUrl,delayEarlier);
+    try {
+      await full.uncheck();
+      await captured.promise;
+      workspaceOperation(store,user,'set_view',{caseId,control:'Astra',full:true,cards:['summary'],pin:true});
+      const [latest] = await Promise.all([
+        viewRequest(caseId,v => v.control === 'Astra' && v.full),
+        peer.selectOption('Astra'),
+      ]);
+      assert.deepEqual(fields(latest),{...expected,control:'Astra'});
+      const {id:latestId} = (await latest.json()).view;
+      const latestSnapshot = card('summary').locator('a[href="#snapshot/'+latestId+'"]').first();
+      await latestSnapshot.waitFor({state:'attached'});
+      const delivered = viewRequest(caseId,isEarlier);
+      release.resolve();
+      await (await delivered).finished();
+      await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+      assert.equal(await latestSnapshot.count(),1);
+      assert.deepEqual(await cardOrder(),['trend','evidence','summary']);
+      await visible(role(card('summary'),'Открепить'));
+      const [confirmed] = await Promise.all([viewRequest(caseId),page.reload()]);
+      assert.deepEqual(fields(confirmed),{...expected,control:'Astra'});
+    } finally {
+      release.resolve();
+      await page.unroute(viewUrl,delayEarlier);
+    }
+
+    // Old records can omit newer fields. A later edit fills only its own field.
+    await page.evaluate(key => localStorage.setItem(key,JSON.stringify({cards:['evidence','trend'],pinned:['trend']})),key);
+    const [legacy] = await Promise.all([viewRequest(caseId),page.reload()]);
+    assert.deepEqual(fields(legacy),initial);
+    await visible(role(card('trend'),'Открепить'));
+    await Promise.all([viewRequest(caseId,v => v.control === control),peer.selectOption(control)]);
+    const [legacyReloaded] = await Promise.all([viewRequest(caseId),page.reload()]);
+    assert.deepEqual(fields(legacyReloaded),{...initial,control});
+    await visible(role(card('trend'),'Открепить'));
+    assert.deepEqual(await cardOrder(),['evidence','trend']);
+
+    await role(page,'Сбросить вид').click();
+    const [reset] = await Promise.all([viewRequest(caseId),role(page.getByRole('dialog'),'Сбросить').click()]);
+    assert.deepEqual(fields(reset),initial);
+    assert.deepEqual(await cardOrder(),defaults);
+    await page.evaluate(key => localStorage.setItem(key,'{broken'),key);
+    const [corrupt] = await Promise.all([viewRequest(caseId),page.reload()]);
+    assert.deepEqual(fields(corrupt),initial);
+    await visible(card('summary'));
+    assert.deepEqual(await cardOrder(),defaults);
+  });
   assert.deepEqual(errors,[]);
 });

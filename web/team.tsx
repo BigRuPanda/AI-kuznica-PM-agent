@@ -30,6 +30,8 @@ import { describeMeasurement, MeasurementFields, measurementPayload, metricName,
 import { AgreedMeasurement, InvestigationMeasurement } from './investigation-measurement';
 import { EffectPlan } from './effect-plan';
 import { Cards, initialCards, labels } from './work-cards';
+import { patchCaseView, readCaseView, readCaseViewObject } from './case-view-preferences';
+import type { CaseViewPreferences } from './case-view-preferences';
 import { InterviewSearch } from './interview-search';
 import { Icon } from './icons';
 import { Dialog } from './dialog';
@@ -1147,14 +1149,19 @@ function Investigation({
   action: Action;
   refresh: () => Promise<void>;
 }) {
+  const prefix = 'pm-view/' + home.user.id + '/' + id;
+  const [viewState, setViewState] = useState(() => ({
+    preferences: readCaseView(prefix),
+    period: readCaseViewObject<{from: string; through: string}>(prefix + '/period') || {},
+    ratioSelections: readCaseViewObject<RatioSelections>(prefix + '/metric-series') || {},
+    inputsVersion: 0,
+  }));
+  const currentView = useRef(viewState);
+  const requestVersion = useRef(0);
+  const active = useRef(false);
+  const { period, preferences, inputsVersion } = viewState;
+  const { cards = initialCards, pinned = [], full = false, control: peer = '' } = preferences || {};
   const [d, set] = useState<Detail | null>(null),
-    [full, filter] = useState(false),
-    [period, setPeriod] = useState<{from?: string; through?: string}>({}),
-    [ratioSelections, selectRatio] = useState<RatioSelections>({}),
-    [peer, control] = useState(''),
-    [sourceQuery, findSources] = useState(''),
-    [cards, layout] = useState(initialCards),
-    [pinned, pin] = useState<string[]>([]),
     [ctx, ask] = useState(''),
     [attachment, attach] = useState<Attachment>(),
     [tid, thread] = useState(''),
@@ -1166,84 +1173,90 @@ function Investigation({
     [updating, setUpdating] = useState(false),
     [preparingSignalIssue, setPreparingSignalIssue] = useState(false),
     [draftToFocus, setDraftToFocus] = useState('');
-  const prefix = 'pm-view/' + home.user.id + '/' + id;
-  const load = useCallback(
-    async () =>
-      set(await post<Detail>('view', { caseId: id, full, control: peer || undefined, sourceQuery, ratioSelections, ...period })),
-    [id, full, peer, sourceQuery, ratioSelections, period],
-  );
-  useEffect(() => {
+  const updateViewState = useCallback((next: typeof viewState) => {
+    const previous = currentView.current;
+    const before = previous.preferences || {}, after = next.preferences || {};
+    if (previous.period !== next.period || previous.ratioSelections !== next.ratioSelections ||
+      (before.full ?? false) !== (after.full ?? false) || (before.control || '') !== (after.control || '') ||
+      (before.sourceQuery || '') !== (after.sourceQuery || '')) {
+      // Ignore earlier results as soon as the inputs change, before the next effect runs.
+      requestVersion.current++;
+      next = { ...next, inputsVersion: previous.inputsVersion + 1 };
+    }
+    currentView.current = next;
+    setViewState(next);
+  }, []);
+  const updatePreferences = useCallback((patch: Partial<CaseViewPreferences>) => {
+    const previous = currentView.current;
+    patchCaseView(prefix, patch);
+    updateViewState({ ...previous, preferences: { ...previous.preferences, ...patch } });
+  }, [prefix, updateViewState]);
+  const load = useCallback(async () => {
+    if (!active.current) return;
+    const version = ++requestVersion.current;
+    const { preferences, period, ratioSelections } = currentView.current;
     setUpdating(true);
     fail('');
-    let valid = true;
-    post<Detail>('view', { caseId: id, full, control: peer || undefined, sourceQuery, ratioSelections, ...period })
-      .then((v) => {
-        if (valid) {
-          set(v);
-          if (v.personal?.revision && localStorage.getItem(prefix + '/revision') !== v.personal.revision) {
-            localStorage.setItem(prefix + '/revision', v.personal.revision);
-            localStorage.setItem(
-              prefix,
-              JSON.stringify({
-                ...v.personal,
-                pinned: v.personal.pin ? v.personal.cards : [],
-                sourceQuery: '',
-              }),
-            );
-            layout(v.personal.cards);
-            if (v.personal.full !== undefined) filter(v.personal.full);
-            if (v.personal.control) control(v.personal.control);
-            if (v.personal.pin) pin(v.personal.cards);
-          }
-          if (v.case.body.origin && !localStorage.getItem(prefix)) {
-            const snapshot = v.case.body.origin;
-            localStorage.setItem(prefix, JSON.stringify(snapshot));
-            filter(!!snapshot.full);
-            layout(snapshot.cards || initialCards);
-          }
-        }
-      })
-      .catch((e) => { if (valid) fail(e.message); })
-      .finally(() => { if (valid) setUpdating(false); });
-    return () => {
-      valid = false;
-    };
-  }, [id, full, peer, sourceQuery, ratioSelections, period]);
-  useEffect(() => {
-    post<{ id: string }>('case-thread', { caseId: id })
-      .then((r) => thread(r.id))
-      .catch((e) => fail(e.message));
     try {
-      const v = JSON.parse(localStorage.getItem(prefix) || '{}');
-      setPeriod(JSON.parse(localStorage.getItem(prefix + '/period') || '{}'));
-      selectRatio(JSON.parse(localStorage.getItem(prefix + '/metric-series') || '{}'));
-      filter(!!v.full);
-      findSources(v.sourceQuery || '');
-      if (v.control) control(v.control);
-      layout(v.cards || initialCards);
-      pin(v.pinned || []);
-    } catch {}
-  }, [id, prefix]);
+      const v = await post<Detail>('view', {
+        caseId: id, full: preferences?.full ?? false, control: preferences?.control || undefined,
+        sourceQuery: preferences?.sourceQuery || '', ratioSelections, from: period.from, through: period.through,
+      });
+      if (version !== requestVersion.current) return;
+      set(v);
+      const personal = v.personal;
+      if (personal?.revision && localStorage.getItem(prefix + '/revision') !== personal.revision) {
+        const pinned = currentView.current.preferences?.pinned || [];
+        const nextPinned = personal.pin === true ? [...new Set([...pinned, ...personal.cards])]
+          : personal.pin === false ? [] : pinned;
+        updatePreferences({
+          cards: [...new Set([...nextPinned, ...personal.cards])], pinned: nextPinned,
+          ...(personal.full !== undefined ? { full: personal.full } : {}),
+          ...(personal.control !== undefined ? { control: personal.control } : {}),
+        });
+        localStorage.setItem(prefix + '/revision', personal.revision);
+      } else if (v.case.body.origin && !currentView.current.preferences) {
+        const snapshot = v.case.body.origin;
+        updatePreferences({ cards: snapshot.cards || initialCards, full: !!snapshot.full });
+      }
+    } catch (e) {
+      if (version !== requestVersion.current) return;
+      fail((e as Error).message);
+      throw e;
+    } finally {
+      if (version === requestVersion.current) setUpdating(false);
+    }
+  }, [id, prefix, updatePreferences]);
+  useLayoutEffect(() => {
+    active.current = true;
+    return () => {
+      active.current = false;
+      requestVersion.current++;
+    };
+  }, []);
+  useEffect(() => {
+    void load().catch(() => {});
+  }, [load, inputsVersion]);
+  useEffect(() => {
+    let valid = true;
+    post<{ id: string }>('case-thread', { caseId: id })
+      .then((r) => { if (valid) thread(r.id); })
+      .catch((e) => { if (valid) fail(e.message); });
+    return () => { valid = false; };
+  }, [id]);
   const result = useCallback(
     (m: Msg['body']) => {
-      if (m.personal && m.personal.caseId === id) {
-        layout([...new Set([...pinned, ...m.personal.cards])]);
-        if (m.personal.full !== undefined) filter(m.personal.full);
-        if (m.personal.control) control(m.personal.control);
-        if (m.personal.pin) pin([...new Set([...pinned, ...m.personal.cards])]);
-      }
       if (m.mode !== 'analysis' && m.cards && !m.rangeId) {
-        const next = [...new Set([...pinned, ...m.cards])];
-        layout(next);
-        filter(!!m.full);
-        findSources(m.sourceQuery || '');
-        localStorage.setItem(
-          prefix,
-          JSON.stringify({ full: !!m.full, cards: next, pinned, sourceQuery: m.sourceQuery }),
-        );
+        const pinned = currentView.current.preferences?.pinned || [];
+        updatePreferences({
+          cards: [...new Set([...pinned, ...m.cards])],
+          ...(m.full !== undefined ? { full: m.full } : {}),
+          ...(m.sourceQuery !== undefined ? { sourceQuery: m.sourceQuery } : {}),
+        });
       }
+      if (m.personal?.caseId === id) void load().catch(() => {});
     },
-    [pinned, prefix],
+    [id, load, updatePreferences],
   );
   const [mobileChat, chatMode] = useState(false);
   const [focusDiscussion, requestDiscussionFocus] = useState(false);
@@ -1273,7 +1286,7 @@ function Investigation({
   const viewRunId = d?.investigation?.current?.id;
   const liveRunId = research.investigation?.current?.id;
   useEffect(() => {
-    if (liveRunId !== viewRunId) void load().catch(e => fail(e.message));
+    if (liveRunId !== viewRunId) void load().catch(() => {});
   }, [viewRunId, liveRunId, load]);
   useLayoutEffect(() => {
     if (!draftToFocus) return;
@@ -1443,7 +1456,7 @@ function Investigation({
               if (from && through && from > through) { fail('Начало периода должно быть не позже конца.'); return; }
               const next = {from, through};
               localStorage.setItem(prefix + '/period', JSON.stringify(next));
-              setPeriod(next);
+              updateViewState({ ...currentView.current, period: next });
             }}>
               <label>Начало периода<input type="date" name="from" defaultValue={period.from} /></label>
               <label>Срез по дату включительно<input type="date" name="through" defaultValue={period.through} /></label>
@@ -1455,16 +1468,13 @@ function Investigation({
               <input
                 type="checkbox"
                 checked={full}
-                onChange={(e) => {
-                  filter(e.target.checked);
-                  localStorage.setItem(prefix, JSON.stringify({ full: e.target.checked, cards, pinned }));
-                }}
+                onChange={(e) => updatePreferences({ full: e.target.checked })}
               />{' '}
               Только полные недели
             </label>
             {needsSalesContext && <label>
               Контроль{' '}
-              <select value={peer || v.summary[1]?.product || ''} onChange={(e) => control(e.target.value)}>
+              <select value={peer || v.summary[1]?.product || ''} onChange={(e) => updatePreferences({ control: e.target.value })}>
                 {home.products
                   .filter((p) => p !== c.product)
                   .map((p) => (
@@ -1485,9 +1495,9 @@ function Investigation({
             backlog={d.backlog}
             pinned={pinned}
             onMetricSeries={(card, series) => {
-              const next = { ...ratioSelections, [card]: series };
+              const next = { ...currentView.current.ratioSelections, [card]: series };
               localStorage.setItem(prefix + '/metric-series', JSON.stringify(next));
-              selectRatio(next);
+              updateViewState({ ...currentView.current, ratioSelections: next });
             }}
             onAttach={(a) => {
               attach(a);
@@ -1499,9 +1509,8 @@ function Investigation({
               requestDiscussionFocus(true);
             }}
             onPin={(k) => {
-              const next = pinned.includes(k) ? pinned.filter((p) => p !== k) : [...pinned, k];
-              pin(next);
-              localStorage.setItem(prefix, JSON.stringify({ cards, full, pinned: next }));
+              const current = currentView.current.preferences?.pinned || [];
+              updatePreferences({ pinned: current.includes(k) ? current.filter(p => p !== k) : [...current, k] });
             }}
           />
           {c.body.plan && (c.body.plan.hypothesis || (specified && !agreement)) && (
@@ -1685,16 +1694,10 @@ function Investigation({
                 <button type="button" onClick={() => dismiss()}>Отмена</button>
                 <button type="button" className="primary" onClick={() => dismiss(() => {
                   if (confirmation === 'reset') {
-                    layout(initialCards);
-                    filter(false);
-                    control('');
-                    findSources('');
                     localStorage.removeItem(prefix + '/period');
-                    setPeriod({});
                     localStorage.removeItem(prefix + '/metric-series');
-                    selectRatio({});
-                    pin([]);
-                    localStorage.setItem(prefix, JSON.stringify({ cards: initialCards, full: false, pinned: [] }));
+                    updateViewState({ ...currentView.current, period: {}, ratioSelections: {} });
+                    updatePreferences({ cards: initialCards, pinned: [], full: false, control: '', sourceQuery: '' });
                     return;
                   }
                   action(async () => {
@@ -2253,7 +2256,7 @@ function Workspace({ user, onLogout, onUpdate }: { user: User; onLogout: () => v
         ) : ['releases', 'release', 'calc'].includes(route) ? (
           <ReleaseAnalytics route={route} requestedId={id} user={user} />
         ) : route === 'case' ? (
-          <Investigation key={id} id={id} selected={selected} home={home} avatar={user.avatar} action={action} refresh={refresh} />
+          <Investigation key={home.user.id + '/' + id} id={id} selected={selected} home={home} avatar={user.avatar} action={action} refresh={refresh} />
         ) : route === 'range' ? (
           <RangeResult id={id} />
         ) : route === 'snapshot' ? (
