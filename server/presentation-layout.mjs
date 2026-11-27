@@ -130,9 +130,7 @@ function composeCompactSlide(deck,index) {
   const text=(value,x,y,w,size,{limit=2,color=fg,bold=false,align,url}={})=>{
     if(value===undefined || value===null || value==='') return;
     const lines=fittedLines(value,size,w,limit), leading=1.22;
-    const object={type:'text',x,y,w,h:lines.length*size*leading+4,size,leading,lines,color,bold,align,url};
-    objects.push(object);
-    return object;
+    objects.push({type:'text',x,y,w,h:lines.length*size*leading+4,size,leading,lines,color,bold,align,url});
   };
 
   rect(0,0,W,H,dark?graphite:paper);
@@ -269,11 +267,12 @@ function composeCompactBody(slide,text,rect,objects) {
     slide.body.slice(slide.title.length).trimStart() : slide.body;
   const markWidth=101, markY=221, markSize=85, closingX=W-gutter-markWidth;
   const x=quote?177:103, w=(quote?closingX-24:1200)-x, size=quote?36:34, limit=7;
-  const mark={color:accent,bold:true,limit:1};
-  if(quote) text('«',gutter,markY,markWidth,markSize,mark);
-  else rect(gutter,240,6,302,accent);
-  const paragraph=text(body,x,241,w,size,{limit});
-  if(quote && paragraph) text('»',closingX,markY+(paragraph.lines.length-1)*size*paragraph.leading,markWidth,markSize,{...mark,align:'right'});
+  if(quote) {
+    const mark={color:accent,bold:true,limit:1};
+    text('«',gutter,markY,markWidth,markSize,mark);
+    text('»',closingX,markY,markWidth,markSize,{...mark,align:'right'});
+  } else rect(gutter,240,6,302,accent);
+  text(body,x,241,w,size,{limit});
   if(wrap(body,size,w).length>limit)
     text('Полный текст по ссылке ниже',x,587,w,17,{color:muted,limit:1});
 }

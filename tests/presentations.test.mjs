@@ -190,7 +190,8 @@ test('new decks bound the release, table, checks and sources on distinct slides'
       ]}],refs:[docs[0]]},
       {kind:'table',title:'По сегментам',columns:['Сегмент','Период','Значение'],
         rows:docs.map((_,i)=>['Сегмент '+i,'Ноябрь',String(48+i)]),refs:[docs[1]]},
-      ...docs.slice(2,26).map((ref,i)=>({kind:'quote',title:'Интервью '+i,body:'Респондент описал проблему '+i,refs:[ref]})),
+      ...docs.slice(2,26).map((ref,i)=>({kind:'quote',title:'Интервью '+i,
+        body:'Респондент описал проблему '+i+'\nСтоимость доставки была видна только после ввода адреса.',refs:[ref]})),
       {kind:'flow',title:'Связанный релиз',steps:[
         {label:'Релиз',text:'R-001 · Изменили форму заказа',refs:[docs[26]]},
         ...docs.slice(27,44).map((ref,i)=>({label:'Задача',text:'Задача '+i,refs:[ref]})),
@@ -207,6 +208,7 @@ test('new decks bound the release, table, checks and sources on distinct slides'
   const closing=quoteScene.find(object=>object.lines?.[0]==='»');
   assert.ok(opening && closing,'the quote has a matched pair of marks');
   assert.ok(closing.x>opening.x);
+  assert.equal(closing.y,opening.y);
   assert.equal(closing.color,opening.color);
   assert.equal(deck.slides.filter(slide=>slide.kind==='sources').length,1);
   assert.ok(!deck.slides.some(slide=>slide.continuation || slide.kind==='log'));
