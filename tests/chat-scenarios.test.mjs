@@ -1,11 +1,19 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
 import { chatScenarios, loadScenarioDraft, selectScenario, serializeScenarioDraft } from '../web/chat-scenarios.ts';
 
-const spec = readFileSync(new URL('../docs/superpowers/specs/2026-11-27-chat-scenarios-design.md', import.meta.url), 'utf8');
-const approved = [...spec.matchAll(/^\| ([^|]+?) \| ([^|]+?) \|\s*$/gm)].slice(1)
-  .map(([, label, prompt]) => ({ label, prompt }));
+const approved = [
+  {label: 'Найти упущенный спрос',
+    prompt: 'Найди по конкурентному исследованию возможность для Store: товар есть в ассортименте, покупатели его ищут, а конкуренты заметнее в поиске. Покажи конкретные запросы, частоту и позиции со ссылками на источник. Сверь с бэклогом и предложи одну задачу или дополнение к существующей.'},
+  {label: 'Выбрать, что проверить сегодня',
+    prompt: 'Посмотри открытые сигналы и выбери один, с которого стоит начать сегодня. Покажи, что изменилось, как долго это продолжается и насколько полны данные. Объясни, почему этот сигнал важнее остальных, и предложи первый шаг проверки.'},
+  {label: 'Найти потери в воронке',
+    prompt: 'Проверь воронку подбора для продукта, который мы обсуждаем. Покажи объём на каждом измеренном шаге и единицу измерения, где потеря самая большая и отличается ли она на телефонах и компьютерах. Отметь шаги, для которых не хватает событий. Если продукт ещё не назван, уточни его.'},
+  {label: 'Проверить гипотезу',
+    prompt: 'Проверь гипотезу из нашей переписки по метрикам, интервью и релизам. Если гипотеза ещё не сформулирована, попроси меня её назвать. Приведи самое сильное свидетельство в её пользу и самое сильное возражение со ссылками на источники. Какую одну проверку стоит провести, чтобы решить, брать ли задачу в работу?'},
+  {label: 'Проверить эффект релиза',
+    prompt: 'Сравни целевую метрику до и после релиза, проверь контроль и полноту периода. Если из переписки неясно, о каком релизе идёт речь, уточни его. Сопоставь результат с согласованным критерием успеха, если он задан. Порекомендуй завершить наблюдение, продолжить его или пересмотреть гипотезу. Если данных пока мало, укажи, чего ждём.'},
+];
 const empty = {text: '', scenarioId: null};
 const detail = 'Только Kaspersky, мобильные, октябрь';
 
@@ -25,7 +33,7 @@ test('switching scenarios keeps only the latest prompt and one copy of the perso
   assert.deepEqual(selectScenario(draft, third.id), draft);
   const plain = selectScenario(empty, first.id);
   assert.equal(selectScenario(plain, second.id).text, second.prompt);
-  assert.equal(selectScenario({...plain, text: plain.text + ' ' + detail}, second.id).text.trimEnd(),
+  assert.equal(selectScenario({...plain, text: plain.text + ' ' + detail}, second.id).text,
     second.prompt + '\n\n ' + detail);
 });
 

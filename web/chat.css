@@ -306,6 +306,21 @@ body :is(.composer-row textarea, .thread-search input[type='search']):focus-visi
   resize: none;
   background: transparent;
 }
+.scenario-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex: none;
+  min-height: 39px;
+  padding: 0 8px;
+  border-color: transparent;
+  border-radius: 14px;
+  background: transparent;
+  color: var(--accent-text);
+}
+.scenario-trigger .ui-icon { width: 14px; height: 14px; }
+.scenario-trigger:is(:hover, [aria-expanded='true']) { background: var(--accent-soft); }
+.thread-menu.scenario-menu { width: min(260px, calc(100vw - 16px)); }
 .chat-send.primary { width: 40px; height: 40px; min-height: 40px; padding: 0; flex: none; border-radius: 50%; }
 .chat-send .ui-icon { transition: transform var(--panel-motion) var(--ease-out); }
 .chat-send:not(:disabled):is(:hover, :focus-visible) .ui-icon { transform: translateY(-2px); }
