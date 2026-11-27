@@ -339,6 +339,10 @@ function presentationRecovery(db, user, job, reply, scope) {
   if (reply.mode !== 'presentation' && !reply.actions?.length) return { action:'repair', caseId };
 }
 
+function snapshotControl(view, preference) {
+  return view.summary?.[1]?.product ?? (preference === false ? false : undefined);
+}
+
 export function enqueue(store, user, b, { telegramReply } = {}) {
   const q = String(b.question || '').trim();
   if (!q || q.length > 2400) throw Error('Введите вопрос до 2400 символов');
@@ -392,7 +396,7 @@ export function enqueue(store, user, b, { telegramReply } = {}) {
       screen = {
         calc: b.screen.calc,
         full: snap.full,
-        control: snap.summary?.[1]?.product,
+        control: snapshotControl(snap, b.screen.control),
         asOf: snap.cut,
         requested: snap.requested,
         cards: Array.isArray(b.screen.cards) ? b.screen.cards.filter((k) => cardTypes.includes(k)) : [],
@@ -705,7 +709,7 @@ export async function answer(store, user, b, env = process.env, send = fetch, jo
   if (screen) {
     if (activeCase && screen.product !== activeCase.product) throw Error('Выбранный экран относится к другому продукту');
     b = {...b,screen:{calc:b.screen.calc,cards:b.screen.cards,full:screen.full,asOf:screen.cut,
-      requested:screen.requested,control:screen.summary?.[1]?.product}};
+      requested:screen.requested,control:snapshotControl(screen,b.screen.control)}};
   }
   const presentation = presentationCase(db, user, b, scope);
   if (presentation === null) return {
@@ -818,7 +822,7 @@ export async function answer(store, user, b, env = process.env, send = fetch, jo
       full: b.screen?.full, control: b.screen?.control, ...b.analysisPeriod });
     grant(db, snap.id, 'thread', b.thread);
     b = { ...b, screen: { calc: snap.id, cards: b.screen?.cards, requested: snap.requested,
-      full: snap.full, control: snap.summary?.[1]?.product, asOf: snap.cut } };
+      full: snap.full, control: snapshotControl(snap, b.screen?.control), asOf: snap.cut } };
   }
   const daily = !b.analysisPeriod && store.tx(() => dayComparison(db, user, b, history, shared));
   if (daily) return daily;

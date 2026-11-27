@@ -117,6 +117,19 @@ test('selected screen enforces its date bounds and complete-week filter before a
   assert.doesNotMatch(later.text,/Поздняя задача/u);
 });
 
+test('recalculating a saved screen in chat preserves the explicit no-comparison mode', async t => {
+  const ask=context(t);
+  const db=ask.store.db;
+  const snapshot=analysisView(db,{product:'Astra OS',control:false,from:'2026-03-30',through:'2026-04-26'});
+  grant(db,snapshot.id,'thread',ask.thread);
+  const result=await ask('А если взять только полные недели?',{product:snapshot.product,screen:{calc:snapshot.id,control:false}});
+  assert.ok(result.calc,result.text);
+  assert.notEqual(result.calc,snapshot.id);
+  const recalculated=readSnapshot(db,user,result.calc);
+  assert.equal(recalculated.full,true);
+  assert.deepEqual(recalculated.summary.map(row=>row.product),['Astra OS']);
+});
+
 test('an exact weekly question on a saved screen uses the cited version after a new import', async t => {
   const ask=context(t);
   const db=ask.store.db;

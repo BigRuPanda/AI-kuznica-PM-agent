@@ -723,6 +723,50 @@ test('versioned case presentations in the browser and both downloads', async t =
   assert.equal(await lost.getByRole('link', { name: 'Скачать PDF' }).count(),0);
 });
 
+test('a case comparison can be disabled and the choice survives reload', async t => {
+  const dir=await mkdtemp(join(tmpdir(),'softline-case-comparison-'));
+  const env={DATA_PROFILE:'local',ADMIN_INVITE_KEY:'fixture-comparison'};
+  const app=createTeamApp({base:join(dir,'releases.sqlite'),env,background:false});
+  let browser;
+  t.after(async()=>{
+    await browser?.close();
+    await app.close();
+    await rm(dir,{recursive:true,force:true,maxRetries:5,retryDelay:100});
+  });
+  const {token}=await app.accounts.register({
+    login:'comparison-admin',name:'Продакт',password:'fixture-password',code:env.ADMIN_INVITE_KEY,
+  },env);
+  const store=app.space('team'), caseId='comparison-fixture';
+  const product='Семейство A', control='Семейство B', title='Сравнение в разборе';
+  importDocs(store,[{file:'Сравнение.xlsx',facts:[product,control].map((family,i)=>({
+    kind:'sales',loc:'Продажи!A'+(i+2),row:{product_family:family,week_start:'2026-11-02',orders_index:80+i*20},
+  }))}],{notify:false});
+  store.db.prepare('INSERT INTO cases VALUES(?,?,?,?,?)').run(caseId,product,title,'Исследуем','{}');
+  await new Promise((resolve,reject)=>app.server.once('error',reject).listen(0,'127.0.0.1',resolve));
+  const base='http://127.0.0.1:'+app.server.address().port;
+  browser=await launchBrowser();
+  const context=await browser.newContext({locale:'ru-RU',viewport:{width:1440,height:900},reducedMotion:'reduce'});
+  await context.addCookies([{name:'pm_session',value:token,url:base}]);
+  const page=await context.newPage();
+  const peer=field(page,'Сравнить с');
+  const selection=(expected,change)=>Promise.all([page.waitForResponse(r=>r.url().endsWith('/api/team/view') &&
+    r.ok() && r.request().postDataJSON()?.caseId===caseId && r.request().postDataJSON().control===expected),change()]);
+  const [initial]=await selection(undefined,()=>page.goto(base+'/#case/'+caseId));
+  await visible(peer);
+  assert.deepEqual((await initial.json()).view.summary.map(row=>row.product),[product,control]);
+  assert.equal(await peer.getByRole('option',{name:'Без сравнения',exact:true}).count(),1);
+
+  const [disabled]=await selection(false,()=>peer.selectOption({label:'Без сравнения'}));
+  assert.deepEqual((await disabled.json()).view.summary.map(row=>row.product),[product]);
+  const [reloaded]=await selection(false,()=>page.reload());
+  await visible(peer);
+  assert.equal(await peer.inputValue(),'');
+  assert.deepEqual((await reloaded.json()).view.summary.map(row=>row.product),[product]);
+
+  const [restored]=await selection(control,()=>peer.selectOption(control));
+  assert.deepEqual((await restored.json()).view.summary.map(row=>row.product),[product,control]);
+});
+
 test('Softline workspace, upgrade and browser journeys', async t => {
   const dir = await mkdtemp(join(tmpdir(), 'softline-workspace-'));
   let app, browser;
