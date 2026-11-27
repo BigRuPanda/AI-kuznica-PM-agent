@@ -50,10 +50,20 @@ def init():
             report_id TEXT NOT NULL,title TEXT NOT NULL,remote INTEGER UNIQUE,status TEXT,closed INTEGER DEFAULT 0,
             episode INTEGER DEFAULT 0,updated TEXT,checked TEXT);
         CREATE TABLE IF NOT EXISTS events(id TEXT PRIMARY KEY,kind TEXT NOT NULL,text TEXT NOT NULL,
-            state TEXT NOT NULL DEFAULT 'pending',ready REAL DEFAULT 0,message_id INTEGER,error TEXT,created TEXT NOT NULL);
+            state TEXT NOT NULL DEFAULT 'pending',ready REAL DEFAULT 0,message_id INTEGER,error TEXT,created TEXT NOT NULL,
+            telegram_bot_id TEXT,telegram_chat_id TEXT);
         CREATE TABLE IF NOT EXISTS closures(seq INTEGER PRIMARY KEY,ref TEXT NOT NULL,episode INTEGER NOT NULL,
             body TEXT NOT NULL, UNIQUE(ref,episode));
         ''')
+        c.execute('BEGIN IMMEDIATE')
+        columns = {column['name'] for column in c.execute('PRAGMA table_info(events)')}
+        recipient_columns = {'telegram_bot_id', 'telegram_chat_id'}
+        for column in sorted(recipient_columns - columns):
+            c.execute(f'ALTER TABLE events ADD COLUMN {column} TEXT')
+        if not recipient_columns <= columns:
+            # An attempted legacy delivery has no trustworthy destination.
+            c.execute("""UPDATE events SET state='uncertain' WHERE
+                state='sending' OR (state='pending' AND (ready>0 OR error IS NOT NULL))""")
 
 
 def event(c, key, kind, text):
@@ -304,12 +314,12 @@ def create_task(p):
 def sync_tasks():
     with status_lock:
         with db() as c:
-            bind_target(c)
             tasks = c.execute('''SELECT ref,remote,closed,EXISTS(SELECT 1 FROM closures
                 WHERE closures.ref=tasks.ref AND closures.episode=tasks.episode) AS recorded
                 FROM tasks WHERE remote IS NOT NULL ORDER BY ref''').fetchall()
-        if not tasks:
-            return {'checked':0,'errors':[]}
+            if not tasks:
+                return {'checked':0,'errors':[]}
+            bind_target(c)
         project_id = services.project()
         statuses = {s['id']:s for s in services.redmine('issue_statuses.json')['issue_statuses']}
         errors = []
@@ -353,19 +363,26 @@ def sync_tasks():
 
 
 def deliver():
-    if not setting('TELEGRAM_CHAT_ID') or not setting('TELEGRAM_BOT_TOKEN'):
+    chat = setting('TELEGRAM_CHAT_ID')
+    token = setting('TELEGRAM_BOT_TOKEN')
+    bot_id = services.telegram_bot_id(token)
+    if not chat or not bot_id:
         return {'sent':0,'configured':False}
     count = 0
     while True:
         with db() as c:
             c.execute('BEGIN IMMEDIATE')
             c.execute("UPDATE events SET state='uncertain',error='Проверьте историю доставки' WHERE state='sending' AND ready<?",(time.time()-120,))
-            item = c.execute("SELECT * FROM events WHERE state='pending' AND ready<=? ORDER BY created,id LIMIT 1",(time.time(),)).fetchone()
+            item = c.execute("""SELECT * FROM events WHERE state='pending' AND ready<=?
+                AND ((telegram_bot_id IS NULL AND telegram_chat_id IS NULL)
+                     OR (telegram_bot_id=? AND telegram_chat_id=?))
+                ORDER BY created,id LIMIT 1""",(time.time(),bot_id,chat)).fetchone()
             if not item:
                 return {'sent':count,'configured':True}
-            c.execute("UPDATE events SET state='sending',ready=? WHERE id=?",(time.time(),item['id']))
+            c.execute("""UPDATE events SET state='sending',ready=?,telegram_bot_id=?,telegram_chat_id=?
+                WHERE id=?""",(time.time(),bot_id,chat,item['id']))
         try:
-            message = services.send_message(item['text'])
+            message = services.send_message(item['text'],chat=chat,token=token)
         except (ValueError,KeyError,OSError) as exc:
             code = getattr(exc,'code',0)
             # A timeout can follow a successful send. Blind retry would duplicate it.
@@ -381,7 +398,8 @@ def deliver():
 
 def events():
     with db() as c:
-        return [dict(r) for r in c.execute('SELECT id,kind,state,message_id,error,created,text FROM events ORDER BY created DESC,id LIMIT 100')]
+        return [dict(r) for r in c.execute('''SELECT id,kind,state,message_id,error,created,text,
+            telegram_bot_id,telegram_chat_id FROM events ORDER BY created DESC,id LIMIT 100''')]
 
 
 def closures(after):

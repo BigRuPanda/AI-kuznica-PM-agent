@@ -17,8 +17,10 @@ def record_job(name, func):
         error = result.get('error') or result.get('errors') or None
     except Exception as exc:
         error = str(exc) if isinstance(exc,(ValueError,OSError)) else type(exc).__name__
+        result = {'error':error}
     with bridge.db() as c:
         c.execute('INSERT OR REPLACE INTO meta VALUES(?,?)',('job:'+name,json.dumps(dict(at=bridge.now(),error=error),ensure_ascii=False)))
+    return result
 
 
 def worker(stop, refresh_reports=True):
@@ -66,7 +68,9 @@ class Handler(BaseHTTPRequestHandler):
                 elif path.startswith('/tasks/') and path.endswith('/changes'):
                     result = bridge.change_issue(unquote(path[7:-8]),p)
                 elif path=='/reports/refresh': result = bridge.refresh_report()
-                elif path=='/sync': result = dict(redmine=bridge.sync_tasks(),telegram=bridge.deliver())
+                elif path=='/sync':
+                    result = dict(redmine=record_job('redmine',bridge.sync_tasks),
+                                  telegram=record_job('telegram',bridge.deliver))
                 else: return self.reply(404,{'error':'Метод не найден.'})
             elif path=='/health':
                 with bridge.db() as c:

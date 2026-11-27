@@ -1,4 +1,5 @@
 import json
+import re
 from http.client import HTTPException
 from urllib import error, parse, request
 
@@ -112,10 +113,14 @@ def project_issues(queries):
             raise ServiceError('Redmine вернул неполный список задач.')
 
 
+def telegram_bot_id(token):
+    match = re.fullmatch(r'([0-9]+):[A-Za-z0-9_-]+',token or '')
+    return match[1] if match else ''
+
+
 def telegram(method, data, token=None, timeout=18):
-    import re
     token = token or setting('TELEGRAM_BOT_TOKEN')
-    if not re.fullmatch(r'[0-9]+:[A-Za-z0-9_-]+',token):
+    if not telegram_bot_id(token):
         raise ValueError('Требуется токен Telegram-бота.')
     value = request_json('https://api.telegram.org/bot'+token+'/'+method,data=data,timeout=timeout)
     if not isinstance(value,dict) or value.get('ok') is not True or 'result' not in value:
@@ -123,11 +128,8 @@ def telegram(method, data, token=None, timeout=18):
     return value['result']
 
 
-def send_message(text):
-    chat = setting('TELEGRAM_CHAT_ID')
-    if not chat or not setting('TELEGRAM_BOT_TOKEN'):
-        raise ValueError('Telegram ожидает привязки чата.')
-    result = telegram('sendMessage',dict(chat_id=chat,text=text,link_preview_options={'is_disabled':True}))
+def send_message(text, *, chat, token):
+    result = telegram('sendMessage',dict(chat_id=chat,text=text,link_preview_options={'is_disabled':True}),token=token)
     if not isinstance(result,dict):
         raise ServiceError('Telegram не подтвердил сообщение в выбранном чате.')
     destination = result.get('chat')

@@ -12,6 +12,7 @@ from unittest.mock import Mock, patch
 from urllib.parse import parse_qs, urlsplit
 
 import bridge
+import delivery
 import metrika
 import providers as svc
 import service
@@ -154,37 +155,56 @@ class Checks(unittest.TestCase):
         self.assertIn(first['id'], {event['id'] for event in events})
         self.assertTrue(all(event['kind'] == 'metric_alert' for event in events))
 
-    def test_standalone_http_reports_and_delivers_a_cart_alert(self):
+    def http(self, method, path, body=b''):
+        request = (f'{method} {path} HTTP/1.1\r\nHost: 127.0.0.1:18880\r\n'
+                   f'Content-Type: application/json\r\nContent-Length: {len(body)}\r\n\r\n')
+        connection = Mock(makefile=lambda *args: io.BytesIO(request.encode('ascii') + body))
+        with patch.object(service, 'setting', side_effect=self.config.get):
+            service.Handler(connection, ('127.0.0.1', 12345), SimpleNamespace(server_port=18880))
+        raw = b''.join(write.args[0] for write in connection.sendall.call_args_list)
+        headers, _, raw_body = raw.partition(b'\r\n\r\n')
+        payload = json.loads(raw_body)
+        self.assertEqual(headers.split()[1], b'200', payload)
+        return payload
+
+    def test_standalone_http_reports_and_delivers_a_cart_alert_without_redmine(self):
+        del self.config['REDMINE_URL']
+        del self.config['REDMINE_PROJECT']
+        self.config['METRIKA_TOKEN'] = 'fixture'
         self.data['periods'] = [[100, 0, 0, 0, 0, 10], [100, 0, 0, 0, 0, 8]]
         report = bridge.refresh_report()
-        self.enterContext(patch.object(service, 'setting', side_effect=self.config.get))
 
-        def call(method, path, body=b''):
-            request = (f'{method} {path} HTTP/1.1\r\nHost: 127.0.0.1:18880\r\n'
-                       f'Content-Type: application/json\r\nContent-Length: {len(body)}\r\n\r\n')
-            connection = Mock(makefile=lambda *args: io.BytesIO(request.encode('ascii') + body))
-            service.Handler(connection, ('127.0.0.1', 12345), SimpleNamespace(server_port=18880))
-            raw = b''.join(write.args[0] for write in connection.sendall.call_args_list)
-            headers, _, raw_body = raw.partition(b'\r\n\r\n')
-            payload = json.loads(raw_body)
-            self.assertEqual(headers.split()[1], b'200', payload)
-            return payload
-
-        health = call('GET', '/health')
+        health = self.http('GET', '/health')
         self.assertEqual(health['service'], 'signal-bridge')
         self.assertEqual(health['queue'], {'pending': 1})
-        self.assertTrue(health['configured']['telegram'])
-        self.assertEqual(call('GET', '/reports/latest'), report)
+        self.assertEqual(health['configured'], {'metrika': True, 'redmine': False, 'telegram': True})
+        self.assertEqual(self.http('GET', '/reports/latest'), report)
         reply = {'ok': True, 'result': {'chat': {'id': 44}, 'message_id': 12}}
         with patch.object(svc, 'request_json', return_value=reply) as telegram:
-            self.assertEqual(call('POST', '/sync', b'{}')['telegram']['sent'], 1)
-            self.assertEqual(call('POST', '/sync', b'{}')['telegram']['sent'], 0)
+            first = self.http('POST', '/sync', b'{}')
+            self.assertEqual(first['redmine'], {'checked': 0, 'errors': []})
+            self.assertEqual(first['telegram']['sent'], 1)
+            self.assertEqual(self.http('POST', '/sync', b'{}')['telegram']['sent'], 0)
             telegram.assert_called_once()
             self.assertEqual(telegram.call_args.kwargs['data']['chat_id'], '44')
             self.assertIn('10/100 → 8/100 (-20.0%)', telegram.call_args.kwargs['data']['text'])
-        event, = call('GET', '/events')
+        self.remote.assert_not_called()
+        event, = self.http('GET', '/events')
         self.assertEqual((event['kind'], event['state'], event['message_id']),
                          ('metric_alert', 'sent', 12))
+
+    def test_sync_reports_redmine_failure_and_still_delivers_a_cart_alert(self):
+        self.config['REDMINE_API_KEY'] = 'fixture'
+        bridge.create_task(self.p)
+        self.remote.side_effect = svc.ServiceError('Redmine временно недоступен.', 503)
+        self.data['periods'] = [[100, 0, 0, 0, 0, 10], [100, 0, 0, 0, 0, 8]]
+        bridge.refresh_report()
+
+        with patch.object(svc, 'send_message', return_value=12) as telegram:
+            sync = self.http('POST', '/sync', b'{}')
+            self.assertEqual(sync['redmine']['error'], 'Redmine временно недоступен.')
+            self.assertEqual(sync['telegram']['sent'], 1)
+            telegram.assert_called_once()
 
     def test_unusable_telegram_confirmation_leaves_delivery_uncertain(self):
         self.data['periods'] = [[100, 0, 0, 0, 0, 10], [100, 0, 0, 0, 0, 8]]
@@ -199,10 +219,14 @@ class Checks(unittest.TestCase):
     def test_restart_and_manual_reconciliation_of_cart_alert(self):
         self.data['periods'] = [[100, 0, 0, 0, 0, 10], [100, 0, 0, 0, 0, 8]]
         bridge.refresh_report()
-        with patch.object(svc, 'send_message', side_effect=svc.ServiceError('Нет подтверждённого ответа')) as send:
-            self.assertEqual(bridge.deliver()['state'], 'uncertain')
+        with patch.object(svc, 'send_message', side_effect=KeyboardInterrupt) as send:
+            with self.assertRaises(KeyboardInterrupt):
+                bridge.deliver()
             send.assert_called_once()
         event, = bridge.events()
+        self.assertEqual(event['state'], 'sending')
+        with bridge.db() as c:
+            c.execute("UPDATE events SET ready=0 WHERE id=?", (event['id'],))
         env = dict(os.environ, SIGNAL_BRIDGE_STATE=str(bridge.STATE), TELEGRAM_CHAT_ID='44',
                    TELEGRAM_BOT_TOKEN='123:test')
 
@@ -221,12 +245,70 @@ with patch.object(providers, 'send_message', side_effect=AssertionError('Unexpec
     send.assert_not_called()
 """
         run('-c', check_restart)
-        self.assertEqual(bridge.events(), [event])
+        uncertain, = bridge.events()
+        self.assertEqual((uncertain['id'], uncertain['state']), (event['id'], 'uncertain'))
+        self.assertEqual((uncertain['telegram_bot_id'], uncertain['telegram_chat_id']), ('123', '44'))
         run('delivery.py', event['id'], '--observed-message-id', '42')
         run('-c', check_restart)
         reconciled, = bridge.events()
         self.assertEqual((reconciled['id'], reconciled['state'], reconciled['message_id']),
                          (event['id'], 'sent', 42))
+
+    def test_uncertain_delivery_keeps_the_original_bot_and_chat(self):
+        self.data['periods'] = [[100, 0, 0, 0, 0, 10], [100, 0, 0, 0, 0, 8]]
+        bridge.refresh_report()
+        with patch.object(svc, 'request_json', side_effect=svc.ServiceError('Нет подтверждённого ответа')) as send:
+            self.assertEqual(bridge.deliver()['state'], 'uncertain')
+            self.assertEqual(send.call_args.kwargs['data']['chat_id'], '44')
+        event, = self.http('GET', '/events')
+        self.assertEqual((event.get('telegram_bot_id'), event.get('telegram_chat_id')), ('123', '44'))
+        self.assertNotIn(self.config['TELEGRAM_BOT_TOKEN'], json.dumps(event))
+
+        for token, chat in [('123:test', '55'), ('456:test', '44')]:
+            self.config.update(TELEGRAM_BOT_TOKEN=token, TELEGRAM_CHAT_ID=chat)
+            for message_id in (None, 12):
+                with self.assertRaisesRegex(ValueError, r'123.*44'):
+                    delivery.resolve(event['id'], message_id)
+
+        self.config.update(TELEGRAM_BOT_TOKEN='123:rotated', TELEGRAM_CHAT_ID='44')
+        delivery.resolve(event['id'], None)
+        self.config['TELEGRAM_CHAT_ID'] = '55'
+        with patch.object(svc, 'request_json') as send:
+            self.assertEqual(bridge.deliver()['sent'], 0)
+            send.assert_not_called()
+        self.assertEqual(bridge.events()[0]['state'], 'pending')
+        self.config['TELEGRAM_CHAT_ID'] = '44'
+        reply = {'ok': True, 'result': {'chat': {'id': 44}, 'message_id': 12}}
+        with patch.object(svc, 'request_json', return_value=reply) as send:
+            self.assertEqual(bridge.deliver()['sent'], 1)
+            send.assert_called_once()
+            self.assertEqual(send.call_args.kwargs['data']['chat_id'], '44')
+
+    def test_legacy_uncertain_delivery_needs_an_explicit_original_destination(self):
+        legacy_dir = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.enterContext(patch.object(bridge, 'STATE', legacy_dir))
+        with bridge.db() as c:
+            c.execute("""CREATE TABLE events (
+                id TEXT PRIMARY KEY,kind TEXT NOT NULL,text TEXT NOT NULL,state TEXT NOT NULL,
+                ready REAL DEFAULT 0,message_id INTEGER,error TEXT,created TEXT NOT NULL)""")
+            c.executemany("INSERT INTO events(id,kind,text,state,ready,created) VALUES(?,?,?, ?,?,?)", [
+                ('uncertain', 'metric_alert', 'test', 'uncertain', 0, bridge.now()),
+                ('retry', 'metric_alert', 'test', 'pending', 1, bridge.now()),
+            ])
+        bridge.init()
+        bridge.init()
+        legacy = {event['id']: event for event in bridge.events()}
+        self.assertEqual(legacy['uncertain']['state'], 'uncertain')
+        self.assertEqual(legacy['retry']['state'], 'uncertain')
+        self.assertIsNone(legacy['uncertain'].get('telegram_chat_id'))
+        with self.assertRaisesRegex(ValueError, '--original-chat-id'):
+            delivery.resolve('uncertain', 12)
+        with self.assertRaisesRegex(ValueError, r'123.*55'):
+            delivery.resolve('uncertain', None, original_bot_id='123', original_chat_id='55')
+        delivery.resolve('uncertain', 12, original_bot_id='123', original_chat_id='44')
+        reconciled = next(event for event in bridge.events() if event['id'] == 'uncertain')
+        self.assertEqual((reconciled['state'], reconciled['message_id'], reconciled['telegram_chat_id']),
+                         ('sent', 12, '44'))
 
     def test_ambiguous_create_reconciles_and_rejects_changed_payload(self):
         original=self.remote.side_effect
