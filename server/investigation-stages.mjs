@@ -64,3 +64,30 @@ export function updateRunProgress(db, id) {
   const status = rows.some(s => s.status === 'running') ? 'running' : failure ? 'retry' : 'queued';
   db.prepare('UPDATE case_investigations SET status=?,reason=? WHERE id=?').run(status, failure?.reason ?? null, id);
 }
+
+export function failureReason(error) {
+  if ([401,403,404].includes(error?.status)) return 'Провайдер отклонил подключение. Ожидаем доступа к модели.';
+  if (error?.status === 429) return 'Провайдер ограничил частоту запросов.';
+  if (error?.timedOut || error?.name === 'TimeoutError') return 'Модель не успела ответить вовремя.';
+  if (error?.status >= 500) return 'На стороне провайдера произошла ошибка.';
+  if (error?.retryable) return 'Не удалось связаться с провайдером.';
+  if (error?.invalidModelResponse || error instanceof SyntaxError) return 'Ответ модели не прошёл проверку.';
+  return 'Не удалось завершить проверку. Этап будет повторён.';
+}
+
+export function publicStages(db,row,mode,user) {
+  const stored=states(db,row.id);
+  const canAct=Boolean(user && (!row.owner || row.owner === user.id) && !['superseded','ready'].includes(row.status) && !row.wait_for);
+  const roles = ['ready','superseded'].includes(row.status) ? stored.filter(s=>s.status==='done').map(s=>s.role) : stageOrder[mode];
+  return roles.map(role=>{
+    const s=stored.find(item=>item.role===role);
+    let status=s?.status || 'queued', reason=s?.reason;
+    if (status!=='done' && (!row.prepared || row.wait_for)) {
+      status='waiting'; reason=row.reason || 'Ожидаем подготовку расчёта.';
+    } else if (status==='queued' && s && !eligible(s,stored,Infinity)) {
+      status='waiting'; reason='Ожидаем результаты предыдущих ролей.';
+    }
+    return {role,status,attempt:s?.attempt || 0,canRetry:canAct && status==='retry',
+      ...(reason && {reason}), ...(status==='retry' && s?.next && {retryAt:s.next})};
+  });
+}

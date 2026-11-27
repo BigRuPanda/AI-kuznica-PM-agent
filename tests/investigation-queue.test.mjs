@@ -10,7 +10,7 @@ import { access, grant } from '../server/chart-ranges.mjs';
 import { saveResearchSettings } from '../server/investigation-settings.mjs';
 import {
   initInvestigations, syncInvestigations, readInvestigations, visibleRun,
-  createAlternative, publishInvestigation, requireActionableRun, workInvestigation,
+  createAlternative, publishInvestigation, requireActionableRun, workInvestigation, retryInvestigationStage,
 } from '../server/case-investigations.mjs';
 
 const anna = { id: 'anna', name: 'Анна' };
@@ -100,6 +100,63 @@ test('legacy retries resume once across restart with completed evidence intact',
   assert.equal(readInvestigations(store.db,anna,'partial').current.calcId,'legacy');
   store.close(); store=open(path);
   assert.equal(await fixture()(store),null);
+});
+
+test('manual retry races with timer and stale clicks',async t=>{
+  const store=open(); t.after(()=>store.close());
+  const {db}=store;
+  add(db,'case',{owner:anna.id});
+  let now=100;
+  const calls={analyst:0,researcher:0,lead:0};
+  const work=fixture({now:()=>now,async execute({stage}) {
+    calls[stage]++;
+    if(stage==='researcher') throw Object.assign(Error('internal fixture secret'),{timedOut:true});
+    return {check:{role:stage},result:{stage}};
+  }});
+  const first=await work(store);
+  await work(store);
+  const current=()=>readInvestigations(db,anna,'case').current;
+  const failed=current().stages.find(s=>s.role==='researcher');
+  assert.equal(failed.canRetry,true);
+  assert.match(failed.reason,/вовремя/);
+  const command={caseId:'case',runId:first.id,role:'researcher',attempt:failed.attempt};
+  assert.throws(()=>retryInvestigationStage(db,dima,command));
+  now=failed.retryAt;
+  retryInvestigationStage(db,anna,command);
+  retryInvestigationStage(db,anna,command);
+  await Promise.all([work(store),work(store)]);
+  retryInvestigationStage(db,anna,command);
+  assert.equal(await work(store),null);
+  assert.deepEqual(calls,{analyst:1,researcher:2,lead:0});
+  assert.equal(current().calcId,first.calcId);
+  assert.deepEqual(db.prepare("SELECT attempt,failure FROM case_investigation_stages WHERE role='researcher' ORDER BY attempt").all().map(s=>[s.attempt,s.failure]),[[1,failed.reason],[2,failed.reason]]);
+  db.prepare("UPDATE cases SET state='Завершено' WHERE id='case'").run();
+  assert.throws(()=>retryInvestigationStage(db,anna,{...command,attempt:2}));
+  assert.equal(readInvestigations(db,anna,'case').history[0].stages.some(s=>s.canRetry),false);
+});
+
+test('two failed roles retain separate reasons, deadlines and permissions', async t=>{
+  const store=open(), {db}=store; t.after(()=>store.close());
+  const errors=[
+    [{status:401},/доступа/,300000], [{status:403},/доступа/,300000], [{status:404},/доступа/,300000],
+    [{status:429},/частоту/,15000], [{status:503},/стороне провайдера/,15000], [{retryable:true},/связаться/,15000],
+    [{invalidModelResponse:true},/не прошёл проверку/,15000],
+  ];
+  for (const [index,[error,reason,delay]] of errors.entries()) {
+    const caseId='error-'+index;
+    add(db,caseId);
+    const work=fixture({now:()=>200,async execute(){throw Object.assign(Error('raw secret'),error);}});
+    const first=await work(store); await work(store);
+    const {stages}=readInvestigations(db,dima,caseId).current;
+    assert.equal(stages.filter(s=>s.canRetry).length,2);
+    assert.match(stages[0].reason,reason);
+    assert.equal(stages[0].retryAt,200+delay);
+    const command={caseId,runId:first.id,role:'analyst',attempt:1};
+    assert.equal(retryInvestigationStage(db,dima,command).stages[0].status,'queued');
+    assert.equal(readInvestigations(db,dima,caseId).current.stages[1].status,'retry');
+    db.prepare("UPDATE cases SET body=json_set(body,'$.signal.status','withdrawn') WHERE id=?").run(caseId);
+    assert.throws(()=>retryInvestigationStage(db,dima,command));
+  }
 });
 
 async function drain(store, work) {
@@ -338,8 +395,13 @@ test('only an explicitly requested alternative reads a public page and keeps it 
   const root=readInvestigations(db,anna,'case').current;
   let fetched=0;
   const run=createAlternative(db,anna,{caseId:'case',parentId:root.id,requestId:'page',question:'Прочитай страницу https://museum.example/ и сверь даты'});
+  const reading=Promise.withResolvers(), release=Promise.withResolvers();
   const worker=fixture({pageOptions:{resolveHost:async()=>[{address:'93.184.216.34',family:4}],
-    request:async()=>{fetched++;return new Response('<title>Музей</title><p>Открыто 7 декабря.</p>',{headers:{'content-type':'text/html'}});}}});
+    request:async()=>{fetched++;reading.resolve();await release.promise;return new Response('<title>Музей</title><p>Открыто 7 декабря.</p>',{headers:{'content-type':'text/html'}});}}});
+  const first=worker(store);
+  await reading.promise;
+  try { assert.equal(await worker(store),null); }
+  finally { release.resolve(); await first; }
   await drain(store,worker);
   assert.equal(fetched,1);
   const capture=JSON.parse(db.prepare('SELECT capture FROM case_investigations WHERE id=?').get(run.id).capture);

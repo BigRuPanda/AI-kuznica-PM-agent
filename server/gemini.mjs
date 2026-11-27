@@ -53,11 +53,12 @@ export async function geminiCall(env,messages,tools,choice,send,credentials=auth
   if(limits.maxTokens)request.generationConfig={maxOutputTokens:limits.maxTokens};
   const body=JSON.stringify(request);
   let res;
-  try{res=await send(url,{method:'POST',headers,redirect:'error',signal:AbortSignal.timeout(limits.timeout ?? 60000),body});}
-  catch{throw Object.assign(Error('Не удалось связаться с Google Cloud.'),{retryable:true});}
+  const signal=AbortSignal.timeout(limits.timeout ?? 60000);
+  try{res=await send(url,{method:'POST',headers,redirect:'error',signal,body});}
+  catch{throw Object.assign(Error('Не удалось связаться с Google Cloud.'),{retryable:true,timedOut:signal.aborted});}
   if(!res.ok)throw Object.assign(Error('Google вернул HTTP '+res.status+'. '+({400:'Проверьте параметры модели и тип ключа.',401:'Проверьте аутентификацию.',403:developer?'Проверьте доступ ключа к Gemini API и модели.':'Проверьте биллинг, включение API и право aiplatform.endpoints.predict.',404:'Проверьте доступность ID модели.',429:'Исчерпана квота запросов.'}[res.status]||'Повторите запрос позже.')),{status:res.status});
   const response=await res.json(),parts=response.candidates?.[0]?.content?.parts;
-  if(!parts?.length)throw Error('Gemini вернула пустой ответ.');
+  if(!parts?.length)throw Object.assign(Error('Gemini вернула пустой ответ.'),{invalidModelResponse:true});
   // Gemini may split a word across adjacent parts. Whitespace belongs to the text itself.
   return {role:'assistant',usage:{input:response.usageMetadata?.promptTokenCount,output:response.usageMetadata?.totalTokenCount!=null?response.usageMetadata.totalTokenCount-(response.usageMetadata.promptTokenCount||0):undefined},content:parts.filter(p=>p.text&&!p.thought).map(p=>p.text).join(''),googleParts:parts,
     tool_calls:parts.filter(p=>p.functionCall).map(p=>({id:p.functionCall.id||randomUUID(),type:'function',function:{name:p.functionCall.name,arguments:JSON.stringify(p.functionCall.args||{})}}))};

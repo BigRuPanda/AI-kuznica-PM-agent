@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createTeamApp } from '../server/team-http.mjs';
 import { cases, importDocs } from '../server/evidence.mjs';
+import { listInvestigationWork, tryStartInvestigation } from '../server/case-investigations.mjs';
 import { openStore } from '../server/store.mjs';
 import { initEvidence } from '../server/evidence.mjs';
 import { initWorkbench } from '../server/workbench.mjs';
@@ -31,7 +32,7 @@ test('manual and detected cases already have a durable investigation at their no
   const dir = await mkdtemp(join(tmpdir(), 'pm-investigation-entry-'));
   const env = { DATA_PROFILE: 'local', ADMIN_INVITE_KEY: 'investigation-fixture' };
   const app = createTeamApp({ base: join(dir, 'test.sqlite'), env, background: false });
-  t.after(async () => { await app.close(); await rm(dir, { recursive: true, force: true }); });
+  t.after(async () => { await app.close(); await rm(dir, { recursive: true, force: true, maxRetries:3 }); });
   await new Promise(resolve => app.server.listen(0, '127.0.0.1', resolve));
   const base = 'http://127.0.0.1:' + app.server.address().port + '/api/team/';
   const post = async (op, body, cookie) => {
@@ -58,6 +59,18 @@ test('manual and detected cases already have a durable investigation at their no
     const { result } = await post('investigation-status', {caseId:id}, cookie);
     assert.equal(result.current.id, detail.investigation.current.id);
   }
+
+  const runId=(await post('investigation-status',{caseId:manual.id},cookie)).result.current.id;
+  const model={LLM_BASE_URL:'https://fixture.invalid',LLM_MODEL:'fixture',LLM_DATA_MODE:'analysis'};
+  const options={capture:()=>({measurable:true,context:{},checks:[]}),execute:async()=>{throw Object.assign(Error('fixture'),{status:429});}};
+  const work=()=>listInvestigationWork(store,model,Date.now(),runId);
+  await tryStartInvestigation(store,work()[0],model,undefined,options);
+  await tryStartInvestigation(store,work().find(item=>item.role==='analyst'),model,undefined,options);
+  const {result:failed}=await post('investigation-status',{caseId:manual.id},cookie);
+  const stage=failed.current.stages.find(s=>s.canRetry);
+  const command={runId,caseId:manual.id,role:stage.role,attempt:stage.attempt};
+  const {result:retried}=await post('investigation-retry-stage',command,cookie);
+  assert.equal(retried.stages.find(s=>s.role==='analyst').status,'queued');
 });
 
 test('startup, committed imports and manual cases wake investigations without reading the case', async t => {

@@ -9,7 +9,7 @@ import { getCase, digest } from './evidence.mjs';
 import { captureInvestigation, runInvestigationStage } from './investigation-engine.mjs';
 import { effectiveResearchMode } from './investigation-settings.mjs';
 
-import { stageOrder, ensureStages, initStages, states, eligible, updateRunProgress } from './investigation-stages.mjs';
+import { stageOrder, ensureStages, initStages, states, eligible, updateRunProgress, publicStages, failureReason } from './investigation-stages.mjs';
 const leaseDuration = 6 * 60_000;
 const providerWait = 5 * 60_000;
 const revisionOf = "COALESCE(json_extract(c.body,'$.signal.revision'), 0)";
@@ -123,20 +123,22 @@ function completed(db, id) {
     WHERE run_id=? AND output IS NOT NULL ORDER BY ordinal`).all(id).map(({ output }) => parse(output));
 }
 
-function publicRun(db, row, prior = completed(db, row.id)) {
+function publicRun(db, row, prior = completed(db, row.id), user) {
   const capture = parse(row.capture);
   const calculation = capture?.context?.calculation;
   const baseline = calculation?.baseline;
   const control = calculation?.metric === 'orders_index' ? calculation.findings?.[1]?.product : undefined;
+  const mode = row.mode || effectiveResearchMode(db, row.owner);
   return {
     id: row.id, caseId: row.case_id, revision: row.revision, owner: row.owner,
-    mode: row.mode || effectiveResearchMode(db, row.owner), status: row.status, created: row.created,
+    mode, status: row.status, created: row.created,
     ...(row.reason && { reason: row.reason }),
     ...(row.question && { question: row.question }),
     ...(row.parent_id && { parentId: row.parent_id }),
     published: row.published === 1,
     ...(row.published && row.published_by && { publishedBy: row.published_by }),
     ...(row.result && { result: parse(row.result) }),
+    stages: publicStages(db,row,mode,user),
     checks: [...(capture?.checks || []), ...prior.map((output) => output.check)],
     ...(capture?.calcId && { calcId: capture.calcId }),
     ...(capture?.period && { period: capture.period }),
@@ -171,8 +173,8 @@ export function readInvestigations(db, user, caseId, sharedOnly = false) {
     const featured = live.find((row) => row.parent_id === null) || live.find((row) => row.published) || live[0];
     const history = available ? runs.filter(row => !isCurrent(row)) : runs;
     return {
-      current: featured ? publicRun(db, featured) : null,
-      alternatives: live.filter((row) => row !== featured).map((row) => publicRun(db, row)),
+      current: featured ? publicRun(db, featured, undefined, user) : null,
+      alternatives: live.filter((row) => row !== featured).map((row) => publicRun(db, row, undefined, user)),
       history: history.map((row) => publicRun(db, row.status === 'superseded' ? row : {
         ...row, status: 'superseded', reason: available ? 'Появилась другая версия сигнала.' : 'Разбор завершён.',
       })),
@@ -203,6 +205,26 @@ export function createAlternative(db, user, { caseId, parentId, question, reques
       VALUES(?,?,?,?,?,?,?,'queued',?)`).run(id, caseId, parent.revision, user.id, parent.id, question, requestId, Date.now());
     wakeByDatabase.get(db)?.();
     return publicRun(db, getRun(db, caseId, id));
+  });
+}
+
+export function retryInvestigationStage(db, user, {caseId,runId,role,attempt}) {
+  return transaction(db, () => {
+    const c = accessibleCase(db,user,caseId);
+    const row = getRun(db,caseId,runId);
+    if (!row || (row.owner && row.owner !== user.id)) throw Error('Исследование недоступно.');
+    if (!active(c) || row.status === 'superseded' || row.revision !== (c.body.signal?.revision ?? 0))
+      throw Error('Откройте текущую версию разбора.');
+    const stage = states(db,row.id).find(s => s.role === role);
+    if (!stage || !Number.isSafeInteger(attempt) || attempt < 1 || attempt > stage.attempt)
+      throw Error('Выберите неудавшуюся попытку.');
+    if (stage.status === 'retry' && stage.attempt === attempt && row.status !== 'ready' && !row.wait_for) {
+      db.prepare("UPDATE case_investigation_role_state SET status='queued',reason=NULL,next=0 WHERE run_id=? AND role=?")
+        .run(runId,role);
+      updateRunProgress(db,runId);
+      wakeByDatabase.get(db)?.();
+    }
+    return publicRun(db,getRun(db,caseId,runId),undefined,user);
   });
 }
 
@@ -432,12 +454,12 @@ async function executeRole(store, job, env, send, options) {
     const candidate = await execute({env,send,stage,run,capture,prior});
     usage = candidate?.usage;
     if (!candidate?.check || (['lead','reviewer'].includes(stage) && !candidate.result))
-      throw Error('Некорректный результат проверки.');
+      throw Object.assign(Error('Некорректный результат проверки.'), {invalidModelResponse:true});
     output = candidate;
   } catch (error) {
     usage ??= error?.usage;
     providerDenied = [401,403,404].includes(error?.status);
-    failure = providerDenied ? 'Провайдер отклонил подключение. Ожидаем доступа к модели.' : 'Не удалось завершить проверку. Этап будет повторён.';
+    failure = failureReason(error);
   }
   const {db} = store;
   return store.tx(() => {

@@ -5,7 +5,7 @@ import { InvestigationPlan } from './investigation-plan';
 import { researchModes } from './investigation-settings';
 import { RangeChart, WEEK } from './range-chart';
 import { num, post } from './team-data';
-import type { InvestigationBundle, InvestigationCheck, InvestigationHypothesis, InvestigationRun, InvestigationSource } from './team-data';
+import type { InvestigationBundle, InvestigationCheck, InvestigationStage, InvestigationHypothesis, InvestigationRun, InvestigationSource } from './team-data';
 import './case-investigation.css';
 
 const runStatus = {
@@ -116,10 +116,12 @@ function Hypothesis({ hypothesis }: { hypothesis: InvestigationHypothesis }) {
 function Checks({ run }: { run: InvestigationRun }) {
   const hypotheses = run.result?.hypotheses || [];
   const mode = researchModes[run.mode as keyof typeof researchModes];
-  if (!run.checks.length && !hypotheses.length) return null;
+  const pending = run.status === 'superseded' ? [] : (run.stages || []).filter(s => s.status !== 'done');
+  if (!run.checks.length && !hypotheses.length && !pending.length) return null;
   return <details className="investigation-checks">
     <summary>Как проверяли</summary>
     {mode && <p className="muted">Режим · {mode}</p>}
+    {pending.map(s => <p key={s.role}><strong>{roles[s.role]}</strong> · {s.reason || (s.status === 'waiting' ? 'Ожидает запуска' : checkStatus[s.status])}</p>)}
     {run.checks.map((check, index) => <Check key={check.role + '/' + index} check={check} />)}
     {hypotheses.length > 0 && <>
       <h4>Гипотезы</h4>
@@ -128,11 +130,32 @@ function Checks({ run }: { run: InvestigationRun }) {
   </details>;
 }
 
-function RunSummary({ run }: { run: InvestigationRun }) {
+function StageRetry({run,stage,refresh}: {run: InvestigationRun; stage: InvestigationStage; refresh: () => Promise<void>}) {
+  const [busy,setBusy] = useState(false);
+  const [error,setError] = useState('');
+  return <div className="investigation-stage-retry">
+    <strong>{roles[stage.role]} · попытка {stage.attempt}</strong>
+    <p>{stage.reason}</p>
+    <button type="button" disabled={busy} onClick={async () => {
+      if (busy) return;
+      setBusy(true); setError('');
+      try {
+        await post('investigation-retry-stage',{caseId:run.caseId,runId:run.id,role:stage.role,attempt:stage.attempt});
+        await refresh();
+      } catch (e) { setError((e as Error).message); }
+      finally { setBusy(false); }
+    }}>Повторить ИИ-проверку</button>
+    {error && <p role="alert">{error}</p>}
+  </div>;
+}
+
+function RunSummary({ run,refresh }: { run: InvestigationRun; refresh?: () => Promise<void> }) {
+  const failures = refresh ? (run.stages || []).filter(stage => stage.canRetry) : [];
   return <>
     {run.status !== 'ready' && <p className="investigation-status" role={run.status === 'superseded' ? undefined : 'status'}>
-      <strong>{runStatus[run.status]}</strong>{run.reason && ' · ' + run.reason}
+      <strong>{runStatus[run.status]}</strong>{run.reason && !failures.some(s => s.reason === run.reason) && ' · ' + run.reason}
     </p>}
+    {refresh && failures.map(stage => <StageRetry key={run.id + stage.role + stage.attempt} run={run} stage={stage} refresh={refresh} />)}
     {(run.result?.summary || run.summary) && <p className="investigation-text">{run.result?.summary || run.summary}</p>}
   </>;
 }
@@ -239,7 +262,7 @@ export function CaseInvestigation({ investigation, error, refresh, userId, canEx
         <RunMeta run={current} />
         <div aria-live="polite">
           {ready && <h2>Вывод</h2>}
-          <RunSummary run={current} />
+          <RunSummary run={current} refresh={refresh} />
         </div>
         {ready && canExplore && ((!next && ready.action) || currentMeasurement) && <div className="investigation-recommendation">
           {!next && <><h3>Что делать ПМу</h3>
@@ -279,7 +302,7 @@ export function CaseInvestigation({ investigation, error, refresh, userId, canEx
         </summary>
         <div className="investigation-version-body">
           <RunMeta run={run} />
-          <RunSummary run={run} />
+          <RunSummary run={run} refresh={refresh} />
           {run.result?.action && <>
             <strong>Рекомендация</strong>
             <p className="investigation-text">{run.result.action}</p>

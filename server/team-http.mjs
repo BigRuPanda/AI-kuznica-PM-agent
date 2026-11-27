@@ -49,7 +49,7 @@ import { readInvestigationLimit, saveInvestigationLimit, researchSettings, saveR
 import { notificationChannels } from './data-profile.mjs';
 import {
   createAlternative, publishInvestigation, readInvestigations,
-  syncInvestigations, onInvestigationWork,
+  syncInvestigations, onInvestigationWork, retryInvestigationStage,
 } from './case-investigations.mjs';
 import { prepareInvestigationDraft } from './investigation-draft.mjs';
 
@@ -323,6 +323,7 @@ export function createTeamApp({
           return reply(200,{approved:true});
         }
         if (op === 'investigation-status') return reply(200, readInvestigations(db, user, b.caseId));
+        if (op === 'investigation-retry-stage') return reply(200,retryInvestigationStage(db,user,b));
         if (op === 'investigation-alternative') return reply(200, createAlternative(db, user, b));
         if (op === 'investigation-publish') return reply(200, publishInvestigation(db, user, b));
         if (op === 'investigation-draft') return reply(200, await prepareInvestigationDraft(store, user, b, env, send));

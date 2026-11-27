@@ -57,7 +57,7 @@ export async function providerCall(env,messages,tools,choice='auto',send=fetch,l
     body:JSON.stringify({model:env.LLM_MODEL,messages:history,...(tools.length?{tools,tool_choice:choice}:{}),...(limits.maxTokens?{max_tokens:limits.maxTokens}:{})})});}catch{if(signal.aborted)throw Object.assign(Error('Модель не успела ответить вовремя.'),{timedOut:true});throw Object.assign(Error('Модель недоступна. Проверьте подключение и параметры .env.'),{retryable:true});}
   if(!response.ok)throw Object.assign(Error('Провайдер модели вернул HTTP '+response.status+'.'),{status:response.status});
   const data=await response.json(),reply=data.choices?.[0]?.message;
-  if(!reply)throw Error('Модель вернула пустой ответ.');return {...reply,usage:{input:data.usage?.prompt_tokens,output:data.usage?.completion_tokens}};
+  if(!reply)throw Object.assign(Error('Модель вернула пустой ответ.'),{invalidModelResponse:true});return {...reply,usage:{input:data.usage?.prompt_tokens,output:data.usage?.completion_tokens}};
 }
 async function apiTurn(store,a,history,question,env,send){
   const ctx=a.context,tools=apiTools(),refs=new Map(),messages=[{role:'system',content:system},

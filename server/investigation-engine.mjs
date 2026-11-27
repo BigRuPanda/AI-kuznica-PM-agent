@@ -442,12 +442,16 @@ function modelTool(name, description, schema) {
   return {type:'function',function:{name,description,parameters}};
 }
 
+function invalidModelResponse(message) {
+  return Object.assign(Error(message), {invalidModelResponse:true});
+}
+
 function parsedCall(schema, value) {
   let decoded;
   try { decoded = JSON.parse(value); }
-  catch { throw Error('Модель вернула некорректные параметры проверки.'); }
+  catch { throw invalidModelResponse('Модель вернула некорректные параметры проверки.'); }
   const result = schema.safeParse(decoded);
-  if (!result.success) throw Error('Модель вернула неполный результат проверки.');
+  if (!result.success) throw invalidModelResponse('Модель вернула неполный результат проверки.');
   return result.data;
 }
 
@@ -472,15 +476,15 @@ function validatedResult(payload, stage, capture, inspected) {
   const argumentsIds = (d?.hypotheses || []).flatMap(h => [...h.for, ...h.against].map(r => r.id));
   const gap = d?.verification;
   if (gap && !inspected.get(gap.findingId)?.measurementGap)
-    throw Error('Парная проверка должна опираться на прочитанное ограничение измерения.');
+    throw invalidModelResponse('Парная проверка должна опираться на прочитанное ограничение измерения.');
   if (gap && (gap.telemetry.match(/\b[a-z][a-z0-9_]*\b/giu) || []).some(id =>
     Object.hasOwn(ratioFields, id.toLowerCase()) || /_(?:ctr|rate|share|ratio)$/iu.test(id)))
-    throw Error('Укажите исходное событие пользователя для проверки, например название действия, которое регистрирует Метрика.');
+    throw invalidModelResponse('Укажите исходное событие пользователя для проверки, например название действия, которое регистрирует Метрика.');
   const issue = d?.issueSourceKey && [...inspected.values()].find(f => f.issueKey === d.issueSourceKey);
-  if (d?.issueSourceKey && !issue) throw Error('Предложенная задача отсутствует среди прочитанных источников.');
+  if (d?.issueSourceKey && !issue) throw invalidModelResponse('Предложенная задача отсутствует среди прочитанных источников.');
   const cited = [...new Set([...findingIds, ...argumentsIds, gap?.findingId, issue?.id].filter(Boolean))].map(id => {
     const f = inspected.get(id);
-    if (!f) throw Error('Вывод сослался на источник, который модель не проверила.');
+    if (!f) throw invalidModelResponse('Вывод сослался на источник, который модель не проверила.');
     return f;
   });
   const check = {role:stage, question, status:status || 'done', result, impact, period:capture.period,
@@ -534,7 +538,7 @@ export async function runInvestigationStage({env = process.env, send = fetch, st
       usage.calls++;
       usage.input += reply.usage?.input || 0;
       usage.output += reply.usage?.output || 0;
-      if (!reply.tool_calls?.length) throw Error('Модель не вернула результат проверки по источникам.');
+      if (!reply.tool_calls?.length) throw invalidModelResponse('Модель не вернула результат проверки по источникам.');
       const terminal = reply.tool_calls.find(call => call.function.name === submit);
       if (terminal) return {...validatedResult(parsedCall(output, terminal.function.arguments), stage, capture, inspected), usage};
       messages.push({role:'assistant', content:reply.content ?? null, tool_calls:reply.tool_calls,
@@ -544,16 +548,16 @@ export async function runInvestigationStage({env = process.env, send = fetch, st
         let selected;
         if (name === 'read_findings') {
           selected = parsedCall(readPayload, value).ids.map(id => allowed.get(id));
-          if (selected.some(f => !f)) throw Error('Запрошен источник за пределами сохранённой проверки.');
+          if (selected.some(f => !f)) throw invalidModelResponse('Запрошен источник за пределами сохранённой проверки.');
         } else if (name === 'search_findings') {
           const {query, kinds} = parsedCall(searchPayload, value);
           selected = searchCatalog(findings, query, kinds);
-        } else throw Error('Модель вызвала инструмент вне разрешённой проверки.');
+        } else throw invalidModelResponse('Модель вызвала инструмент вне разрешённой проверки.');
         selected.forEach(f => inspected.set(f.id, f));
         messages.push({role:'tool',tool_call_id:call.id,content:JSON.stringify(selected.map(modelEvidence))});
       }
     }
-    throw Error('Модель не завершила проверку за доступное число запросов.');
+    throw invalidModelResponse('Модель не завершила проверку за доступное число запросов.');
   } catch (error) {
     if (usage.calls) error.usage = usage;
     throw error;

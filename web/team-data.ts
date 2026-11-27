@@ -162,11 +162,16 @@ export type InvestigationCheck = {
   role: string; question: string; status: string; result: string; impact: string; period?: string;
   sources: InvestigationSource[];
 };
+export type InvestigationStage = {
+  role: 'analyst' | 'researcher' | 'lead' | 'reviewer';
+  status: 'waiting' | 'queued' | 'running' | 'retry' | 'done';
+  attempt: number; reason?: string; retryAt?: number; canRetry: boolean;
+};
 export type InvestigationRun = {
   id: string; caseId: string; revision: number | string; owner: string | null; mode: string;
   status: 'queued' | 'running' | 'waiting' | 'retry' | 'ready' | 'superseded';
   reason?: string; question?: string; parentId?: string; published?: boolean; publishedBy?: string;
-  result?: InvestigationResult | null; checks: InvestigationCheck[]; calcId?: string;
+  result?: InvestigationResult | null; checks: InvestigationCheck[]; stages?: InvestigationStage[]; calcId?: string;
   period?: string; unit?: string; created?: number; summary?: string;
   measurementContext?: Pick<Measurement, 'baselineFrom' | 'baselineThrough' | 'control'>;
 };
