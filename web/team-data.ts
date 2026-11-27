@@ -1,4 +1,4 @@
-export type User = { id: string; name: string; login: string; role: string; space: string };
+export type User = { id: string; name: string; login: string; role: string; space: string; avatar?: string | null };
 export type SignalWeekEvidence = {
   week: string;
   n: number;

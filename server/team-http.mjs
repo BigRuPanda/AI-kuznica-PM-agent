@@ -88,7 +88,9 @@ export function createTeamApp({
     );
     importDocs(space(id), docs, { notify: false });
   }
-  const safeUser = (u) => ({ id: u.id, name: u.name, login: u.login, role: u.role, space: u.space });
+  const safeUser = (u) => ({
+    id: u.id, name: u.name, login: u.login, role: u.role, space: u.space, avatar: accounts.avatar(u.id),
+  });
   function admin(u) {
     if (u.role !== 'admin') throw Error('Требуются права администратора');
   }
@@ -309,6 +311,7 @@ export function createTeamApp({
           const result = op === 'login' ? await accounts.login(b) : await accounts.register(b, env, seedDemo);
           return reply(200, safeUser(result.user), { 'Set-Cookie': tokenCookie(result.token) });
         }
+        if (op === 'profile') return reply(200, safeUser(accounts.updateProfile(user.id, b)));
         const store = space(user.space),
           db = store.db;
         if(op==='source-history') return reply(200,{versions:sourceHistory(db,b.file)});

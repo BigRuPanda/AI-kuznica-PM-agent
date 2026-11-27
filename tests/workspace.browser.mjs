@@ -119,13 +119,16 @@ test('Softline workspace, upgrade and browser journeys', async t => {
     }
   });
 
-  await journey('the profile groups account details, settings and sign-out', async () => {
+  await journey('settings sit above the profile and the account page keeps sign-out', async () => {
     for (const [page, name, accountRole] of [
       [admin,'fixture-admin','Администратор'], [member,'fixture-member','Участник'], [judge,'fixture-judge','Демо · жюри'],
     ]) {
       const sidebar = page.locator('#workspace-sidebar');
       assert.equal(await sidebar.getByRole('link',{name:'Настройки',exact:true}).count(),0);
       assert.equal(await role(sidebar,'Выйти').count(),0);
+      const accountLinks = sidebar.locator('.side-bottom a');
+      assert.deepEqual(await accountLinks.evaluateAll(links => links.map(link => link.getAttribute('aria-label'))),
+        ['Мои настройки','Настройки команды','Профиль']);
       const profile = sidebar.getByRole('link',{name:'Профиль',exact:true});
       await profile.click();
       await visible(page.getByRole('heading',{name:'Профиль',exact:true}));
@@ -136,15 +139,60 @@ test('Softline workspace, upgrade and browser journeys', async t => {
       await visible(role(page,'Выйти'));
       assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
     }
-    const settings = admin.getByRole('navigation',{name:'Настройки профиля'});
-    await settings.getByRole('link',{name:/^Мои настройки/}).click();
+    const sidebar = admin.locator('#workspace-sidebar');
+    const personal = sidebar.getByRole('link',{name:'Мои настройки'});
+    const team = sidebar.getByRole('link',{name:'Настройки команды'});
+    assert.equal(await admin.locator('main').getByRole('link',{name:'Мои настройки'}).count(),0);
+    await personal.click();
+    await visible(admin.getByRole('heading',{name:'Мои настройки',exact:true}));
     await visible(admin.getByRole('heading',{name:'Оформление'}));
+    assert.equal(await personal.getAttribute('aria-current'),'page');
+    assert.equal(await admin.locator('main').getByRole('link',{name:'Настройки команды'}).count(),0);
     await admin.getByRole('link',{name:'Вернуться в профиль'}).click();
-    await settings.getByRole('link',{name:/^Настройки команды/}).click();
+    await team.click();
+    await visible(admin.getByRole('heading',{name:'Настройки команды',exact:true}));
     await visible(admin.getByRole('heading',{name:'Подключения команды'}));
     await go(admin,'material/'+fixture.report);
     await go(member,'material/'+fixture.report);
     await go(judge,'overview');
+  });
+
+  await journey('a member can save their name and photo, then restore initials', async () => {
+    await go(member,'profile');
+    const account = member.getByRole('region',{name:'Учётная запись'});
+    const sidebarAvatar = member.getByRole('link',{name:'Профиль',exact:true}).locator('.profile-avatar');
+    await role(member,'Редактировать профиль').click();
+    await field(member,'Имя').fill('Мария Орлова');
+    const png = await member.evaluate(() => {
+      const canvas = document.createElement('canvas');
+      canvas.width = canvas.height = 8;
+      const context = canvas.getContext('2d');
+      context.fillStyle = '#ad1239';
+      context.fillRect(0,0,8,8);
+      return canvas.toDataURL().split(',')[1];
+    });
+    await member.getByLabel('Фото профиля',{exact:true}).setInputFiles({
+      name:'portrait.png', mimeType:'image/png', buffer:Buffer.from(png,'base64'),
+    });
+    await visible(account.locator('.profile-avatar img'));
+    assert.equal(await sidebarAvatar.locator('img').count(),0);
+    await role(member,'Сохранить профиль').click();
+    await visible(sidebarAvatar.locator('img'));
+    await member.reload();
+    await visible(account.getByRole('heading',{name:'Мария Орлова'}));
+    await visible(account.getByText('fixture-member',{exact:true}));
+    assert.equal(await sidebarAvatar.locator('img').evaluate(async image => {
+      await image.decode();
+      return image.naturalWidth;
+    }),192);
+    assert.ok(await member.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
+    await role(member,'Редактировать профиль').click();
+    await role(member,'Убрать фото').click();
+    await field(member,'Имя').fill('fixture-member');
+    await role(member,'Сохранить профиль').click();
+    await visible(account.getByRole('heading',{name:'fixture-member'}));
+    assert.equal(await sidebarAvatar.textContent(),'FM');
+    await go(member,'material/'+fixture.report);
   });
 
   await journey('chat panels fit the workspace and preserve the current conversation', async () => {

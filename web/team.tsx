@@ -1798,6 +1798,10 @@ const deliveryState: Record<string, string> = {
   uncertain:'Доставка не подтверждена', review:'Требуется сверка', cancelled:'Отменено',
 };
 const deliveryChannel: Record<string, string> = { telegram:'Telegram',smtp:'Электронная почта' };
+const settingsLinks = [
+  { scope: 'personal', href: '#settings/personal', label: 'Мои настройки', icon: 'settings' },
+  { scope: 'team', href: '#settings', label: 'Настройки команды', icon: 'people' },
+] as const;
 
 function Settings({ home, action, refresh, menu, changeMenu, scope }: {
   home: Home;
@@ -1813,12 +1817,8 @@ function Settings({ home, action, refresh, menu, changeMenu, scope }: {
     <>
       <a className="crumb" href="#profile" aria-label="Вернуться в профиль">← Профиль</a>
       <div className="page-head">
-        <h1>Настройки</h1>
+        <h1>{scope === 'personal' ? 'Мои настройки' : 'Настройки команды'}</h1>
       </div>
-      <nav className="settings-scopes" aria-label="Разделы настроек">
-        <a href="#settings" aria-current={scope === 'team' ? 'page' : undefined}>Настройки команды</a>
-        <a href="#settings/personal" aria-current={scope === 'personal' ? 'page' : undefined}>Мои настройки</a>
-      </nav>
       <InvestigationSettings scope={scope} admin={admin} />
       <Connections home={home} action={action} refresh={refresh} scope={scope} />
       {scope === 'team' && <MetricRules admin={admin} refresh={refresh}/>}
@@ -2047,7 +2047,7 @@ function Snapshot({
     </>
   );
 }
-function Workspace({ user, onLogout }: { user: User; onLogout: () => void }) {
+function Workspace({ user, onLogout, onUpdate }: { user: User; onLogout: () => void; onUpdate: (user: User) => void }) {
   const [route, id, selected] = useRoute(),
     [home, setHome] = useState<Home | null>(null),
     [err, fail] = useState(''),
@@ -2057,6 +2057,7 @@ function Workspace({ user, onLogout }: { user: User; onLogout: () => void }) {
     [menu, setMenu] = useState(readMenuLayout);
   const sidebar = useSidebarWidth();
   const settings = route === 'settings' || (route === 'cases' && id === 'settings');
+  const settingsScope = route === 'settings' && id === 'personal' ? 'personal' : 'team';
   const homeVersion = useRef(0);
   const refresh = useCallback(async () => {
     const version = ++homeVersion.current;
@@ -2121,7 +2122,13 @@ function Workspace({ user, onLogout }: { user: User; onLogout: () => void }) {
           })}
         </nav>
         <div className="side-bottom">
-          <ProfileEntry user={user} current={route === 'profile' ? 'page' : settings ? 'location' : undefined} />
+          {settingsLinks.map(({ scope, href, label, icon }) => (
+            <a key={scope} className="side-setting" href={href} aria-label={label} title={label}
+              aria-current={settings && scope === settingsScope ? 'page' : undefined}>
+              <Icon name={icon} /><span className="menu-label">{label}</span>
+            </a>
+          ))}
+          <ProfileEntry user={user} active={route === 'profile'} />
         </div>
       </aside>
       {menu === 'left' && <SidebarResizeHandle {...sidebar} />}
@@ -2133,7 +2140,7 @@ function Workspace({ user, onLogout }: { user: User; onLogout: () => void }) {
         )}
         <div className="workspace-page" data-route={route} key={route === 'chats' ? route : [route, id, selected].join('/')}>
         {route === 'profile' ? (
-          <ProfilePage user={user} onLogout={() => action(async () => {
+          <ProfilePage user={user} onUpdate={onUpdate} onLogout={() => action(async () => {
             await post('logout');
             onLogout();
           })} />
@@ -2155,7 +2162,7 @@ function Workspace({ user, onLogout }: { user: User; onLogout: () => void }) {
           <Snapshot id={id} selected={selected} />
         ) : settings ? (
           <Settings home={home} action={action} refresh={refresh} menu={menu} changeMenu={changeMenu}
-            scope={route === 'settings' && id === 'personal' ? 'personal' : 'team'} />
+            scope={settingsScope} />
         ) : route === 'knowledge-source' ? (
           <SourceExtract key={id+selected} version={id} loc={selected && decodeURIComponent(selected)} />
         ) : route === 'sources' ? (
@@ -2325,6 +2332,7 @@ function Root() {
   ) : user ? (
     <Workspace
       user={user}
+      onUpdate={(updated) => set(current => current?.id === updated.id ? updated : current)}
       onLogout={() => {
         set(null);
         jump('overview');

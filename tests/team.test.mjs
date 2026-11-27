@@ -429,6 +429,42 @@ test('accounts, private and group chat, isolated judges, publish, MCP parity, du
     await app.close();
   }
 });
+test('profile changes are limited to the signed-in account and persist across sessions', async () => {
+  const base = join(await mkdtemp(join(tmpdir(), 'pm-profile-')), 'releases.sqlite');
+  const env = { ADMIN_INVITE_KEY: 'profile-test' };
+  const app = createTeamApp({ base, env, background: false });
+  try {
+    const url = await localServer(app);
+    const post = (op, body, token) => fetch(url + '/api/team/' + op, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...(token && { cookie: 'pm_session=' + token }) },
+      body: JSON.stringify(body),
+    });
+    const password = 'fixture-password';
+    const { user: admin } = await app.accounts.register(
+      { login: 'profile-admin', name: 'Админ', password, code: env.ADMIN_INVITE_KEY }, env,
+    );
+    const { token } = await app.accounts.register(
+      { login: 'profile-member', name: 'Участник', password, code: app.accounts.invite('team') }, env,
+    );
+    assert.equal((await post('profile', { name: 'Гость' })).status, 401);
+    assert.equal((await post('profile', { name: '  ' }, token)).status, 400);
+    assert.equal((await post('profile', { name: 'Другое имя', avatar: 'data:image/svg+xml;base64,PHN2Zz4=' }, token)).status, 400);
+    const session = await fetch(url + '/api/team/session', { headers: { cookie: 'pm_session=' + token } });
+    assert.equal((await session.json()).user.name, 'Участник');
+    const change = await post('profile', { id: admin.id, role: 'admin', login: 'new-login', name: ' Мария Орлова ' }, token);
+    assert.equal(change.status, 200);
+    const updated = await change.json();
+    assert.equal(updated.name, 'Мария Орлова');
+    assert.equal(updated.login, 'profile-member');
+    assert.equal(updated.role, 'member');
+    assert.equal(app.accounts.publicUser(admin.id).name, 'Админ');
+    const login = await post('login', { login: 'profile-member', password });
+    assert.deepEqual(await login.json(), updated);
+  } finally {
+    await app.close();
+  }
+});
 test('Metrika paginates with sampling metadata', async () => {
   let n = 0;
   const r = await metrika({ METRIKA_COUNTER_IDS: '123', METRIKA_TOKEN: 'fixture' }, async (url, init) => {
