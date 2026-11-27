@@ -121,6 +121,9 @@ test('archive answers fall back to the retrieved source on timeout or an invente
   initWorkbench(store.db);
   const evidence=[{text:'Инвентаризация: 72 прибора.',refs:[{file:'Assets.xlsx',version:'one',loc:'Stock!C5'}]}];
   const env={LLM_DATA_MODE:'analysis',LLM_BASE_URL:'http://127.0.0.1:9999',LLM_MODEL:'fixture'};
+  const series=[{...evidence[0],kind:'measurement'},{...evidence[0],kind:'measurement',text:'Следующий замер: 43 прибора.'}];
+  const measured=await archiveAnswer(store,'Как менялось число приборов?',series,env,()=>assert.fail('Preserve both observations'),'fixture');
+  assert.match(measured.text,/72 прибора[\s\S]*43 прибора/);
   for (const reply of [null,'На складе 450 приборов.']) {
     const result=await archiveAnswer(store,'Сколько приборов?',evidence,env,async (_url,opts)=>{
       const req=JSON.parse(opts.body);
