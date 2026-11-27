@@ -4,6 +4,8 @@ import { readFile } from 'node:fs/promises';
 const assets = new Map([
   ['/', ['index.html', 'text/html']],
   ['/web/palette.css', ['../web/palette.css', 'text/css']],
+  ['/web/style.css', ['../web/style.css', 'text/css']],
+  ['/web/chat.css', ['../web/chat.css', 'text/css']],
   ['/dashboard.css', ['dashboard.css', 'text/css']],
   ['/dist/report-fonts.css', ['../dist/report-fonts.css', 'text/css']],
   ...['dashboard.js', 'metrics.js', 'data.js'].map(file=>['/'+file,[file,'text/javascript']])
@@ -19,4 +21,4 @@ const server = createServer(async (req,res)=>{
     res.writeHead(500).end('File unavailable');
   }
 });
-server.listen(port, '127.0.0.1', ()=>console.log('http://127.0.0.1:'+port+'/'));
+server.listen(port, '127.0.0.1', ()=>console.log('http://127.0.0.1:'+server.address().port+'/'));

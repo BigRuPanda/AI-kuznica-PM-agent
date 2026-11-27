@@ -22,11 +22,17 @@
   };
   applyTheme();
   const layout = find('.layout');
+  const composer = find('.chat-composer');
+  const input = composer.querySelector('input');
+  const send = composer.querySelector('[type=submit]');
+  const updateSend = () => { send.disabled = !input.value.trim(); };
+  input.addEventListener('input', updateSend);
+  const mobile = matchMedia('(max-width: 850px)');
   let saved = {};
   try { saved = JSON.parse(localStorage.getItem(storageKey)) || {}; } catch {}
-  const standalone = document.body.classList.contains('release-prototype');
-  const linkId = () => standalone ? location.hash.slice(1) : '';
+  const linkId = () => location.hash.slice(1);
   let id = ids.includes(linkId()) ? linkId() : ids.includes(saved.id) ? saved.id : ids[0];
+  const initialRelease = id;
   const views = {}, chats = {}, drafts = {};
   for (const key of ids) {
     const v = saved.views?.[key];
@@ -35,8 +41,8 @@
     chats[key] = []; drafts[key] = '';
   }
   const panels = {left: saved.left !== false, right: saved.right !== false};
-  const width = {left:Number(saved.leftWidth)||155, right:Number(saved.rightWidth)||218};
-  let pane = 'main', activeTab = 'releases', current;
+  const width = {left:Number(saved.leftWidth)||240, right:Number(saved.rightWidth)||365};
+  let pane = 'main', current;
   const dateFmt = new Intl.DateTimeFormat('ru-RU',{day:'numeric',month:'short',timeZone:'Europe/Moscow'});
   const fmt = new Intl.NumberFormat('ru-RU',{maximumFractionDigits:1});
   const rubles = new Intl.NumberFormat('ru-RU',{maximumFractionDigits:0});
@@ -57,30 +63,29 @@
   }
 
   function setTab(name) {
-    activeTab=name;
     slot('workspace').hidden=name!=='workspace'; slot('releases').hidden=name!=='releases';
     root.querySelectorAll('.top [data-tab]').forEach(b=>b.setAttribute('aria-pressed',String(b.dataset.tab===name)));
     if(name==='releases') sizePanels();
   }
   root.querySelectorAll('[data-tab]').forEach(b=>b.onclick=()=>setTab(b.dataset.tab));
   function sizePanels() {
-    const w=root.clientWidth, mobile=w<=700;
+    const w=layout.clientWidth;
     layout.dataset.pane=pane;
-    for(const [side,other,min,max] of [['left','right',115,300],['right','left',165,410]]) {
-      const bare=side==='left'?'lg':'rg';
+    for(const [side,other,min,max,panel] of [['left','right',115,300,'.sidebar'],['right','left',165,460,'.thread']]) {
+      const prefix=side[0];
       const allowed=Math.max(min,Math.min(max,w-320-(panels[other]?width[other]:0)-12));
       const display=Math.max(min,Math.min(allowed,width[side]));
-      layout.style.setProperty('--'+side,panels[side]?display+'px':'0px');
-      layout.style.setProperty('--'+bare,panels[side]?'6px':'0px');
-      find('.'+side).hidden=!mobile&&!panels[side];
+      layout.style.setProperty('--'+prefix+'w',panels[side]?display+'px':'0px');
+      layout.style.setProperty('--'+prefix+'g',panels[side]?'6px':'0px');
+      find(panel).hidden=!mobile.matches&&!panels[side];
       const grip=find('.'+side+'-grip');
-      grip.hidden=!panels[side]||mobile;grip.setAttribute('aria-valuemin',min);
+      grip.hidden=!panels[side]||mobile.matches;grip.setAttribute('aria-valuemin',min);
       grip.setAttribute('aria-valuemax',Math.round(allowed));grip.setAttribute('aria-valuenow',Math.round(display));
-      const open=mobile?pane===side:panels[side];
+      const open=mobile.matches?pane===side:panels[side];
       const button=find('[data-toggle="'+side+'"]');
       button.setAttribute('aria-expanded',String(open));
-      const label=side==='left'?'Список релизов':'Чат релиза';
-      button.textContent=mobile&&open?'К разбору':label+(open?'  −':'  +');
+      const label=side==='left'?'Список релизов':'Обсуждение';
+      button.textContent=mobile.matches ? (open?'К разбору':label) : label+(open?' −':' +');
     }
   }
   function changeWidth(side,value) {
@@ -90,7 +95,7 @@
   }
   for(const side of ['left','right']) {
     find('[data-toggle="'+side+'"]').onclick=()=>{
-      if(root.clientWidth<=700) pane=pane===side?'main':side;
+      if(mobile.matches) pane=pane===side?'main':side;
       else panels[side]=!panels[side];
       sizePanels();save();
     };
@@ -104,17 +109,30 @@
       e.preventDefault();changeWidth(side,width[side]+sign*(e.key==='ArrowLeft'?-12:12));save();
     };
   }
-  new ResizeObserver(sizePanels).observe(root);
+  new ResizeObserver(sizePanels).observe(layout);
+  mobile.addEventListener('change',sizePanels);
 
-  function switchRelease(next,writeHash=true) {
+  function switchRelease(next) {
     if(!ids.includes(next))return;
-    drafts[id]=find('.composer input').value;
+    const returnFromList=mobile.matches&&pane==='left';
+    drafts[id]=input.value;
     id=next;pane='main';setTab('releases');
-    if(standalone&&writeHash) {try{history.replaceState(null,'','#'+id);}catch{}}
-    find('.composer input').value=drafts[id];
+    input.value=drafts[id];
+    updateSend();
     render();save();
+    if(returnFromList)slot('title').focus();
   }
-  if(standalone)window.addEventListener('hashchange',()=>switchRelease(linkId(),false));
+  window.addEventListener('hashchange',()=>switchRelease(linkId()||initialRelease));
+  const links=ids.map(key=>{
+    const link=make('a',undefined,'release-link');
+    link.href='#'+key;
+    link.append(make('small',key+' · '+date(0,key)),make('strong',data[key].title));
+    link.addEventListener('click',event=>{
+      if(!event.ctrlKey&&!event.metaKey&&!event.shiftKey&&!event.altKey&&linkId()===key)switchRelease(key);
+    });
+    return link;
+  });
+  slot('list').replaceChildren(...links);
   const dateFilter=find('[data-filter=date]'), segmentFilter=find('[data-filter=segment]');
   dateFilter.onchange=()=>{view().day=Number(dateFilter.value);render();save();};
   segmentFilter.onchange=()=>{view().segment=segmentFilter.value;render();save();};
@@ -134,9 +152,15 @@
     if(day<7 || (day<14 && (i===0||i===1)))result+=' Сравнение предварительное.';
     return result;
   }
-  function headline(report) {
+  function headline(report, brief=false) {
     const {day,segment}=view(),i=target(),a=report.before[i],b=report.after[i];
     if(day<14)return caption(i,report,day,segment)+' Первый полный разбор — '+date(14)+'.';
+    if(brief&&a.value!==null&&b.value!==null){
+      const subject=i===0?'Конверсия':metrics[i][0];
+      if(a.value===b.value)return subject+' сохранилась на уровне '+number(b.value,i)+'.';
+      const change=b.value>a.value?' выросла с ':' снизилась с ';
+      return subject+change+number(a.value,i)+' до '+number(b.value,i)+'.';
+    }
     return metrics[i][0]+' — '+number(b.value,i)+' после запуска и '+number(a.value,i)+' до него. '+caption(i,report,day,segment);
   }
   function initialReason(i) {
@@ -367,10 +391,19 @@
     detail.open=true;detail.querySelector('summary').focus();
   }
   function chart(i) {
-    const reason=initialReason(i), mark=interval(i), card=make('section',undefined,'metric'+(reason?' initial':''));
+    const reason=initialReason(i), mark=interval(i), card=make('section',undefined,'card'+(reason?' important':''));
     card.dataset.metric=i;
-    const head=make('div',undefined,'fighead'),a=current.before[i],b=current.after[i];
-    head.append(make('h3',metrics[i][0]),make('span',number(a.value,i)+' → '+number(b.value,i),'figures'));card.append(head);
+    const head=make('header',undefined,'metric-head'), a=current.before[i], b=current.after[i];
+    const periods=make('div',undefined,'period-pair');
+    for(const [label,result] of [['До запуска',a],['После запуска',b]]) {
+      const cell=make('div',undefined,'period-cell');
+      const count=metrics[i][1]==='%'?result.n+' из '+result.d:String(result.d);
+      cell.append(make('span',label,'period-label'),make('strong',number(result.value,i),'period-value'),
+        make('span',count+' '+rowUnits[i],'period-basis'));
+      periods.append(cell);
+    }
+    head.append(make('h3',metrics[i][0]),periods);
+    card.append(head);
     const band=drawChart(card,i,current,mark);
     if((i===0||i===1)&&current.daily.some(rows=>rows[i].pending))
       card.append(make('p','Серый фон — ещё не завершилось семидневное окно оплаты.','meta'));
@@ -387,7 +420,9 @@
     details.append(make('p',metrics[i][2]+'. До запуска — '+metricText(a,i)+'. После — '+metricText(b,i)+'.','proof'));
     if(current.hasVersion){
       for(const [key,label] of [['before','До запуска'],['after','После запуска']]){
-        details.append(make('strong',label),versionTable(current,i,key));
+        const table=make('div',undefined,'table-scroll');
+        table.append(versionTable(current,i,key));
+        details.append(make('strong',label),table);
         if(current[key][i].bothViews.length)details.append(bothViewsDetail(current[key][i]));
         const u=current.byVersion.unknown[key][i];
         if(u.d+u.pending)details.append(make('p','Без версии · '+(u.d+u.pending)+' '+rowUnits[i]+'. Включены в «Все».','proof'));
@@ -400,20 +435,32 @@
   }
   function displayChat() {
     const list=slot('messages');list.replaceChildren();
-    const show=(who,text,user=false)=>{
-      const div=make('div',undefined,'message'+(user?' user':''));
-      div.append(make('span',who,'meta'),make('p',text));list.append(div);return div;
+    const show=(text,context)=>{
+      const message=make('article',undefined,'bubble '+(context?'user':'assistant'));
+      const author=make('header',undefined,'message-author');
+      const avatar=make('span',context?'В':undefined,'chat-avatar');
+      avatar.setAttribute('aria-hidden','true');
+      if(!context)avatar.append(find('.conversation-heading svg').cloneNode(true));
+      author.append(avatar,make('strong',context?'Вы':'Агент'));
+      message.append(author,make('p',text));
+      if(context)message.append(make('small',context,'meta'));
+      list.append(message);
+      return message;
     };
-    show('Агент',headline(current));
+    show(headline(current));
     for(const m of chats[id].filter(m=>m.day<=view().day)){
-      show('Вы · '+segments[m.segment]+' · '+date(m.day),m.q,true);
-      const answer=show('Агент',m.answer);
-      if(m.metric!==null){const b=make('button','Открыть расчёт');b.onclick=()=>{views[id]={day:m.day,segment:m.segment};render();save();showMetric(m.metric);};answer.append(b);}
+      show(m.q,segments[m.segment]+' · '+date(m.day));
+      const answer=show(m.answer);
+      if(m.metric!==null){
+        const button=make('button','Открыть расчёт','calculation-link');
+        button.onclick=()=>{views[id]={day:m.day,segment:m.segment};render();save();showMetric(m.metric);};
+        answer.append(button);
+      }
     }
     slot('chatId').textContent=id+' · '+segments[view().segment];
   }
-  find('form').onsubmit=e=>{
-    e.preventDefault();const input=find('.composer input'),q=input.value.trim();if(!q)return;
+  composer.onsubmit=e=>{
+    e.preventDefault();const q=input.value.trim();if(!q)return;
     const s=/постоянн/i.test(q)?'returning':/новы[емхй]|новичк/i.test(q)?'new':view().segment;
     const report=s===view().segment?current:snapshot(data[id],s,view().day);
     let i=target();
@@ -422,18 +469,25 @@
     const supported=/релиз|форм|кнопк|измен|клиент|сегмент|новы|постоян|почему|оплат|денег|откат|средн|чек|сумм|сч[её]т|конверс|продл/i.test(q);
     const answer=supported?metrics[i][0]+'. '+number(report.before[i].value,i)+' → '+number(report.after[i].value,i)+'. '+caption(i,report,view().day,s):
       'В этом макете можно спросить про любую из пяти метрик или про новых и постоянных клиентов.';
-    chats[id].push({day:view().day,segment:s,q,answer,metric:supported?i:null});drafts[id]='';input.value='';displayChat();
+    chats[id].push({day:view().day,segment:s,q,answer,metric:supported?i:null});
+    drafts[id]='';
+    input.value='';
+    updateSend();
+    displayChat();
+    const list=slot('messages');
+    list.scrollTop=list.scrollHeight;
   };
   function render() {
     hideActivePlot();
     const v=view(), release=data[id];current=snapshot(release,v.segment,v.day);
-    slot('list').replaceChildren(...ids.map(key=>{
-      const b=make('button',undefined,'release-link');b.setAttribute('aria-current',String(key===id));
-      b.append(make('span',key+' · '+date(0,key),'meta'),make('strong',data[key].title));
-      b.onclick=()=>switchRelease(key);return b;
-    }));
+    for(const link of links){
+      const selected=link.hash==='#'+id;
+      link.classList.toggle('chosen',selected);
+      if(selected)link.setAttribute('aria-current','page');
+      else link.removeAttribute('aria-current');
+    }
     slot('identity').textContent=id+' · Запуск '+date(0)+' 2026 · '+(v.day===14?'Разбор готов':v.day===0?'Наблюдение началось':'Предварительные данные');
-    slot('title').textContent=release.title;slot('lead').textContent=headline(current);
+    slot('title').textContent=release.title;slot('lead').textContent=headline(current,true);
     dateFilter.replaceChildren(...Array.from({length:15},(_,d)=>new Option(date(d),d)));
     dateFilter.value=v.day;segmentFilter.value=v.segment;
     slot('period').textContent='До запуска '+date(-7)+' → '+date(0)+' · После '+date(0)+' → '+date(7)+'. Границы в 10:00 МСК. Графики — до '+date(v.day)+'.';

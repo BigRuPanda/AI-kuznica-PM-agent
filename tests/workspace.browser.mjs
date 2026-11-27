@@ -1,10 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
+import { once } from 'node:events';
 import { mkdtemp, readFile, cp, rm } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
@@ -23,6 +25,89 @@ const pinActions = root => root.getByRole('button', {name:/Добавить в �
 const submit = (page, operation, click) => Promise.all([
   page.waitForResponse(r => r.url().endsWith('/api/team/' + operation) && r.ok()), click()
 ]);
+const launchBrowser = () => {
+  const edge = 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe';
+  return chromium.launch({headless:true, executablePath:
+    process.env.PM_BROWSER_PATH || (existsSync(edge) ? edge : undefined)});
+};
+
+test('standalone demo preserves release selection, filters, themes and discussion', async t => {
+  const server = spawn(process.execPath,[fileURLToPath(new URL('../prototype/serve.mjs',import.meta.url))],{
+    env:{...process.env,PORT:'0'}, stdio:['ignore','pipe','inherit'], windowsHide:true
+  });
+  const exited = once(server,'exit');
+  t.after(async () => { server.kill(); await exited; });
+  const url = await Promise.race([
+    once(server.stdout,'data').then(([line])=>new URL('#R-002',String(line).trim())),
+    exited.then(([code])=>{ throw Error('Standalone demo server exited before listening: '+code); })
+  ]);
+  const browser = await launchBrowser();
+  t.after(() => browser.close());
+  const demo = await browser.newPage({locale:'ru-RU', colorScheme:'dark', viewport:{width:390,height:844}});
+  demo.setDefaultTimeout(5000);
+  let teamApiRequests = 0;
+  const failedAssets = [];
+  demo.on('request', request => {
+    if (/^\/api\/team(?:\/|$)/.test(new URL(request.url()).pathname)) teamApiRequests++;
+  });
+  demo.on('response',response=>{ if(response.status()>=400)failedAssets.push(response.url()); });
+  await demo.goto(url.href);
+  const title = demo.locator('[data-slot=title]');
+  const date = demo.locator('[data-filter=date]');
+  const segment = demo.locator('[data-filter=segment]');
+  const discussion = demo.locator('[data-toggle=right]');
+  const releases = demo.locator('[data-toggle=left]');
+  const fitScreen = () => demo.evaluate(() => document.documentElement.scrollWidth === innerWidth &&
+    [...document.querySelectorAll('.dashboard,.sidebar,.thread')].every(panel=>panel.scrollWidth===panel.clientWidth));
+  await visible(title);
+  await visible(demo.getByText('Демонстрационные данные',{exact:true}));
+  assert.equal(await demo.locator('html').getAttribute('data-theme'),'light');
+  const releaseTwoTitle = await title.textContent();
+  assert.match(await demo.locator('[data-slot=identity]').textContent(), /^R-002/);
+  assert.ok(await fitScreen());
+  await date.selectOption('7');
+  await segment.selectOption('returning');
+  await role(demo,'Тёмная тема').press('Space');
+  assert.equal(await demo.locator('html').getAttribute('data-theme'),'dark');
+  await discussion.press('Space');
+  assert.equal(await discussion.getAttribute('aria-expanded'),'true');
+  assert.ok(await fitScreen());
+  const input = field(demo,'Вопрос агенту');
+  const question = 'Что изменилось после релиза?';
+  await input.fill(question);
+  await input.press('Enter');
+  await visible(demo.getByText(question,{exact:true}));
+  await visible(role(demo,'Открыть расчёт'));
+
+  await releases.press('Space');
+  assert.ok(await fitScreen());
+  await demo.locator('.release-link').filter({hasText:'R-001'}).press('Enter');
+  await demo.waitForURL('**/#R-001');
+  await demo.locator('.release-link[href="#R-001"][aria-current="page"]').waitFor({state:'attached'});
+  assert.match(demo.url(), /#R-001$/);
+  assert.notEqual(await title.textContent(),releaseTwoTitle);
+  assert.equal(await date.inputValue(),'14');
+  assert.equal(await segment.inputValue(),'all');
+  await demo.goBack();
+  assert.equal(demo.url(),url.href);
+  await demo.locator('.release-link[href="#R-002"][aria-current="page"]').waitFor({state:'attached'});
+  await visible(title);
+  assert.equal(await title.textContent(),releaseTwoTitle);
+  assert.equal(await date.inputValue(),'7');
+  assert.equal(await segment.inputValue(),'returning');
+  await discussion.press('Space');
+  await visible(demo.getByText(question,{exact:true}));
+  await role(demo,'Открыть расчёт').press('Enter');
+  assert.equal(await demo.locator('details[open] > summary').first().textContent(),'Показать расчёт');
+  await demo.reload();
+  assert.equal(demo.url(),url.href);
+  assert.equal(await demo.locator('html').getAttribute('data-theme'),'dark');
+  assert.equal(await date.inputValue(),'7');
+  assert.equal(await segment.inputValue(),'returning');
+  assert.ok(await fitScreen());
+  assert.equal(teamApiRequests,0);
+  assert.deepEqual(failedAssets,[]);
+});
 
 test('archive settings diagnose Reports API and sources show the protected ZIP inventory', async t => {
   const dir = await mkdtemp(join(tmpdir(), 'softline-archive-'));
@@ -223,9 +308,7 @@ test('Softline workspace, upgrade and browser journeys', async t => {
   await new Promise((ok, fail) => app.server.once('error',fail).listen(0,'127.0.0.1',ok));
   const base = 'http://127.0.0.1:' + app.server.address().port;
   assert.equal((await (await fetch(base+'/health')).json()).ok,true);
-  const edge = 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe';
-  browser = await chromium.launch({headless:true, executablePath:
-    process.env.PM_BROWSER_PATH || (existsSync(edge) ? edge : undefined)});
+  browser = await launchBrowser();
   const errors = [];
   async function login(user, route, options={}) {
     const ctx = await browser.newContext({locale:'ru-RU', viewport:{width:1440,height:900},...options});
@@ -1797,28 +1880,6 @@ test('Softline workspace, upgrade and browser journeys', async t => {
     }
   });
 
-  await journey('standalone demo preserves release selection, filters, themes and discussion', async () => {
-    const demo = await browser.newPage({colorScheme:'dark'});
-    try {
-      const file = new URL('../prototype/index.html',import.meta.url);
-      file.hash='R-001';
-      await demo.goto(file.href);
-      await visible(demo.locator('[data-slot=title]'));
-      assert.equal(await demo.locator('html').getAttribute('data-theme'),'light');
-      const title = await demo.locator('[data-slot=title]').textContent();
-      await demo.locator('[data-filter=segment]').selectOption('returning');
-      await demo.locator('[data-filter=date]').selectOption('7');
-      await role(demo,'Тёмная тема').click();
-      assert.equal(await demo.locator('html').getAttribute('data-theme'),'dark');
-      await demo.locator('.composer input').fill('Что изменилось?');
-      await role(demo,'Спросить').click();
-      await visible(demo.locator('.chat-log .message').last());
-      await demo.locator('.release-link').filter({hasText:'R-002'}).click();
-      assert.notEqual(await demo.locator('[data-slot=title]').textContent(),title);
-      await demo.reload();
-      assert.ok(demo.url().endsWith('#R-002'));
-    } finally { await demo.close(); }
-  });
   await journey('scenario drafts stay editable and isolated until explicitly sent', async () => {
     const labels = ['Найти упущенный спрос', 'Выбрать, что проверить сегодня', 'Найти потери в воронке',
       'Проверить гипотезу', 'Проверить эффект релиза'];
