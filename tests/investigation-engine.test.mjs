@@ -29,6 +29,20 @@ function setup(t, body = {}) {
   return {store,db,run};
 }
 
+test('absolute sales signal without a linked release uses signal dates', t=>{
+  const signal = {rule:'absolute', start:'2026-10-05', week:'2026-10-12', threshold:100};
+  const {db,run} = setup(t, {signal});
+  const capture = captureInvestigation(db,run);
+  assert.equal(capture.measurable,true);
+  assert.equal(capture.context.calculation.latest.from,signal.start);
+  assert.equal(capture.context.calculation.release,undefined);
+  const linked = captureInvestigation(db,{...run,signal:{...signal,releaseId:'REL'}});
+  assert.equal(linked.context.calculation.release.data.release_date,'2026-10-01');
+  const empty = captureInvestigation(db,{...run,signal:{...signal,start:day(0),week:day(7)}});
+  assert.equal(empty.measurable,false);
+  assert.ok(empty.reason);
+});
+
 test('sales capture compares the same complete weeks, pins workbook cells, counterevidence and full values', t=>{
   const {db,run} = setup(t);
   const c = captureInvestigation(db,run);

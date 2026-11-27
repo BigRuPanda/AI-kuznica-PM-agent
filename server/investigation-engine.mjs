@@ -117,8 +117,8 @@ function salesEvidence(db, c, signal, measurement, dates, releases, origin) {
   const last = complete.map(r => r.week).sort().at(-1);
   const through = last ? plus(last, 6) : cutoff;
   const explicitRelease = signal?.releaseId || c.body.release;
-  const release = (explicitRelease || !threshold) && relatedRelease(releases, product, explicitRelease,
-    dates.releaseWeek ? plus(dates.releaseWeek, 6) : signal?.start || through, 'orders_index');
+  const release = explicitRelease || !threshold ? relatedRelease(releases, product, explicitRelease,
+    dates.releaseWeek ? plus(dates.releaseWeek, 6) : signal?.start || through, 'orders_index') : undefined;
   const releaseDay = release?.data.release_date;
   const pivot = dates.releaseWeek || (releaseDay && monday(releaseDay)) || (isDate(signal?.start) && signal.start) ||
     (last && plus(last, -3 * 7));
