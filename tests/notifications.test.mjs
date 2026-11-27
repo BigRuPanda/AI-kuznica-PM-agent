@@ -222,6 +222,55 @@ test('the first claim after restart uses the original assigned audience, includi
   assert.deepEqual(sent, ['old@example.invalid','old@example.invalid','shared@example.invalid','shared@example.invalid']);
 });
 
+test('an ownerless archive signal adopts the first assignment across channels and later revisions', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'pm-notice-first-owner-'));
+  const base = join(dir, 'team.sqlite');
+  const env = { SOURCE_ARCHIVE_SHA256:digest('fixture'), NOTIFICATIONS_ENABLED:'true',
+    SMTP_HOST:'mail.invalid', SMTP_FROM:'sender@example.invalid', SMTP_TO:'shared@example.invalid',
+    TELEGRAM_BOT_TOKEN:'fixture', TELEGRAM_CHAT_IDS:'-123' };
+  let app = createTeamApp({ base, env, background:false });
+  t.after(async () => {
+    await app.close();
+    await rm(dir, { recursive:true, force:true, maxRetries:3 });
+  });
+  const sent = [];
+  const send = (_url, {body}) => {
+    sent.push(JSON.parse(body).chat_id);
+    return Response.json({result:{message_id:1}});
+  };
+  const mail = (_text, _env, to) => sent.push(to);
+  const dispatch = () => deliver(app.space('team'), env, send, mail, app.accounts.db);
+  const ready = () => app.space('team').db.exec("UPDATE deliveries SET next=0 WHERE state='queued'");
+  const signal = { product:'Store', rule:'rolling', start:'2026-11-02', week:'2026-11-09',
+    confirmedWeek:'2026-11-09', title:'Fixture', threshold:90, history:[{week:'2026-11-09',value:70}] };
+  const record = values => reconcileSignals(app.space('team').db, values, ['smtp', 'telegram']);
+  record([signal]);
+  await dispatch();
+  assert.deepEqual(sent, []);
+  env.SIGNAL_OWNER_LOGIN = 'first';
+  ready();
+  await dispatch();
+  assert.deepEqual(sent, []);
+  await app.close();
+  env.SIGNAL_OWNER_LOGIN = 'other';
+  app = createTeamApp({ base, env, background:false });
+  app.accounts.db.exec(`INSERT INTO users(id,login,space,role) VALUES
+    ('first-user','first','team','member'),('other-user','other','team','member');
+    INSERT INTO email_contacts VALUES('first-user','first@example.invalid'),('other-user','other@example.invalid');
+    INSERT INTO telegram VALUES('12','first-user','team','private'),('13','other-user','team','private');`);
+  ready();
+  await dispatch();
+  await dispatch();
+  assert.deepEqual(sent, ['first@example.invalid','12']);
+  record([]);
+  await dispatch();
+  await dispatch();
+  record([signal]);
+  await dispatch();
+  await dispatch();
+  assert.deepEqual(sent, ['first@example.invalid','12','first@example.invalid','12','first@example.invalid','12']);
+});
+
 test('a queued private Telegram reply expires when its original binding is removed', async t => {
   const { app, store, env, messages, contact, hook, dispatch } = await fixture(t);
   const { command } = await contact('bind');
@@ -230,6 +279,21 @@ test('a queued private Telegram reply expires when its original binding is remov
   await workJobs(store, app.accounts, env, () => assert.fail('Unexpected model request'));
   assert.equal(store.db.prepare("SELECT count(*) n FROM deliveries WHERE channel='telegram' AND state='queued'").get().n, 1);
   await contact('contact-unlink', { channel:'telegram' });
+  await dispatch();
+  assert.deepEqual(messages, []);
+});
+
+test('a legacy Telegram job with an unrelated known update waits for review', async t => {
+  const { app, store, env, messages, owner, contact, hook, dispatch } = await fixture(t);
+  const { command } = await contact('bind');
+  await hook(31, command);
+  const thread = 'tg-' + owner.id;
+  store.db.prepare('INSERT INTO conversations VALUES(?,?,?,?)').run(thread, owner.id, 'private', 'Fixture');
+  const { id } = await contact('ask', { thread, requestId:'tg31', question:'Обзор' });
+  store.db.prepare("UPDATE jobs SET body=json_set(body,'$.telegramChat','31') WHERE id=?").run(id);
+  await workJobs(store, app.accounts, env, () => assert.fail('Unexpected model request'));
+  assert.equal(store.db.prepare('SELECT status FROM jobs WHERE id=?').get(id).status, 'done');
+  assert.equal(store.db.prepare("SELECT state FROM deliveries WHERE channel='telegram'").get().state, 'review');
   await dispatch();
   assert.deepEqual(messages, []);
 });

@@ -68,6 +68,8 @@ export function initWorkbench(db) {
     'CREATE TABLE IF NOT EXISTS conversations(id TEXT PRIMARY KEY,owner TEXT,scope TEXT,title TEXT);' +
       'CREATE TABLE IF NOT EXISTS chat_items' + chatItemColumns +
       'CREATE TABLE IF NOT EXISTS jobs(id TEXT PRIMARY KEY,thread TEXT,user TEXT,body TEXT,status TEXT,result TEXT,created INTEGER);' +
+      'CREATE TABLE IF NOT EXISTS telegram_job_routes(job_id TEXT PRIMARY KEY REFERENCES jobs(id) ON DELETE CASCADE,chat TEXT NOT NULL,is_group INTEGER NOT NULL);' +
+      'CREATE TABLE IF NOT EXISTS notification_assignments(scope TEXT PRIMARY KEY,login TEXT,owner TEXT);' +
       'CREATE TABLE IF NOT EXISTS draft_actions(id TEXT PRIMARY KEY,case_id TEXT,user TEXT,body TEXT,state TEXT,external TEXT);' +
       'CREATE TABLE IF NOT EXISTS local_issues(key TEXT PRIMARY KEY,title TEXT,description TEXT,priority TEXT,case_id TEXT,updated INTEGER);' +
       'CREATE TABLE IF NOT EXISTS published(id TEXT PRIMARY KEY,case_id TEXT,user TEXT,body TEXT,created INTEGER);' +
@@ -276,12 +278,14 @@ export function enqueue(store, user, b, { telegramReply } = {}) {
         id,
         t.id,
         user.id,
-        JSON.stringify({ ...b, telegramChat: undefined, telegramReply, screen, ...attachment, question: q, questionSeq, requestedPeriod,
+        JSON.stringify({ ...b, telegramChat: undefined, telegramReply: undefined, screen, ...attachment, question: q, questionSeq, requestedPeriod,
           analysisPeriod: investigationPeriod(q, askedAt) }),
         'queued',
         null,
         Date.now(),
       );
+    if (telegramReply)
+      store.db.prepare('INSERT INTO telegram_job_routes VALUES(?,?,?)').run(id, telegramReply.chat, Number(telegramReply.group));
     return id;
   });
 }
@@ -928,7 +932,11 @@ export async function workJobs(store, accounts, env, send, pageOptions) {
         body,
         Date.now(),
       );
-    const reply = telegramReplyTarget(db, accounts.db, env, job, b);
+    const route = db.prepare('SELECT chat,is_group FROM telegram_job_routes WHERE job_id=?').get(job.id);
+    const legacyChat = b.telegramChat ?? b.telegramReply?.chat;
+    const reply = route
+      ? { chat: route.chat, ...(route.is_group ? { telegramGroup: true } : { telegramOwner: job.user }) }
+      : typeof legacyChat === 'string' || Number.isSafeInteger(legacyChat) ? { chat: String(legacyChat) } : null;
     if (reply) {
       const base = env.APP_BASE_URL || 'http://127.0.0.1:8090';
       const message = b.caseId
@@ -938,24 +946,30 @@ export async function workJobs(store, accounts, env, send, pageOptions) {
       for (const [i, text] of telegramParts(message, base).entries()) {
         const id = digest(job.id + '/' + body) + '/' + i;
         db.prepare(
-          "INSERT OR IGNORE INTO deliveries(id,channel,state,body) VALUES(?,'telegram','queued',?)",
-        ).run(id, JSON.stringify({ ...reply, text, after: previous }));
+          "INSERT OR IGNORE INTO deliveries(id,channel,state,body) VALUES(?,'telegram',?,?)",
+        ).run(id, route ? 'queued' : 'review', JSON.stringify({ ...reply, text, after: previous }));
         previous = id;
       }
     }
   });
 }
 
-function telegramReplyTarget(db, accounts, env, job, body) {
-  const updateId = /^tg(\d+)$/.exec(body.requestId)?.[1];
-  if (!updateId || body.caseId || body.screen || body.rangeId || body.selection || body.materialIds?.length ||
-      !db.prepare('SELECT 1 FROM known_updates WHERE id=?').get(Number(updateId))) return;
-  const chat = body.telegramReply?.chat ?? body.telegramChat;
-  const group = body.telegramReply?.group ?? job.thread.startsWith('tg-group-');
-  if (!chat || job.thread !== (group ? 'tg-group-' + chat : 'tg-' + job.user)) return;
-  if (group && telegramGroupAllowed(env, chat)) return { chat, telegramGroup: true };
-  if (!group && accounts && destination(accounts, job.user, 'telegram') === chat)
-    return { chat, telegramOwner: job.user };
+function assignWaitingNotice(db, accounts, env, delivery, body, caseOwner) {
+  // Observation notices share the same event hash before the channel suffix.
+  const event = delivery.id.slice(0, -delivery.channel.length);
+  const sharedEvent = delivery.id.endsWith(delivery.channel) && /^[a-f0-9]{64}$/.test(event);
+  const scope = body.signalId ? 'signal/' + body.signalId : 'event/' + (sharedEvent ? event : delivery.id);
+  let assignment = db.prepare('SELECT login,owner FROM notification_assignments WHERE scope=?').get(scope);
+  if (!assignment) {
+    const login = String(env.SIGNAL_OWNER_LOGIN || '').trim();
+    if (!caseOwner && !login) return;
+    assignment = { login: login || null, owner: caseOwner || null };
+    db.prepare('INSERT INTO notification_assignments VALUES(?,?,?)').run(scope, assignment.login, assignment.owner);
+  }
+  if (assignment.owner) return assignment.owner;
+  const owner = notificationOwner(accounts, assignment.login);
+  if (owner) db.prepare('UPDATE notification_assignments SET owner=? WHERE scope=?').run(owner, scope);
+  return owner;
 }
 
 function claimDelivery(store, env, accounts) {
@@ -986,9 +1000,11 @@ function claimDelivery(store, env, accounts) {
   }
   const caseOwner = b.caseId && db.prepare("SELECT json_extract(body,'$.owner') owner FROM cases WHERE id=?").get(b.caseId)?.owner;
   const named = b.recipientLogin || b.awaitingOwner;
-  const owner = b.owner || b.recipientOwner || (b.recipientLogin && notificationOwner(accounts, b.recipientLogin)) || caseOwner;
+  const owner = b.owner || b.recipientOwner || (b.recipientLogin
+    ? notificationOwner(accounts, b.recipientLogin)
+    : b.awaitingOwner && !b.broadcast ? assignWaitingNotice(db, accounts, env, d, b, caseOwner) : caseOwner);
   if (b.broadcast && caseOwner && !b.owner && !b.recipientOwner) return void review();
-  if (caseOwner && owner !== caseOwner) return void cancel();
+  if (caseOwner && owner && owner !== caseOwner) return void cancel();
   if (b.caseId && !b.broadcast && !owner && !named && !b[recipientKey]) return void review();
   const postpone = () => {
     const pending = owner ? { ...b, recipientOwner: owner } : b;
