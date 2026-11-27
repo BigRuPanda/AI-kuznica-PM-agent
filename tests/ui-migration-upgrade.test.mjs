@@ -1,9 +1,10 @@
 import assert from 'node:assert/strict';
-import { cp, mkdtemp, readdir, readFile, rm } from 'node:fs/promises';
+import { cp, lstat, mkdtemp, readdir, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import { DatabaseSync } from 'node:sqlite';
+import { donorCommits } from '../scripts/ui-migration-fixtures.mjs';
 import { createTeamApp } from '../server/team-http.mjs';
 import { fixtureEnv } from './workspace-fixture.mjs';
 
@@ -65,15 +66,19 @@ async function checkIntegrity(dir) {
 }
 
 async function api(origin, op, token, data) {
-  const headers = {};
-  if (token) headers.cookie = 'pm_session=' + token;
-  if (data !== undefined) headers['content-type'] = 'application/json';
-  const response = await fetch(origin + '/api/team/' + op, {
-    method: data === undefined ? 'GET' : 'POST', headers, body: JSON.stringify(data),
-  });
+  const response = await teamRequest(origin, op, token, data);
   const body = await response.json();
   assert.ok(response.ok, op + ' returned ' + response.status + ': ' + JSON.stringify(body));
   return body;
+}
+
+function teamRequest(origin, op, token, data) {
+  const headers = {};
+  if (token) headers.cookie = 'pm_session=' + token;
+  if (data !== undefined) headers['content-type'] = 'application/json';
+  return fetch(origin + '/api/team/' + op, {
+    method: data === undefined ? 'GET' : 'POST', headers, body: JSON.stringify(data),
+  });
 }
 
 test('a fresh installation preserves a newly created account and conversation across startup', async t => {
@@ -106,7 +111,21 @@ for (const [name, check] of [
       throw Error('Missing or invalid migration fixture for ' + name + ' at ' + source, { cause: error });
     });
     assert.equal(expected.kind, name);
-    assert.match(expected.commit, /^[a-f0-9]{40}$/u);
+    assert.equal(expected.commit, donorCommits[name], 'Unexpected donor commit for ' + name);
+    const judges = expected.accounts.filter(account => account.role === 'judge');
+    assert.ok(judges.length > 0, name + ' has no judge account in its manifest');
+    assert.ok(Array.isArray(expected.judgeWorkspaces), name + ' manifest is missing judge workspaces');
+    assert.deepEqual(expected.judgeWorkspaces.map(judge => judge.accountId).sort(), judges.map(judge => judge.id).sort());
+    for (const judge of expected.judgeWorkspaces) {
+      const { space } = judges.find(account => account.id === judge.accountId);
+      assert.match(space, /^[a-f0-9-]{36}$/u);
+      assert.equal(judge.path, 'workspaces/' + space + '.sqlite');
+      const path = join(source, judge.path);
+      const file = await lstat(path).catch(error => {
+        throw Error('Missing judge workspace database for ' + name + ' at ' + path, { cause: error });
+      });
+      assert.ok(file.isFile() && file.size > 0, 'Expected a populated judge workspace database at ' + path);
+    }
     const dir = await scratch(t);
     for (const entry of ['accounts.sqlite', 'releases.sqlite', 'workspaces']) {
       await cp(join(source, entry), join(dir, entry), { recursive: true });
@@ -125,7 +144,10 @@ for (const [name, check] of [
 async function checkBaseline(app, origin, store, token, baseline, expected) {
   for (const account of expected.accounts) {
     assert.deepEqual({ ...app.accounts.publicUser(account.id) }, account);
-    if (account.role === 'judge') app.space(account.space);
+  }
+  for (const judge of expected.judgeWorkspaces) {
+    const account = expected.accounts.find(account => account.id === judge.accountId);
+    await checkJudgeWorkspace(app, origin, token, baseline, account, judge);
   }
   const calculation = await api(origin, 'calc', token, { id: baseline.calc });
   assert.deepEqual(calculation.summary, baseline.summary);
@@ -139,6 +161,27 @@ async function checkBaseline(app, origin, store, token, baseline, expected) {
   assert.ok(store.db.prepare('SELECT id FROM draft_actions WHERE id=?').get(baseline.draft), baseline.draft);
   const publication = store.db.prepare('SELECT case_id,user FROM published WHERE id=?').get(expected.publication.id);
   assert.deepEqual({ ...publication }, { case_id: expected.publication.case_id, user: expected.publication.user });
+}
+
+async function checkJudgeWorkspace(app, origin, teamToken, baseline, account, expected) {
+  const { user, token } = await app.accounts.login({ login: account.login, password });
+  assert.deepEqual({ ...user }, account);
+  const db = app.space(user.space).db;
+  const oldCase = db.prepare("SELECT title,json_extract(body,'$.owner') AS owner FROM cases WHERE id=?")
+    .get(expected.case.id);
+  assert.deepEqual({ ...oldCase }, { title: expected.case.title, owner: account.id });
+  const calculation = expected.calculation;
+  const { summary } = await api(origin, 'calc', token, { id: calculation.id });
+  const actual = summary.find(row => row.product === calculation.product);
+  assert.equal(actual?.before, calculation.before);
+  assert.equal(actual?.after, calculation.after);
+  assert.deepEqual(actual.rows.find(row => row.week === calculation.point.week), calculation.point);
+  for (const [operation, session, id] of [['material', token, baseline.report], ['calc', teamToken, calculation.id]]) {
+    const denied = await teamRequest(origin, operation, session, { id });
+    assert.ok([400, 403, 404].includes(denied.status),
+      'Access to ' + operation + ' in another workspace must be denied, got ' + denied.status);
+    assert.ok((await denied.json()).error);
+  }
 }
 
 async function localMain({ origin, store, token, expected, state, boot }) {

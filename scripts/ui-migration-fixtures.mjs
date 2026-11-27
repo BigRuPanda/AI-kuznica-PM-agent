@@ -15,17 +15,22 @@ const modelEnv = {
   LLM_DATA_MODE: 'analysis',
 };
 const noTransport = () => assert.fail('Unexpected external request');
+export const donorCommits = Object.freeze({
+  'local-main': 'd90bf9f99718c3d26eb4166ba63bd7dc0074a592',
+  'profile-ui': '2f7a3c0a7ea59ac1adf66b60560a11e1a403999f',
+  'signal-bridge': 'e662119b6af4ada1e8a90a5ee547bfeda78c0230',
+});
 const donorOptions = [
-  ['local', 'local-main', 'd90bf9f', seedLocal],
-  ['ui', 'profile-ui', '2f7a3c0', seedProfile],
-  ['integration', 'signal-bridge', 'e662119', seedIntegration],
+  ['local', 'local-main', seedLocal],
+  ['ui', 'profile-ui', seedProfile],
+  ['integration', 'signal-bridge', seedIntegration],
 ];
 
 function load(donor, file) {
   return import(pathToFileURL(join(donor, file)).href);
 }
 
-async function commitAt(donor, name, revision) {
+async function commitAt(donor, name) {
   const git = (...args) => execFileSync('git', ['-C', donor, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
   let commit;
   try {
@@ -34,8 +39,7 @@ async function commitAt(donor, name, revision) {
     // Prepared source exports record their SHA beside the exported directory.
   }
   commit ??= (await readFile(join(dirname(donor), name + '.sha'), 'utf8')).trim();
-  assert.match(commit, /^[a-f0-9]{40}$/u, name + ' must identify a full Git commit');
-  assert.ok(commit.startsWith(revision), name + ' must be at ' + revision + ', found ' + commit);
+  assert.equal(commit, donorCommits[name], 'Unexpected donor commit for ' + name);
   return commit;
 }
 
@@ -63,12 +67,35 @@ async function seedDonor(donor, dir, kind, commit, seed) {
     const accounts = app.accounts.db.prepare('SELECT id,login,name,space,role FROM users ORDER BY login').all();
     const publication = store.db.prepare('SELECT id,case_id,user FROM published WHERE case_id=?').get(baseline.caseId);
     assert.ok(publication);
-    manifest = { kind, commit, accounts, publication, ...variant };
+    const judges = accounts.filter(account => account.role === 'judge');
+    assert.ok(judges.length > 0, 'The donor must seed a judge workspace');
+    const judgeWorkspaces = judges.map(judge => seedJudge(app, workspaceOperation, judge, baseline.calc));
+    manifest = { kind, commit, accounts, judgeWorkspaces, publication, ...variant };
   } finally {
     await app.close();
   }
   await writeJson(dir, 'baseline.json', baseline);
   await writeJson(dir, 'manifest.json', manifest);
+}
+
+function seedJudge(app, workspaceOperation, judge, teamCalculation) {
+  const store = app.space(judge.space);
+  const op = (name, data) => workspaceOperation(store, judge, name, data, localEnv, noTransport);
+  const title = 'Исторический расчёт в пространстве жюри';
+  const { id: caseId } = op('create-case', { title, product: 'Kaspersky' });
+  const { view } = op('view', { caseId, control: 'Astra', through: '2026-11-21' });
+  assert.notEqual(view.id, teamCalculation);
+  const { summary } = op('calc', { id: view.id });
+  const { product, before, after, rows } = summary[0];
+  assert.deepEqual([product, before, after], ['Kaspersky', 100, 70]);
+  const point = rows.find(row => row.value === 70 && !row.partial);
+  assert.ok(point?.version);
+  return {
+    accountId: judge.id,
+    path: 'workspaces/' + judge.space + '.sqlite',
+    case: { id: caseId, title },
+    calculation: { id: view.id, product, before, after, point },
+  };
 }
 
 async function donorApi(app, token) {
@@ -322,9 +349,9 @@ async function main() {
   });
   assert.ok(keys.every(name => values[name]),
     'Usage: node scripts/ui-migration-fixtures.mjs --local <checkout> --ui <checkout> --integration <checkout> --out <empty-directory>');
-  const inputs = await Promise.all(donorOptions.map(async ([flag, kind, revision, seed]) => {
+  const inputs = await Promise.all(donorOptions.map(async ([flag, kind, seed]) => {
     const donor = await realpath(values[flag]);
-    return { donor, kind, commit: await commitAt(donor, kind, revision), seed };
+    return { donor, kind, commit: await commitAt(donor, kind), seed };
   }));
   const requested = resolve(values.out);
   await mkdir(requested, { recursive: true });
