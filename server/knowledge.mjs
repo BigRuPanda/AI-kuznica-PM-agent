@@ -84,26 +84,23 @@ export function pagesByIssue(db, user, issueKey, { sharedOnly = false, localOnly
   `).all(...keys, user.id, user.id).map(({ body }) => JSON.parse(body)).filter(draft => {
     const sourcePage = draft.input?.resultPage;
     const owner = sourcePage && wikiPageOwner(db, sourcePage);
-    return !owner || owner === user.id;
+    return draft.issue?.url && (!owner || owner === user.id);
   });
-  const issueUrls = new Set([...pages.keys(), ...external.map(draft => draft.issue.url)]);
-  if (issueUrls.size !== 1) {
-    if (issueUrls.size > 1) throw Error('Найдено несколько задач с таким номером. Укажите ключ страницы из поиска.');
-    throw Error('Страница по задаче недоступна.');
-  }
-  const candidates = new Map();
-  for (const draft of external) {
-    const candidate = { key: draft.receipt.key, target: draft.target };
-    candidates.set(JSON.stringify([candidate.target, candidate.key]), candidate);
-  }
-  const [url] = issueUrls;
-  const linked = pages.get(url) || [];
-  const preferred = db.prepare(`
+  const byIssue = Map.groupBy(external, draft => draft.issue.url);
+  for (const url of pages.keys()) if (!byIssue.has(url)) byIssue.set(url, []);
+  const preferredPage = db.prepare(`
     SELECT rp.page FROM redmine_results r JOIN redmine_result_pages rp ON rp.result=r.id
     WHERE json_extract(r.body,'$.url')=? ORDER BY r.created DESC,r.id DESC
-  `).all(url).find(row => linked.some(page => page.key === row.page));
-  const key = preferred?.page || linked[0]?.key;
-  return [...candidates.values(), ...(key ? [{ key, target: { service:'confluence', local:true } }] : [])];
+  `);
+  return Array.from(byIssue, ([url, drafts]) => {
+    const candidates = new Map();
+    for (const { receipt, target } of drafts)
+      candidates.set(JSON.stringify([target, receipt.key]), { key:receipt.key, target });
+    const linked = pages.get(url);
+    if (!linked) return [...candidates.values()];
+    const preferred = preferredPage.all(url).find(row => linked.some(page => page.key === row.page));
+    return [...candidates.values(), { key:preferred?.page || linked[0].key, target:{ service:'confluence', local:true } }];
+  });
 }
 
 export function knowledge(db, user) {

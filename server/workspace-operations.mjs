@@ -757,17 +757,24 @@ export function workspaceOperation(
     const service = op.startsWith('page_') ? 'confluence' : 'redmine';
     if (op === 'page_read' && b.issueKey) {
       return Promise.resolve().then(async () => {
-        const candidates = pagesByIssue(db, user, b.issueKey, { sharedOnly, localOnly: b.local });
-        let providerError;
-        for (const { key, target } of candidates) {
-          try {
-            const api = await trackerClient(store, user, target, env, send, undefined, sharedOnly);
-            return publicPage(await api.read(key));
-          } catch (error) {
-            if (target.local) throw error;
-            providerError ??= error;
+        const issues = pagesByIssue(db, user, b.issueKey, { sharedOnly, localOnly: b.local });
+        let result, providerError;
+        for (const candidates of issues) {
+          for (const { key, target } of candidates) {
+            let page;
+            try {
+              const api = await trackerClient(store, user, target, env, send, undefined, sharedOnly);
+              page = publicPage(await api.read(key));
+            } catch (error) {
+              providerError ??= error;
+              continue;
+            }
+            if (result) throw Error('Найдено несколько задач с таким номером. Укажите ключ страницы из поиска.');
+            result = page;
+            break;
           }
         }
+        if (result) return result;
         throw providerError || Error('Страница по задаче недоступна.');
       });
     }

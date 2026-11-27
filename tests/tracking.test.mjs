@@ -161,6 +161,21 @@ test('team members can read the built-in page when a newer Confluence copy is un
     const requestsBefore = mock.calls.length;
     assert.equal((await s.run('page_read', {issueKey:issue.key}, peer)).key, builtIn);
     assert.equal(mock.calls.length, requestsBefore);
+
+    // An older publication refers to a different Redmine site that used the same issue number.
+    const legacy = { ...config.confluence, url:'https://old-kb.test/wiki' };
+    store.db.prepare(`
+      UPDATE draft_actions SET body=json_set(body,'$.issue.url',?,'$.target.url',?)
+      WHERE external=? AND json_extract(body,'$.target.service')='confluence'
+    `).run('https://old-redmine.test/issues/' + issue.key, legacy.url, latest.key);
+    assert.equal((await s.run('page_read', {issueKey:issue.key}, peer)).key, builtIn);
+    assert.equal(mock.calls.length, requestsBefore);
+
+    configure(store.db, owner, legacy);
+    await personalConnection(store.db, peer, { service:'confluence', token:'peer-key', action:'connect' }, s.env, mock.send);
+    mock.deniedPages.delete(latest.key);
+    await assert.rejects(s.run('page_read', {issueKey:issue.key}, peer), /несколько задач с таким номером/i);
+    assert.equal((await s.run('page_read', {issueKey:issue.key, local:true}, peer)).key, builtIn);
   } finally {
     store.close();
   }
