@@ -113,6 +113,7 @@ export type Msg = {
     checks?: string[];
     jobId?: string;
     canResume?: boolean;
+    resuming?: boolean;
     mode?: string;
     outcome?: string;
     calc?: string;

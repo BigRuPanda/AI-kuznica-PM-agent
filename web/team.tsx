@@ -529,7 +529,7 @@ function Chat({
               </span>
               <b>{m.author}</b>
             </div>
-            {m.role === 'assistant' ? (
+            {m.body.resuming ? <p role="status">Повторно обрабатываю вопрос…</p> : m.role === 'assistant' ? (
               <Answer text={m.body.text} openMaterial={openMaterial} />
             ) : (
               <p>{m.body.text}</p>
@@ -629,7 +629,7 @@ function Chat({
               </div>
             ))}
             <CompletedChecks body={m.body} />
-            {m.body.warning && !m.body.text.includes(m.body.warning) && <small>{m.body.warning}</small>}
+            {!m.body.resuming && m.body.warning && !m.body.text.includes(m.body.warning) && <small>{m.body.warning}</small>}
             {m.body.canResume && (
               <button
                 disabled={running}
@@ -640,7 +640,7 @@ function Chat({
                   })
                 }
               >
-                Продолжить с сохранённого шага
+                {m.body.steps?.length || m.body.materials?.length || m.body.checks?.length || m.body.actions?.length || m.body.rangeId ? 'Продолжить с сохранённого шага' : 'Повторить запрос'}
               </button>
             )}
             {m.body.calc && !m.body.materials?.length && (

@@ -17,6 +17,7 @@ import {
   digest,
 } from './evidence.mjs';
 import { apiConfigured, providerCall } from './agent.mjs';
+import { briefConversation, caseBrief, caseBriefKind } from './chat-brief.mjs';
 import { webQuestion, webAnswer } from './web-search.mjs';
 import { competitorQuestion, competitorAnswer } from './competitor-chat.mjs';
 import { destination } from './notification-contacts.mjs';
@@ -282,8 +283,11 @@ export function messages(db, user, id) {
       .all(id)
       .map((x) => {
         const body = JSON.parse(x.body);
-        if (body.mode !== 'daily' && body.jobId && ['partial', 'failed'].includes(body.outcome))
-          body.canResume = !!db.prepare('SELECT 1 FROM jobs WHERE id=? AND user=?').get(body.jobId, user.id);
+        if (body.mode !== 'daily' && body.jobId && ['partial', 'failed'].includes(body.outcome)) {
+          const ownJob=db.prepare('SELECT status FROM jobs WHERE id=? AND user=?').get(body.jobId,user.id);
+          body.resuming=['queued','running'].includes(ownJob?.status);
+          body.canResume=!!ownJob && !body.retryExhausted && !body.resuming;
+        }
         if (x.role === 'assistant' && !body.materials) {
           body.materials = materialsFromReply(db, user, id, body);
           db.prepare('UPDATE chat_items SET body=? WHERE seq=?').run(JSON.stringify(body), x.seq);
@@ -503,6 +507,22 @@ export async function answer(store, user, b, env = process.env, send = fetch, jo
   if (query !== null) return webAnswer(store, job, query, env, send);
   if (competitorQuestion(b.question)) return competitorAnswer(store, user, b, env, send, shared);
   const history = recentDialogue(db, b.thread, b.questionSeq);
+  const activeCase = b.caseId ? visibleCase(db, user, b.caseId) : undefined;
+  if (shared && activeCase?.body.owner) throw Error('Личный разбор недоступен в группе');
+  if (!b.rangeId && !b.materialIds?.length && !b.decisionReleaseId && env.LLM_DATA_MODE==='analysis') {
+    const brief=await briefConversation(store,job,b.question,activeCase,env,send,history);
+    if (brief) return {...brief,caseId:b.caseId};
+    const kind=activeCase?.body.signal && caseBriefKind(b.question,activeCase.product);
+    if (kind) {
+      const intent={analytical:true,report:kind==='report'};
+      const research=store.tx(()=>prepareResearch(store,user,b,[],job,intent));
+      if (research?.contextCalc) {
+        access(db,user,research.contextCalc,shared);
+        const view=readSnapshot(db,user,research.contextCalc);
+        if (view.summary) return caseBrief(activeCase,{...view,id:research.contextCalc});
+      }
+    }
+  }
   if (!b.rangeId && !b.materialIds?.length) {
     const { releaseObservationAnswer } = await import('./release-observation-chat.mjs');
     const release = releaseObservationAnswer(store, user, b, env, shared, history);
@@ -522,7 +542,6 @@ export async function answer(store, user, b, env = process.env, send = fetch, jo
         'Какой график вы имеете в виду?\n' + focus.choices.map((c, i) => i + 1 + '. ' + c.label).join('\n'),
     };
   if (focus?.id) b = { ...b, materialIds: [focus.id], screen: undefined };
-  const activeCase = b.caseId ? visibleCase(db, user, b.caseId) : undefined;
   if (!b.rangeId && !b.materialIds?.length) {
     const value = weeklySourceAnswer(db, b.question);
     if (value) return { ...value, caseId: b.caseId };
@@ -738,7 +757,8 @@ function briefConclusion(text, findings) {
 }
 
 function completeMaterials(store, user, job, b, result) {
-  if (['daily', 'source-value', 'release-observation', 'web', 'competitor-check', 'archive'].includes(result.mode)) return result;
+  if (['daily', 'source-value', 'release-observation', 'web', 'competitor-check', 'archive'].includes(result.mode) ||
+      result.mode==='conversation' && result.contextReset) return result;
   if (result.chartChoices) return { ...result, materials: [] };
   const db = store.db;
   const r = JSON.parse(db.prepare('SELECT body FROM job_research WHERE job=?').get(job)?.body || 'null');
@@ -852,9 +872,14 @@ export function resumeJob(db, user, id) {
   const j = db.prepare('SELECT * FROM jobs WHERE id=? AND user=?').get(id, user.id);
   if (!j) throw Error('Поручение недоступно');
   if (!['failed', 'partial'].includes(j.status)) return { id };
+  if (JSON.parse(j.result || '{}')?.retryExhausted) throw Error('Для следующей попытки уточните вопрос.');
   const row = db.prepare('SELECT body FROM agent_turns WHERE job=?').get(id);
   if (row) {
     const state = JSON.parse(row.body);
+    if (state.final?.warning?.includes('не успела ответить') || state.lastTimeout!==undefined) {
+      state.compactRetry=true;
+      state.lastTimeout ??= state.completed.length;
+    }
     delete state.final;
     delete state.providerRetried;
     delete state.reminder;

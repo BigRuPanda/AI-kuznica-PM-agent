@@ -36,6 +36,90 @@ function open() {
   initWorkbench(s.db);
   return s;
 }
+test('short reference questions in a case use a bounded plain reply and can repair a legacy timeout in place', async () => {
+  const s=open();
+  try {
+    const {thread,caseId,view}=sample(s);
+    const accounts={publicUser:()=>user};
+    const id=enqueue(s,user,{thread,caseId,question:'Кто такой Туринг?',screen:{calc:view.id}});
+    const timeout={mode:'analysis',text:'Модель не успела ответить за 60 секунд.',warning:'Модель не успела ответить за 60 секунд.',outcome:'failed'};
+    const row=s.db.prepare('SELECT body FROM jobs WHERE id=?').get(id);
+    s.db.prepare("UPDATE jobs SET status='failed',result=? WHERE id=?").run(JSON.stringify(timeout),id);
+    s.db.prepare('INSERT INTO agent_turns VALUES(?,?)').run(id,JSON.stringify({round:1,completed:[],final:timeout}));
+    s.db.prepare("INSERT INTO chat_items(thread,author,role,body,created) VALUES(?,'Агент','assistant',?,?)")
+      .run(thread,JSON.stringify({...timeout,jobId:id,inReplyTo:JSON.parse(row.body).questionSeq}),Date.now());
+    resumeJob(s.db,user,id);
+    assert.equal(messages(s.db,user,thread).items.at(-1).body.resuming,true);
+    await workJobs(s,accounts,api,async(_url,init)=>{
+      const req=JSON.parse(init.body);
+      assert.equal(req.tools,undefined);
+      assert.ok(req.max_tokens<=100);
+      assert.equal(req.messages.length,2);
+      assert.ok(!JSON.stringify(req.messages).includes(view.id));
+      return say('Алан Тьюринг — математик.');
+    });
+    const history=messages(s.db,user,thread).items;
+    assert.equal(history.length,2);
+    assert.equal(history[1].body.text,'Алан Тьюринг — математик.');
+    assert.equal(history[1].body.outcome,'done');
+    assert.ok(!history[1].body.canResume);
+    enqueue(s,user,{thread,caseId,question:'Ты кто?',screen:{calc:view.id}});
+    await workJobs(s,accounts,api,()=>assert.fail('identity should not need inference'));
+    assert.match(messages(s.db,user,thread).items.at(-1).body.text,/Signal/);
+  } finally {s.close();}
+});
+
+test('a repeated tool timeout reduces the prompt and ends a retry loop with no new progress', async () => {
+  const s=open();
+  try {
+    const {thread,caseId,view}=sample(s);
+    const id=enqueue(s,user,{thread,caseId,question:'Как обстоят дела в карточке?',screen:{calc:view.id}});
+    const requests=[];
+    const abort=async(_url,init)=>{requests.push(JSON.parse(init.body));throw new DOMException('timeout','TimeoutError');};
+    const accounts={publicUser:()=>user};
+    await workJobs(s,accounts,api,abort);
+    assert.equal(messages(s.db,user,thread).items.at(-1).body.canResume,true);
+    resumeJob(s.db,user,id);
+    await workJobs(s,accounts,api,abort);
+    assert.equal(requests.length,2);
+    assert.ok(requests[1].tools.length<requests[0].tools.length);
+    const items=messages(s.db,user,thread).items;
+    assert.equal(items.length,2);
+    assert.equal(items[1].body.canResume,false);
+    assert.match(items[1].body.text,/Сокращённый запрос/);
+    assert.throws(()=>resumeJob(s.db,user,id),/уточните/);
+  } finally {s.close();}
+});
+
+test('case advice uses the selected figures, a requested report is saved, and an ambiguous brand is clarified', async () => {
+  const s=open();
+  try {
+    const {thread,caseId,view}=sample(s), accounts={publicUser:()=>user};
+    s.db.prepare("UPDATE cases SET body=json_set(body,'$.signal',json('{}')) WHERE id=?").run(caseId);
+    const ask=async(question,screen)=>{
+      enqueue(s,user,{thread,caseId,question,screen});
+      await workJobs(s,accounts,api,()=>assert.fail('these case facts are already available'));
+      return messages(s.db,user,thread).items.at(-1).body;
+    };
+    const report=await ask('Собери разбор',{calc:view.id});
+    assert.equal(report.outcome,'done');
+    const material=report.materials.find(item=>item.kind==='report');
+    assert.ok(material);
+    assert.equal(readMaterial(s.db,user,material.id).contextCalc,view.id);
+    const advice=await ask('Что нужно проверить в текущем разборе?',{calc:view.id});
+    assert.equal(advice.outcome,'done');
+    assert.equal(advice.calc,view.id);
+    const measured=view.summary.find(s=>s.product===view.product);
+    if(Number.isFinite(measured?.before) && Number.isFinite(measured?.after)) assert.ok(advice.text.includes(view.pivot));
+    else assert.match(advice.text,/нет двух сопоставимых значений/);
+    s.db.prepare('UPDATE cases SET product=? WHERE id=?').run('Орион Desktop',caseId);
+    const clarification=await ask('Кто такой Орион?');
+    assert.equal(clarification.outcome,'clarification');
+    assert.match(clarification.text,/Орион Desktop/);
+    assert.equal(clarification.canResume,undefined);
+    assert.match((await ask('Про человека')).text,/Поиск в интернете/);
+  } finally {s.close();}
+});
 test('exact weekly questions reference the recorded value or report the available dates without a model', async () => {
   const s = open();
   try {
@@ -153,7 +237,7 @@ test('the workspace reports a local model deadline and keeps the turn resumable 
     });
     const result = messages(s.db, user, thread).items.at(-1).body;
     assert.equal(calls, 1);
-    assert.match(result.text, /Модель не успела ответить за 60 секунд/);
+    assert.match(result.text, /Модель не успела ответить за 32 секунды?/);
     assert.doesNotMatch(result.text, /Модель недоступна|параметры \.env/);
     assert.equal(result.canResume, true);
   } finally {

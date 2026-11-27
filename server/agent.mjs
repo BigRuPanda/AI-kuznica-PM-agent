@@ -45,7 +45,9 @@ export async function providerCall(env,messages,tools,choice='auto',send=fetch,l
   const timeout = Math.min(limits.timeout ?? 60000,60000);
   const signal = AbortSignal.timeout(timeout);
   const timedOut = e => signal.aborted || e?.name === 'TimeoutError';
-  const timeoutError = () => Object.assign(Error('Модель не успела ответить за ' + timeout / 1000 + ' секунд.'),
+  const seconds = timeout / 1000;
+  const unit = {one:'секунду',few:'секунды',many:'секунд',other:'секунды'}[new Intl.PluralRules('ru').select(seconds)];
+  const timeoutError = () => Object.assign(Error('Модель не успела ответить за ' + seconds + ' ' + unit + '.'),
     { timedOut: true, retryable: !local });
   let response;
   try{response=await send(target,{method:'POST',redirect:'error',signal,headers:{'Content-Type':'application/json',...(env.LLM_API_KEY?{Authorization:'Bearer '+env.LLM_API_KEY}:{})},
@@ -56,7 +58,7 @@ export async function providerCall(env,messages,tools,choice='auto',send=fetch,l
   }
   if(!response.ok)throw Object.assign(Error('Провайдер модели вернул HTTP '+response.status+'.'),{status:response.status});
   const data=await response.json().catch(e=>{throw timedOut(e)?timeoutError():e;}),reply=data.choices?.[0]?.message;
-  if(!reply)throw Error('Модель вернула пустой ответ.');return {...reply,usage:{input:data.usage?.prompt_tokens,output:data.usage?.completion_tokens}};
+  if(!reply)throw Error('Модель вернула пустой ответ.');return {...reply,...(data.choices[0].finish_reason==='length'?{lengthLimited:true}:{}),usage:{input:data.usage?.prompt_tokens,output:data.usage?.completion_tokens}};
 }
 async function apiTurn(store,a,history,question,env,send){
   const ctx=a.context,tools=apiTools(),refs=new Map(),messages=[{role:'system',content:system},

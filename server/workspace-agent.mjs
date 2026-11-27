@@ -370,7 +370,23 @@ export async function runAssistant(
     ...tools.filter(t => ['source_value','issue_search','search','view','knowledge_source','knowledge_sources','release_decision'].includes(t.function.name)),
   ] : tools;
   const allowedOps = new Set(turnTools.map(t => opNames[t.function.name]));
-  const stop = (message, warning, outcome = 'done') => {
+  let modelTools=turnTools, promptStart=0;
+  if (state.compactRetry) {
+    const relevant=new Set(['overview','metrics','view','calc','search','source_value','knowledge_source','knowledge_sources']);
+    for(const [pattern,names] of [
+      [/график|нарисуй|диаграмм|период|воронк|динамик|участ/iu,['chart','range_read','selection_context','neighboring']],
+      [/задач|тикет|redmine|бэклог|#\d/iu,['issue_search','issue_read','issue_options','backlog']],
+      [/страниц|confluence|документ/iu,['page_search','page_read']],
+      [/релиз|выкладк/iu,['release_decision']],
+    ]) if(pattern.test(b.question)) for(const name of names) relevant.add(name);
+    if(state.anchorId) for(const name of ['range_read','selection_context','neighboring']) relevant.add(name);
+    // Keep the full set of operation dependencies on multi-step write requests.
+    if(!singleIssue && ![...writes].some(op=>authorizedWrite(op,b.question)))
+      modelTools=turnTools.filter(t=>relevant.has(t.function.name));
+    const current=state.messages.findIndex(m=>m.role==='user' && m.content?.startsWith('{"question":'));
+    if(current>0) promptStart=Math.max(1,current-2);
+  }
+  const stop = (message, warning, outcome = 'done', retryExhausted = false) => {
     const identifiers = [
       ...(state.rangeIds || []).map((id) => [id, 'выделенный участок']),
       [state.calc, 'сохранённый расчёт'],
@@ -386,6 +402,7 @@ export async function runAssistant(
       }
     const result = artifactResult(state, message, warning);
     result.outcome = outcome;
+    if(retryExhausted) result.retryExhausted=true;
     state.final = result;
     save(state);
     return result;
@@ -397,7 +414,9 @@ export async function runAssistant(
       let response;
       try {
         if (start >= deadline) return stop('Время разбора истекло. Уже выполненные шаги сохранены. Можно продолжить с этого места.', undefined, 'partial');
-        response = await providerCall(env, state.messages, turnTools, 'auto', send, { timeout: deadline - start });
+        const messages=promptStart ? [state.messages[0],...state.messages.slice(promptStart)] : state.messages;
+        response = await providerCall(env, messages, modelTools, 'auto', send, { timeout: deadline - start,
+          ...(state.compactRetry ? {maxTokens:160} : {}) });
         if (state.issues) delete state.issues.provider;
       } catch (e) {
         state.round++;
@@ -417,17 +436,21 @@ export async function runAssistant(
             ),
           )
           .join('\n');
+        const repeatedTimeout=e.timedOut && state.compactRetry && state.lastTimeout===state.completed.length;
+        if(e.timedOut) state.lastTimeout=state.completed.length;
         return stop(
           [
             'Не удалось завершить поручение с помощью модели. ' + e.message,
             measured,
             state.completed.length ? 'Результаты выполненных шагов сохранены.' : null,
-            e.timedOut ? 'Попробуйте сузить вопрос или продолжите поручение.' : 'Можно продолжить после восстановления связи.',
+            repeatedTimeout ? 'Сокращённый запрос тоже превысил лимит времени. Укажите один показатель или одно действие в новом сообщении.' :
+              e.timedOut ? 'Можно повторить с сокращённым контекстом.' : 'Можно продолжить после восстановления связи.',
           ]
             .filter(Boolean)
             .join('\n'),
           e.message,
           state.completed.length || research?.children.length ? 'partial' : 'failed',
+          repeatedTimeout,
         );
       }
       db.prepare('INSERT INTO costs(job,model,elapsed,input,output) VALUES(?,?,?,?,?)').run(
