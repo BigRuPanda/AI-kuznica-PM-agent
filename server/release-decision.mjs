@@ -53,7 +53,8 @@ function interview(db, product) {
 }
 
 const releaseInfo = r => ({ id: r.data.release_id, date: r.data.release_date,
-  description: r.data.description, metrics: ids(r.data.affected_metrics), ...citation(r) });
+  description: r.data.description, metrics: ids(r.data.affected_metrics),
+  relatedTaskIds: ids(r.data.related_task_ids), ...citation(r) });
 function taskInfo(r, asOf, historical) {
   const { task_id, title, description_short, status, created_date, closed_date, linked_metric_ids } = r.data;
   const closed = closed_date && closed_date <= asOf;
@@ -79,6 +80,12 @@ export function releaseDecision(db, user, { product, caseId, releaseId, through 
   const accessible = cases(db).filter(c => !c.body.owner || (!sharedOnly && c.body.owner === user.id));
   const requestedCase = caseId ? accessible.find(c => c.id === caseId) : null;
   if (caseId && !requestedCase) throw Error('Разбор недоступен в этом пространстве.');
+  const boundRelease = c => c.body.release || c.body.signal?.releaseId;
+  if (releaseId && requestedCase && boundRelease(requestedCase) && boundRelease(requestedCase) !== releaseId)
+    throw Error('Разбор относится к другому релизу.');
+  const caseVisible = (c, asOf) => !historical || visibleOnDate(c.body.signal, asOf);
+  const linkedCase = (row, selectedProduct, asOf) => row && accessible.find(c => c.product === selectedProduct &&
+    c.body.release === row.data.release_id && caseVisible(c, asOf));
   const signals = accessible.filter(c => c.body.signal && c.body.signal.status !== 'withdrawn').sort((a, b) =>
     b.body.signal.week.localeCompare(a.body.signal.week) ||
     (Number(b.body.signal.rule === 'relative') - Number(a.body.signal.rule === 'relative')) ||
@@ -102,10 +109,11 @@ export function releaseDecision(db, user, { product, caseId, releaseId, through 
     const selected = releaseId || requestedCase?.body.release;
     const row = selected ? releases.find(r => r.data.release_id === selected) : releases[0];
     if (releaseId && !row) throw Error('На выбранную дату этого релиза ЛК нет в календаре.');
-    const linked = ids(row?.data.related_task_ids);
+    const relatedTasks = ids(row?.data.related_task_ids);
     const delivered = row ? facts(db, 'backlog').filter(r => r.data.created_date <= asOf &&
-      (linked.includes(r.data.task_id) || ids(r.data.release_id).includes(row.data.release_id))) : [];
-    return { product: 'ЛК', products, scope: 'account', asOf, historical, caseId: requestedCase?.id || null,
+      (relatedTasks.includes(r.data.task_id) || ids(r.data.release_id).includes(row.data.release_id))) : [];
+    const linked = linkedCase(row, product, asOf);
+    return { product: 'ЛК', products, scope: 'account', asOf, historical, caseId: linked?.id || null,
       releases: releases.map(releaseInfo), release: row ? releaseInfo(row) : null,
       delivered: delivered.map(r => taskInfo(r, asOf, historical)),
       accountEvidence: recommendationEvidence(db, row, calendar, asOf, observation),
@@ -119,20 +127,24 @@ export function releaseDecision(db, user, { product, caseId, releaseId, through 
   const series = sales.filter(r => r.data.product_family === product);
   const latest = series.filter(fullWeek).map(r => r.data.week_start).sort().at(-1);
   const endWeek = (!releaseId && requestedCase?.body.signal?.week) || latest;
-  const asOf = through || (endWeek ? addDays(endWeek, 6) : series.map(r => r.data.week_start).sort().at(-1));
   historical ||= Boolean(endWeek && latest && endWeek < latest);
-  const releases = calendar.filter(r => r.data.release_date <= asOf && released(r) && !isAccountFeature(r) &&
-    mentions(r.data.description, product))
+  const familyCalendar = calendar.filter(r => released(r) && !isAccountFeature(r) && mentions(r.data.description, product));
+  const archiveDay = endWeek ? addDays(endWeek, 6) : series.map(r => r.data.week_start).sort().at(-1);
+  const today = new Intl.DateTimeFormat('sv-SE', { timeZone: 'Europe/Moscow' }).format();
+  const asOf = through || (historical ? archiveDay : [archiveDay, ...familyCalendar.map(r => r.data.release_date)
+    .filter(date => date <= today)].filter(Boolean).sort().at(-1));
+  const releases = familyCalendar.filter(r => r.data.release_date <= asOf)
     .sort((a, b) => b.data.release_date.localeCompare(a.data.release_date));
   const selected = releaseId || requestedCase?.body.release;
   const release = selected ? releases.find(r => r.data.release_id === selected) : releases[0];
   if (releaseId && !release) throw Error('В выбранном срезе нет такого релиза семейства.');
-  const caseVisible = c => !historical || visibleOnDate(c.body.signal, asOf);
-  const linked = release && accessible.find(c => c.product === product && c.body.release === release.data.release_id && caseVisible(c));
-  const signalCase = requestedCase && caseVisible(requestedCase) ? requestedCase : linked ||
-    signals.find(c => c.product === product && caseVisible(c));
+  const linked = linkedCase(release, product, asOf);
+  const signalCase = requestedCase && caseVisible(requestedCase, asOf) ? requestedCase : linked ||
+    signals.find(c => c.product === product && caseVisible(c, asOf) &&
+      (release ? boundRelease(c) === release.data.release_id : !boundRelease(c)));
   const backlog = facts(db, 'backlog').filter(r => r.data.created_date && r.data.created_date <= asOf);
-  const delivered = release ? backlog.filter(r => ids(release.data.related_task_ids).includes(r.data.task_id)) : [];
+  const delivered = release ? backlog.filter(r => ids(release.data.related_task_ids).includes(r.data.task_id) ||
+    ids(r.data.release_id).includes(release.data.release_id)) : [];
   const open = backlog.filter(r => mentions(asText(r.data.title,r.data.description_short), product) &&
     (!r.data.closed_date || r.data.closed_date > asOf) &&
     (historical || r.data.closed_date || !/^(done|closed|закрыта)$/iu.test(r.data.status)));

@@ -144,8 +144,10 @@ export const operations = {
   'knowledge-source':['Строки книги по версии и ячейке',{version:id,loc:optional,offset:z.number().int().nonnegative().optional()}],
   release_decision: ['Измерения, источники и связанные задачи по выпущенной функции. Для истории through — дата последнего доступного дня.',
     { product: optional, caseId: id.optional(), releaseId: id.optional(), through: optional }],
-  'release-tracker': ['Найти связанные задачи и дубли.', { caseId: id, releaseId: id }],
-  'release-tracker-draft': ['Подготовить задачу или комментарий по решению.', { caseId: id, releaseId: id, key: id.optional() }],
+  'release-tracker': ['Найти связанные задачи и дубли.', { caseId: id.optional(), releaseId: id, product: optional }],
+  'release-tracker-case': ['Создать личный разбор по выбранному релизу.', { releaseId: id, product: optional }],
+  'release-tracker-draft': ['Подготовить задачу или комментарий по решению.',
+    { caseId: id, releaseId: id, product: optional, key: id.optional() }],
   source_value:['Исходные значения метрики с точными координатами и идентификаторами ряда',{product:text,metric:id,date:z.iso.date(),segment:optional,sourceId:optional,definitionId:optional,stepDays:z.number().int().positive().optional()}],
   read_public_page:['Читать публичную HTML-страницу по URL или выбранной ячейке',{url:z.url().max(2048).optional(),version:id.optional(),loc:optional}],
   competitor_check:['Проверить предложение продавца из конкретной строки исследования',{version:id,loc:id,savedOnly:z.boolean().optional(),asOf:z.iso.datetime().optional()}],
@@ -436,6 +438,15 @@ function proposedObservation(db, c, input, env) {
   return makeObservationPlan(db, c, input);
 }
 
+function createPersonalCase(db, user, { title, product, release, plan = {}, origin = null }) {
+  const key = randomUUID();
+  db.prepare('INSERT INTO cases VALUES(?,?,?,?,?)').run(key, product, title, 'Исследуем',
+    JSON.stringify({ owner: user.id, responsible: user.name, release: release || null, plan, origin }));
+  if (origin) grant(db, origin.calc, 'user', user.id);
+  syncInvestigations(db, key);
+  return { id: key, title, product };
+}
+
 export function workspaceOperation(
   store,
   user,
@@ -451,31 +462,50 @@ export function workspaceOperation(
   const meta = operations[op];
   const b = meta ? z.object(meta[1]).parse(input) : input;
   if (op === 'release_decision') return releaseDecision(db, user, b, sharedOnly);
-  if (op === 'release-tracker' || op === 'release-tracker-draft') {
+  if (['release-tracker', 'release-tracker-case', 'release-tracker-draft'].includes(op)) {
     if (sharedOnly || assistantAuthored) throw Error('Откройте личный чат этого разбора.');
     const decision = releaseDecision(db, user, b);
     if (!decision.release || decision.historical) throw Error('Откройте текущий срез выпущенной функции.');
+    const requestedCaseId = b.caseId || decision.caseId;
+    const relatedCase = requestedCaseId && visibleCase(db, user, requestedCaseId);
+    const caseId = relatedCase?.body.release === b.releaseId ? relatedCase.id : null;
+    if (b.caseId && (!caseId || b.product && b.product !== decision.product))
+      throw Error('Выберите разбор выбранного продукта, связанный с этим релизом.');
+    if (op === 'release-tracker-case') {
+      if (caseId) return { caseId };
+      return store.tx(() => {
+        const current = releaseDecision(db, user, b);
+        const linked = current.caseId && visibleCase(db, user, current.caseId);
+        if (linked?.body.release === b.releaseId) return { caseId: linked.id };
+        const title = ('Оценка релиза ' + b.releaseId + ' · ' + current.product).slice(0, 240);
+        return { caseId: createPersonalCase(db, user, { title, product: current.product, release: b.releaseId }).id };
+      });
+    }
     const proposed = decisionDraft(decision, env.APP_BASE_URL);
     const target = targetFor(db, user, 'redmine', env);
-    const queries = [...new Set([decision.backlog?.title, proposed.title, decision.product,
-      decision.measurement?.metric].filter(Boolean))];
-    return Promise.resolve(trackerClient(store, user, target, env, send, b.caseId)).then(async api => {
+    const linkedKeys = [...new Set([...decision.release.relatedTaskIds, ...decision.delivered.map(task => task.id)])];
+    const titles = [decision.backlog?.title, proposed.title, ...decision.delivered.map(task => task.title)].filter(Boolean);
+    const queries = [...new Set([...linkedKeys, ...titles, decision.product, decision.measurement?.metric].filter(Boolean))];
+    return Promise.resolve(trackerClient(store, user, target, env, send, caseId)).then(async api => {
       const hits = api.searchProject ? await api.searchProject(queries) :
         (await Promise.all(queries.map(query => api.search(query, true)))).flat();
       const normalized = title => title.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
-      const exact = new Set([decision.backlog?.title, proposed.title].filter(Boolean).map(normalized));
+      const linked = new Set(linkedKeys.map(normalized));
+      const exact = new Set(titles.map(normalized));
       const items = [...new Map(hits.map(item => [item.key, item])).values()]
-        .map(({ key, title, url, status, canComment = true }) =>
-          ({ key, title, url, status, canComment, exact: exact.has(normalized(title)) }))
-        .sort((a, b) => Number(b.exact) - Number(a.exact));
-      if (op === 'release-tracker') return { items, local: !!target.local };
+        .map(({ key, title, url, status, canComment = true }) => {
+          const linkedToRelease = linked.has(normalized(key));
+          return { key, title, url, status, canComment, linkedToRelease, exact: linkedToRelease || exact.has(normalized(title)) };
+        })
+        .sort((a, b) => Number(b.linkedToRelease) - Number(a.linkedToRelease) || Number(b.exact) - Number(a.exact));
+      if (op === 'release-tracker') return { items, caseId, local: !!target.local };
       const chosen = b.key && items.find(item => item.key === b.key);
       if (b.key && !chosen) throw Error('Повторите поиск и выберите задачу из результатов.');
       if (chosen && !chosen.canComment) throw Error('Откройте найденную задачу в Redmine для добавления комментария.');
       if (!chosen && items.some(item => item.exact)) throw Error('Найдена подходящая задача. Предложите комментарий к ней.');
-      const body = chosen ? { caseId: b.caseId, key: chosen.key, comment: proposed.description } :
-        { caseId: b.caseId, ...proposed };
-      const draftId = digest(JSON.stringify(['release-decision', user.id, b.caseId, b.releaseId, b.key, target, proposed.description]));
+      if (visibleCase(db, user, caseId).body.release !== b.releaseId) throw Error('Привязка разбора к релизу изменилась.');
+      const body = chosen ? { caseId, key: chosen.key, comment: proposed.description } : { caseId, ...proposed };
+      const draftId = digest(JSON.stringify(['release-decision', user.id, caseId, b.releaseId, b.key, target, proposed.description]));
       return prepareTracker(store, user, 'issue', body, env, send, draftId);
     });
   }
@@ -605,17 +635,7 @@ export function workspaceOperation(
         origin = { calc: r.calc, cards: r.cards || ['summary', 'trend'], full: !!r.full };
       }
     }
-    const key = randomUUID();
-    db.prepare('INSERT INTO cases VALUES(?,?,?,?,?)').run(
-      key,
-      product,
-      title,
-      'Исследуем',
-      JSON.stringify({ owner: user.id, responsible: user.name, release: release || null, plan, origin }),
-    );
-    if (origin) grant(db, origin.calc, 'user', user.id);
-    syncInvestigations(db, key);
-    return { id: key, title, product };
+    return createPersonalCase(db, user, { title, product, release, plan, origin });
   }
   if (op === 'append_case') {
     const c = current();

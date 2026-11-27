@@ -44,11 +44,7 @@ export function recommendationEvidence(db, release, calendar, asOf, { segment, b
       continue;
     }
     period = 'До релиза сравниваем ' + before.from + ' — ' + before.through + ', после — ' + after.from + ' — ' + after.through + '. День выкладки исключён.';
-    for (const window of [before, after]) {
-      cite(window.sources[0]);
-      cite(window.sources.at(-1));
-      cite(window.sources.find(row => row.value > 0));
-    }
+    for (const window of [before, after]) for (const row of window.sources) cite(row);
     for (const row of effect.breaks || []) cite(row);
     unchanged &&= effect.actual != null && before.value === after.value;
     const change = effect.actual == null

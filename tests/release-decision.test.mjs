@@ -276,7 +276,8 @@ test('decision chat leads to manual confirmation, using the same case and actual
   await page.getByRole('button', { name: 'Найти задачу и проверить дубли' }).click();
   await page.getByRole('link', { name: /^T-08 · Недочеты/ }).waitFor();
   assert.equal(await page.getByRole('button', { name: 'Подготовить черновик задачи' }).count(), 0);
-  await page.getByRole('button', { name: 'Подготовить комментарий' }).click();
+  await page.locator('.decision-issues li').filter({ hasText: /^T-08/ })
+    .getByRole('button', { name: 'Подготовить комментарий' }).click();
   await page.locator('.tracker-preview').getByText(/Метрики_справочник!/).waitFor();
   const db = app.space('team').db;
   const caseId = (await call('release_decision')).caseId;

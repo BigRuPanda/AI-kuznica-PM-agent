@@ -26,7 +26,7 @@ const system = [
 ].join(' ');
 const greeting =
   /^(?:привет(?:ик|ствую)?|здравствуй(?:те)?|доброе утро|добрый (?:день|вечер)|hello|hi)(?:[, ]+агент)?[!.? …]*$/iu;
-const tools = Object.entries(operations).filter(([name])=>!['read_public_page','competitor_check','release-tracker','release-tracker-draft'].includes(name)).map(([name, [description, shape]]) => {
+const tools = Object.entries(operations).filter(([name])=>!['read_public_page','competitor_check','release-tracker','release-tracker-case','release-tracker-draft'].includes(name)).map(([name, [description, shape]]) => {
   const parameters = z.toJSONSchema(z.object(shape));
   delete parameters.$schema;
   return { type: 'function', function: { name: name.replaceAll('-', '_'), description, parameters } };

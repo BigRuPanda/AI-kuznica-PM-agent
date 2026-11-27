@@ -279,12 +279,16 @@ test('release decisions preserve the historical cutoff, cited cells and manual i
     row: { release_id: id, release_date: date, description, release_type: 'major', status: 'released', ...extra } });
   const imported = [{ file: 'Решения.xlsx', facts: [
     release('DEC-1', '2026-10-01', 'Изменение Kaspersky', 2),
-    release('DEC-2', '2026-11-12', 'Поздний релиз Kaspersky', 3),
-    release('DEC-3', '2026-10-02', 'Изменение Astra', 4),
-    release('DEC-4', '2026-10-04', 'Карусель рекомендаций ЛК', 5, { affected_metrics: 'lk_reco_click_visits' }),
+    release('DEC-2', '2026-11-24', 'Поздний релиз Kaspersky', 3),
+    release('DEC-3', '2026-10-02', 'Изменение Astra', 4, { related_task_ids: 'DEC-ASTRA' }),
+    release('R-50', '2026-10-04', 'Карусель рекомендаций ЛК', 5, { affected_metrics: 'lk_reco_click_visits', related_task_ids: 'T-9' }),
     { kind: 'interview', loc: 'Интервью!L9', text: 'Темы ответа: Kaspersky · сложность выбора\nФрагмент записи: Неясно, какую лицензию выбрать' },
     { kind: 'backlog', loc: 'Задачи!A8', row: { task_id: 'DEC-T', title: 'Kaspersky: проверить сбор событий',
       created_date: '2026-09-20', status: 'New', description_short: 'Проверить передачу событий', linked_metric_ids: 'cfg_add_to_cart_rate' } },
+    { kind: 'backlog', loc: 'Задачи!A9', row: { task_id: 'DEC-ASTRA', title: 'Уточнить состав поставки',
+      created_date: '2026-09-20', status: 'Closed' } },
+    { kind: 'backlog', loc: 'Задачи!A10', row: { task_id: 'T-9', title: 'Обновить показ блока',
+      created_date: '2026-09-20', status: 'Closed' } },
     { kind: 'dictionary', loc: 'Метрики!A4', row: { metric_id: 'cfg_add_to_cart_rate', metric_name: 'Конверсия в корзину',
       comment: 'Проверить полноту исходных событий', formula_or_logic: 'Корзины / посещения' } },
   ] }];
@@ -298,6 +302,24 @@ test('release decisions preserve the historical cutoff, cited cells and manual i
   importDocs(store, imported, { notify: false });
   const call = (op, body) => workspaceOperation(store, user, op, body, fixtureEnv, transport);
   const linked = call('create-case', { title: 'Связанный разбор Kaspersky', product: 'Kaspersky', release: 'DEC-2' });
+  assert.throws(() => call('release-tracker-draft', { caseId: linked.id, releaseId: 'DEC-1' }), /другому релизу/);
+  assert.equal(call('release_decision', { releaseId: 'DEC-1' }).caseId, null);
+  assert.equal(call('release_decision', { releaseId: 'DEC-2' }).asOf, '2026-11-24');
+  assert.throws(() => call('release_decision', { releaseId: 'DEC-2', through: '2026-11-23' }), /нет такого релиза/);
+  const account = call('release_decision', { releaseId: 'R-50' });
+  assert.equal(account.accountEvidence.sources.filter(row => row.loc.startsWith('Клики!')).length, 28);
+  const caseCount = () => store.db.prepare('SELECT count(*) AS n FROM cases').get().n;
+  const countBeforeSearch = caseCount();
+  const astra = await call('release-tracker', { releaseId: 'DEC-3' });
+  assert.equal(astra.caseId, null);
+  assert.ok(astra.items.some(item => item.key === 'DEC-ASTRA' && item.exact));
+  assert.equal(caseCount(), countBeforeSearch);
+  const association = call('release-tracker-case', { releaseId: 'DEC-3' });
+  assert.deepEqual(call('release-tracker-case', { releaseId: 'DEC-3' }), association);
+  await assert.rejects(call('release-tracker-draft', { ...association, releaseId: 'DEC-3' }), /Найдена подходящая задача/);
+  const astraDraft = await call('release-tracker-draft', { ...association, releaseId: 'DEC-3', key: 'DEC-ASTRA' });
+  assert.equal(astraDraft.caseId, association.caseId);
+  assert.equal(store.db.prepare('SELECT count(*) AS n FROM local_issues').get().n, 0);
   await new Promise((ok, fail) => app.server.once('error', fail).listen(0, '127.0.0.1', ok));
   const base = 'http://127.0.0.1:' + app.server.address().port;
   const edge = 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe';
@@ -349,7 +371,7 @@ test('release decisions preserve the historical cutoff, cited cells and manual i
   assert.equal(store.db.prepare("SELECT count(*) AS n FROM local_issues WHERE key='DEC-T'").get().n, 1);
 
   await page.setViewportSize({ width: 390, height: 844 });
-  await page.goto(base + '/#release-decision/DEC-4');
+  await page.goto(base + '/#release-decision/R-50');
   await visible(page.getByRole('heading', { name: 'Личный кабинет', exact: true }));
   await visible(page.getByRole('heading', { name: 'Переходы из рекомендаций' }));
   await visible(page.getByText(/визиты с кликом 14 → 28/));
@@ -358,18 +380,39 @@ test('release decisions preserve the historical cutoff, cited cells and manual i
   await visible(page.getByText('Клики!A2', { exact: true }));
   await page.goBack();
   await role(page, 'Открыть чат разбора').click();
-  await visible(page.getByRole('heading', { name: 'Чат разбора · DEC-4' }));
-  const thread = store.db.prepare("SELECT id FROM conversations WHERE title='ЛК · DEC-4'").get().id;
+  await visible(page.getByRole('heading', { name: 'Чат разбора · R-50' }));
+  const thread = store.db.prepare("SELECT id FROM conversations WHERE title='ЛК · R-50'").get().id;
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
-  const question = 'Какая задача связана с этой выкладкой?';
+  await role(page, 'Найти задачу и проверить дубли').click();
+  await visible(page.getByRole('link', { name: /^T-9 ·/ }));
+  assert.equal(caseCount(), countBeforeSearch + 1);
+  assert.equal(await role(page, 'Подготовить черновик задачи').count(), 0);
+  await role(page, 'Создать связанный разбор').click();
+  await role(page, 'Подготовить комментарий').click();
+  await visible(page.locator('.tracker-preview').getByText(/Клики!A2/));
+  const accountCase = JSON.parse(store.db.prepare("SELECT body FROM cases WHERE product='ЛК'").get().body);
+  assert.equal(accountCase.release, 'R-50');
+  assert.equal(store.db.prepare("SELECT count(*) AS n FROM local_issues WHERE key='T-9'").get().n, 0);
+  await role(page, 'Подтвердить запись').click();
+  await visible(page.getByRole('link', { name: 'Открыть задачу · T-9' }));
+  assert.equal(store.db.prepare("SELECT count(*) AS n FROM local_issues WHERE key='T-9'").get().n, 1);
+  const question = 'Что известно про карусель рекомендаций ЛК после выкладки?';
   await page.locator('textarea').fill(question);
   await submit(page, 'ask', () => role(page, 'Отправить').click());
-  assert.equal(JSON.parse(store.db.prepare('SELECT body FROM jobs WHERE thread=?').get(thread).body).decisionReleaseId, 'DEC-4');
+  assert.equal(JSON.parse(store.db.prepare('SELECT body FROM jobs WHERE thread=?').get(thread).body).decisionReleaseId, 'R-50');
+  await workJobs(store, app.accounts, fixtureEnv, transport);
+  const conversation = page.getByRole('region', { name: 'Переписка' });
+  await visible(conversation.getByText(/14 → 28/));
+  await conversation.getByRole('link', { name: /Клики!A2$/ }).click();
+  await visible(page.getByText('Клики!A2', { exact: true }));
   await page.goto(base + '/#overview');
-  await page.goto(base + '/#release-decision/DEC-4');
+  await page.goto(base + '/#release-decision/R-50');
   await role(page, 'Открыть чат разбора').click();
   await visible(page.getByText(question, { exact: true }));
-  assert.deepEqual(store.db.prepare("SELECT id FROM conversations WHERE title='ЛК · DEC-4'").all().map(r => r.id), [thread]);
+  assert.deepEqual(store.db.prepare("SELECT id FROM conversations WHERE title='ЛК · R-50'").all().map(r => r.id), [thread]);
+  assert.equal(store.db.prepare("SELECT count(*) AS n FROM local_issues WHERE key='DEC-ASTRA'").get().n, 0);
+  assert.equal((await call('confirm', { id: astraDraft.id })).key, 'DEC-ASTRA');
+  assert.equal(store.db.prepare("SELECT count(*) AS n FROM local_issues WHERE key='DEC-ASTRA'").get().n, 1);
   assert.deepEqual(errors, []);
 });
 

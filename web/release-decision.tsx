@@ -36,7 +36,8 @@ type Decision = {
 };
 type TrackerSearch = {
   local: boolean;
-  items: { key: string; title: string; url: string; status?: string; exact: boolean; canComment: boolean }[];
+  caseId: string | null;
+  items: { key: string; title: string; url: string; status?: string; exact: boolean; canComment: boolean; linkedToRelease: boolean }[];
 };
 type Action = (fn: () => Promise<void>) => void;
 type Criteria = { product?: string; releaseId?: string; through?: string };
@@ -118,18 +119,26 @@ function WeeklyIndex({ trend }: { trend: Trend }) {
   </section>;
 }
 
-function TrackerActions({ caseId, releaseId, action }: { caseId: string; releaseId: string; action: Action }) {
+function TrackerActions({ product, releaseId, action }: { product: string; releaseId: string; action: Action }) {
   const [search, setSearch] = useState<TrackerSearch>();
   const [draft, setDraft] = useState<TrackerPreview>();
   const [pending, setPending] = useState(false);
   const [error, setError] = useState('');
-  const payload = { caseId, releaseId };
-  async function run(key?: string, prepare = false) {
+  const payload = { product, releaseId };
+  const hasExact = search?.items.some(item => item.exact);
+  const canDraft = !hasExact || search?.items.some(item => item.exact && item.canComment);
+  async function run(op: 'search' | 'case' | 'draft', key?: string) {
     setPending(true);
     setError('');
     try {
-      if (prepare) setDraft(await post<TrackerPreview>('release-tracker-draft', { ...payload, key }));
-      else setSearch(await post<TrackerSearch>('release-tracker', payload));
+      if (op === 'case' && search) {
+        const { caseId } = await post<{ caseId: string }>('release-tracker-case', payload);
+        setSearch({ ...search, caseId });
+      } else if (op === 'draft' && search?.caseId) {
+        setDraft(await post<TrackerPreview>('release-tracker-draft', { ...payload, caseId: search.caseId, key }));
+      } else if (op === 'search') {
+        setSearch(await post<TrackerSearch>('release-tracker', payload));
+      }
     } catch (err) {
       setError((err as Error).message);
     } finally {
@@ -138,7 +147,7 @@ function TrackerActions({ caseId, releaseId, action }: { caseId: string; release
   }
   return <section className="paper">
     <h3>Задача по решению</h3>
-    <button type="button" disabled={pending} onClick={() => void run()}>
+    <button type="button" disabled={pending} onClick={() => void run('search')}>
       {pending && !search ? 'Ищем…' : search ? 'Повторить поиск' : 'Найти задачу и проверить дубли'}
     </button>
     {error && <p role="alert">{error}</p>}
@@ -148,16 +157,19 @@ function TrackerActions({ caseId, releaseId, action }: { caseId: string; release
         {search.items.map(item => <li key={item.key}>
           <div>
             <a href={item.url}>{item.key} · {item.title}</a>
-            <small>{[item.status, item.exact && 'Совпадает по названию',
+            <small>{[item.status, item.linkedToRelease ? 'Связана с релизом в архиве' : item.exact && 'Совпадает по названию',
               !item.canComment && 'Доступна для просмотра в Redmine'].filter(Boolean).join(' · ')}</small>
           </div>
-          {item.canComment && (!search.items.some(hit => hit.exact) || item.exact) && <button
-            type="button" disabled={pending} onClick={() => void run(item.key, true)}
+          {search.caseId && item.canComment && (!hasExact || item.exact) && <button
+            type="button" disabled={pending} onClick={() => void run('draft', item.key)}
           >Подготовить комментарий</button>}
         </li>)}
       </ul>
-      {!search.items.some(item => item.exact) && <button
-        type="button" disabled={pending} onClick={() => void run(undefined, true)}
+      {!search.caseId && canDraft && <button
+        type="button" disabled={pending} onClick={() => void run('case')}
+      >Создать связанный разбор</button>}
+      {search.caseId && !hasExact && <button
+        type="button" disabled={pending} onClick={() => void run('draft')}
       >Подготовить черновик задачи</button>}
     </>}
     {draft && <PreviewCard item={draft} action={action} reload={async () => {}} />}
@@ -208,7 +220,7 @@ export function ReleaseDecision({
     setOpening(true);
     try {
       const result = caseId && data?.scope !== 'account' ? await post<{ id: string }>('case-thread', { caseId })
-        : await post<{ id: string }>('release-thread', { releaseId });
+        : await post<{ id: string }>('release-thread', { product: data?.product, releaseId });
       setThread(result.id);
     } finally {
       setOpening(false);
@@ -325,7 +337,7 @@ export function ReleaseDecision({
       {thread && release && <div className="decision-chat" ref={chatAnchor}>
         <h2>Чат разбора · {release.id}</h2>
         <div className="decision-chat-grid">
-          {data.caseId && <TrackerActions key={data.caseId + release.id} caseId={data.caseId} releaseId={release.id} action={action} />}
+          <TrackerActions key={data.product + '/' + release.id} product={data.product} releaseId={release.id} action={action} />
           {renderChat(thread, data.caseId || undefined, release.id, data.product)}
         </div>
       </div>}

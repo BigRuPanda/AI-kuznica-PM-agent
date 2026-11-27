@@ -446,7 +446,7 @@ export function createTeamApp({
         if (op === 'case-thread') return reply(200, { id: openCaseThread(db, user, b.caseId) });
         if (op === 'release-thread') {
           if (typeof b.releaseId !== 'string' || !b.releaseId) throw Error('Выберите выпущенную функцию.');
-          const decision = workspaceOperation(store, user, 'release_decision', { releaseId: b.releaseId }, env, send);
+          const decision = workspaceOperation(store, user, 'release_decision', { releaseId: b.releaseId, product: b.product }, env, send);
           return reply(200, { id: openReleaseThread(store, user, decision) });
         }
         if (op === 'thread') return reply(200, { id: createThread(db, user, b.title, !!b.group) });
