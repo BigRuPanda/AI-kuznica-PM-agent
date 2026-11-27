@@ -439,8 +439,10 @@ export function effect(db, c, through) {
       metric: c.body.plan?.measurement?.metric || c.body.signal?.metric, actual: null, weeks: 0, controlWeeks: 0 };
   const start = iso(dateMs(monday(plan.deployed)) + (monday(plan.deployed) === plan.deployed ? 0 : WEEK));
   const end = iso(dateMs(start) + 3 * WEEK);
+  const cutoff = through ? dateMs(through) : null;
   const all = listSales(db),
-    collect = (p) => all.filter((x) => x.product === p && !x.partial && x.week >= start && x.week <= end);
+    collect = (p) => all.filter((x) => x.product === p && !x.partial && x.week >= start && x.week <= end &&
+      (cutoff === null || (new Date(dateMs(x.week)).getUTCDay() === 1 && dateMs(x.week) + 6 * 86400000 <= cutoff)));
   const sample = collect(c.product),
     peer = collect(plan.control);
   if (sample.length < 4 || peer.length < 4)

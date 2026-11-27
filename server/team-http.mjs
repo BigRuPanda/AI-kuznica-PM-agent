@@ -220,10 +220,11 @@ export function createTeamApp({
         for (const c of cases(s.db).filter((x) => x.state === 'Наблюдаем эффект' && x.body.watch)) {
           const plan = c.body.watch;
           if (c.body.watchReviewed || plan.reviewed) continue;
+          const archive = watchKind(plan) === 'archive-observation';
           const report = effect(s.db, c);
           if (Number.isFinite(report?.actual)) {
             s.tx(() => {
-              if (watchKind(plan) === 'archive-observation') c.body.watchReviewed = true;
+              if (archive) c.body.watchReviewed = true;
               else plan.reviewed = true;
               c.state = 'Нужно решение';
               updateCase(s.db, c);
@@ -234,7 +235,11 @@ export function createTeamApp({
                     .run(
                       digest(c.id + JSON.stringify({ ...plan, reviewed: true })) + channel,
                       channel,
-                      JSON.stringify({ caseId: c.id, ...notificationAudience(env, accounts.db, c.body.owner), text: report.state }),
+                      JSON.stringify({
+                        caseId: c.id,
+                        ...notificationAudience(env, accounts.db, c.body.owner, { requireOwner: archive }),
+                        text: report.state,
+                      }),
                     );
             });
           }

@@ -31,7 +31,7 @@ import { prepareResearch, researchContext } from './agent-research.mjs';
 import { saveMaterial } from './materials.mjs';
 import { aggregateMetric, describeMetricSeries, observationWithin } from './metric-observations.mjs';
 import { measurementSpec, measuredSignal, legacyOrderMetric, startMeasurementWatch, watchKind } from './watch-measurement.mjs';
-import { makeObservationPlan, observationOptions, observedEffect } from './effect-plan.mjs';
+import { makeObservationPlan, observationOptions, observedEffect, validateEffectCutoff } from './effect-plan.mjs';
 
 const text = z.string().min(1).max(2400),
   id = z.string().min(1).max(150),
@@ -846,6 +846,7 @@ export function workspaceOperation(
   if (op === 'watch-options') return observationOptions(db, current());
   if (op === 'effect-preview') {
     const c = current();
+    if (b.asOf !== undefined) validateEffectCutoff(b.asOf);
     const result = b.metric
       ? observedEffect(db, { ...c, body: { ...c.body, watch: proposedObservation(db, c, b, env) } }, b.asOf)
       : effect(db, c, b.asOf);

@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import test from 'node:test';
 import { chromium } from 'playwright';
 import { readInvestigations } from '../server/case-investigations.mjs';
-import { cases } from '../server/evidence.mjs';
+import { cases, importDocs } from '../server/evidence.mjs';
 import { captureInvestigation } from '../server/investigation-engine.mjs';
 import { createTeamApp } from '../server/team-http.mjs';
 import { fixtureEnv, seedWorkspace } from './workspace-fixture.mjs';
@@ -126,4 +126,31 @@ test('saved percentage, KPI and archive watches reopen their own screens after a
   app = undefined;
   base = await start();
   for (const id of ['saved-percent', 'saved-measurement', 'saved-observation']) await inspect(base, id);
+
+  const store = app.space('team'), product = 'Astra Linux';
+  const { cursor } = store.one('SELECT max(rowid) cursor FROM documents');
+  store.db.prepare("INSERT INTO cases VALUES('late-observation',?,?,'Наблюдаем эффект',?)")
+    .run(product, 'Поздняя выкладка', JSON.stringify({ watch: {
+      version: 2, kind: 'archive-observation', metric: 'orders_index', title: 'Индекс заказов',
+      taskId: 'T-LATE', releaseId: null, deployed: null, segment: 'all', target: 100, direction: 'at-least',
+      baselineWeeks: 1, observationWeeks: 1, scheduledOn: '2026-05-10', sourceCursor: cursor,
+    } }));
+  importDocs(store, [{ file: 'LateRollout.xlsx', facts: [
+    { kind: 'backlog', loc: 'Tasks!A2', row: { task_id: 'T-LATE', title: product, release_id: 'R-LATE' } },
+    { kind: 'releases', loc: 'Releases!A2', row: { release_id: 'R-LATE', release_date: '2026-05-12',
+      related_task_ids: 'T-LATE', description: product, status: 'выпущен', release_type: 'minor' } },
+  ] }], { notify: false });
+  await page.goto(base + '/#case/late-observation/effect');
+  await effect.getByText('2026-05-12', { exact: true }).waitFor();
+  await effect.getByLabel('Значение цели, если согласовано').fill('105');
+  const saved = page.waitForResponse(response => response.url().endsWith('/api/team/watch'));
+  await effect.getByRole('button', { name: 'Сохранить наблюдение' }).click();
+  const response = await saved;
+  assert.ok(response.ok(), await response.text());
+  const edited = await response.json();
+  assert.equal(edited.plan.target, 105);
+  assert.equal(edited.plan.scheduledOn, '2026-05-10');
+  assert.equal(edited.plan.sourceCursor, cursor);
+  assert.equal(edited.rollout.date, '2026-05-12');
+  await effect.getByText('2026-05-12', { exact: true }).waitFor();
 });

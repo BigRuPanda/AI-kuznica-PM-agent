@@ -12,6 +12,9 @@ const date = t => new Date(t).toISOString().slice(0, 10);
 const time = d => Date.parse(d + 'T00:00:00Z');
 const today = () => new Intl.DateTimeFormat('sv-SE', { timeZone: 'Europe/Moscow' }).format(new Date());
 const validDate = value => Number.isFinite(time(value)) && date(time(value)) === value;
+export function validateEffectCutoff(cutoff) {
+  if (!validDate(cutoff) || cutoff > today()) throw Error('Проверьте дату оценки.');
+}
 const ref = ({ file, loc, version }) => ({ file, loc, version });
 const ids = s => String(s || '').split(',').map(x => x.trim()).filter(Boolean);
 const sameFamily = (s, product) => productFamily(s || '') === productFamily(product);
@@ -115,10 +118,15 @@ export function makeObservationPlan(db, c, input) {
     control, controlTolerance: setting(db, 'rules', defaultRules).controlTolerance ?? defaultRules.controlTolerance,
   } : {};
   const cartRepair = task?.id === 'T-08' && metric.id === cartMetric;
-  const scheduling = task && !deployed ? {
-    scheduledOn: today(),
-    sourceCursor: db.prepare('SELECT coalesce(max(rowid),0) AS cursor FROM documents').get().cursor,
-  } : {};
+  let scheduling = {};
+  if (task && !deployed) {
+    const previous = c.body.watch;
+    const samePendingTask = previous?.taskId === task.id && !previous.deployed &&
+      previous.scheduledOn && previous.sourceCursor != null;
+    scheduling = samePendingTask
+      ? { scheduledOn: previous.scheduledOn, sourceCursor: previous.sourceCursor }
+      : { scheduledOn: today(), sourceCursor: db.prepare('SELECT coalesce(max(rowid),0) AS cursor FROM documents').get().cursor };
+  }
   const criteria = {
     metric:metric.id, segment, deployed, releaseId:release?.id || null, taskId:task?.id || null,
     baselineWeeks:input.baselineWeeks ?? 4, observationWeeks:input.observationWeeks ?? 4,
@@ -187,7 +195,8 @@ function period(db, product, plan, start, end, asOf, step) {
       const at = time(sourceDate), value = sales ? d.orders_index : d.value;
       return (sales ? d.product_family === product : sameFamily(d.product,product)) &&
         validDate(sourceDate) && at >= start && at < end && at + (step - 1) * day <= asOf &&
-        !/неполн|неполный/i.test(d.comment || '') && Number.isFinite(value) && value >= 0;
+        !d.partial && !/неполн/i.test(d.comment || '') && (d.step_days ?? step) === step &&
+        Number.isFinite(value) && value >= 0;
     }).sort((a, b) => (sales ? a.data.week_start : a.data.date).localeCompare(sales ? b.data.week_start : b.data.date));
   const expected = (end - start) / (day * step);
   const dates = new Set(records.map(r => time(sales ? r.data.week_start : r.data.date)));
@@ -199,33 +208,45 @@ function period(db, product, plan, start, end, asOf, step) {
       value: sales ? row.data.orders_index : row.data.value, rawUnit: sales ? 'index' : row.data.unit,
     })),
   };
-  if (records.length !== expected || !Array.from({length:expected}, (_,i) => dates.has(start + i * step * day)).every(Boolean))
-    return result;
+  const series = new Set(records.map(({ file, data: d }) => JSON.stringify([
+    d.source_id || (sales ? 'archive-sales' : 'office:' + file), d.definition_id || 'office',
+    sales ? d.product_family : d.product, sales ? 'index' : d.unit,
+  ])));
+  if (series.size > 1) return { result, reason: 'В окне есть строки из разных рядов.' };
+  if (records.length !== expected ||
+      !Array.from({length:expected}, (_,i) => dates.has(start + i * step * day)).every(Boolean))
+    return { result };
   if (sales) result.value = records.reduce((s,r) => s + r.data.orders_index,0) / expected;
   else if (pairs[plan.metric]) {
-    if (records.some(row => row.data.unit !== 'ratio')) return result;
+    if (records.some(row => row.data.unit !== 'ratio')) return { result };
     const [num,den] = pairs[plan.metric];
     const data = records.map(r => { try { return JSON.parse(r.data.detail_json) || {}; } catch { return {}; } });
     if (data.some(d => !Number.isFinite(d[num]) || !Number.isFinite(d[den]) ||
-        d[num] < 0 || d[den] < 0 || (d[den] === 0 && d[num] > 0))) return result;
+        d[num] < 0 || d[den] < 0 || (d[den] === 0 && d[num] > 0))) return { result };
     const n = data.reduce((s,d) => s+d[num],0), d = data.reduce((s,r) => s+r[den],0);
     result.value = d > 0 ? 100 * n / d : null;
     result.numerator = n;
     result.denominator = d;
   } else {
     const unit = records[0].data.unit;
-    if (!countUnits[unit] || records.some(row => row.data.unit !== unit)) return result;
+    if (!countUnits[unit]) return { result };
     result.total = records.reduce((s,r) => s+r.data.value,0);
     result.value = result.total / expected;
     result.unit = countUnits[unit] + (step === 7 ? ' в неделю' : ' в день');
   }
-  return result;
+  return { result, series: series.values().next().value };
+}
+
+function comparePeriods(before, after) {
+  if (before.reason || after.reason) return before.reason || after.reason;
+  if (before.series && after.series && before.series !== after.series)
+    return 'До и после выкладки использованы разные ряды.';
 }
 
 export function observedEffect(db, c, cutoff = today()) {
   const plan = c.body.watch;
+  validateEffectCutoff(cutoff);
   const asOf = time(cutoff);
-  if (!validDate(cutoff) || cutoff > today()) throw Error('Проверьте дату оценки.');
   const base = { plan, asOf:cutoff };
   const resolved = plan.deployed ? {} : resolveRollout(db,c.product,plan,cutoff);
   if (resolved.state) return {...base,...resolved};
@@ -236,13 +257,17 @@ export function observedEffect(db, c, cutoff = today()) {
   const beforeEnd = step === 7 ? deployed-weekday*day : deployed;
   const afterStart = step === 7 ? deployed+(7-weekday)*day : deployed+day;
   const start = beforeEnd-plan.baselineWeeks*7*day, end = afterStart+plan.observationWeeks*7*day;
-  const baseline = period(db,c.product,plan,start,beforeEnd,asOf,step);
-  const observed = period(db,c.product,plan,afterStart,end,asOf,step);
-  let control;
+  const before = period(db,c.product,plan,start,beforeEnd,asOf,step);
+  const after = period(db,c.product,plan,afterStart,end,asOf,step);
+  const baseline = before.result, observed = after.result;
+  const reason = comparePeriods(before,after);
+  let control, controlReason;
   if (plan.control) {
-    const controlBaseline = period(db,plan.control,plan,start,beforeEnd,asOf,step);
-    const controlObserved = period(db,plan.control,plan,afterStart,end,asOf,step);
-    const complete = Number.isFinite(controlBaseline.value) && Number.isFinite(controlObserved.value);
+    const controlBefore = period(db,plan.control,plan,start,beforeEnd,asOf,step);
+    const controlAfter = period(db,plan.control,plan,afterStart,end,asOf,step);
+    const controlBaseline = controlBefore.result, controlObserved = controlAfter.result;
+    controlReason = comparePeriods(controlBefore,controlAfter);
+    const complete = !controlReason && Number.isFinite(controlBaseline.value) && Number.isFinite(controlObserved.value);
     control = {
       product: plan.control,
       baseline: controlBaseline,
@@ -267,10 +292,10 @@ export function observedEffect(db, c, cutoff = today()) {
     checkAfter:date(end-day), unit:observed.unit || baseline.unit};
   if (breaks.length) return {...result, state:'Сравнение ограничено изменением учёта'};
   if (end-day > asOf) return {...result, state:'Ожидаем окончание окна наблюдения'};
-  if (!Number.isFinite(baseline.value) || !Number.isFinite(observed.value) || baseline.unit !== observed.unit)
-    return {...result, state:'Недостаточно сопоставимых наблюдений'};
+  if (reason || !Number.isFinite(baseline.value) || !Number.isFinite(observed.value))
+    return {...result, state:'Недостаточно сопоставимых наблюдений', ...(reason && { reason })};
   if (control && control.change == null)
-    return {...result, state:'Недостаточно сопоставимых наблюдений по контролю'};
+    return {...result, state:'Недостаточно сопоставимых наблюдений по контролю', ...(controlReason && { reason: controlReason })};
   const measured = {...result, actual:observed.value, change:observed.value-baseline.value};
   if (control && control.relativeChange == null)
     return {...measured, state:'Контроль требует проверки: нулевая база'};

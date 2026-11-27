@@ -14,7 +14,7 @@ export type ObservationPlan = {version:number; kind?:'archive-observation'; revi
   metric:string; title:string; segment:string; deployed:string|null; releaseId:string|null; sources?:Source[];
   taskId:string|null; baselineWeeks:number; observationWeeks:number; direction:string; condition:string|null; target:number|null;
   metricNote?:string; baselineNote?:string; control?:string};
-export type Observation = {state:string; plan:ObservationPlan; asOf:string; baseline?:Period; observed?:Period; unit?:string;
+export type Observation = {state:string; reason?:string; plan:ObservationPlan; asOf:string; baseline?:Period; observed?:Period; unit?:string;
   breaks?:Release[]; context?:Release[]; checkAfter?:string; change?:number;
   control?:{product:string; baseline:Period; observed:Period; relativeChange:number|null; tolerance:number};
   rollout?:{id:string; date:string; title?:string; sources:Source[]}; rolloutSources?:Source[]};
@@ -37,6 +37,7 @@ export function ObservationResult({value}:{value:Observation}) {
     .map(s => [s.version + s.loc, s])).values()];
   return <section aria-label="Результат проверки">
     <p><strong>{value.state}</strong></p>
+    {value.reason && <p>{value.reason}</p>}
     {plan && <>
       <p>{[plan.taskId, plan.releaseId || value.rollout?.id, plan.title, plan.segment].filter(Boolean).join(' · ')}</p>
       <dl className="comparison-dates">
@@ -129,6 +130,7 @@ export function EffectPlan({caseId, saved, reload, archiveOnly, readOnly}:{
     await run(input,check);
   }
   const cart = choices?.examples.cart, retro = choices?.examples.retro;
+  const linkedRollout = taskId === saved?.plan.taskId ? saved.rollout : undefined;
   return <>
     {saved && <ObservationResult value={saved}/>}
     {error && <p className="error" role="alert">{error}</p>}
@@ -140,7 +142,8 @@ export function EffectPlan({caseId, saved, reload, archiveOnly, readOnly}:{
         <option value="">Без привязки</option>{choices.tasks.map(t=><option key={t.id} value={t.id}>{t.id} · {t.title}</option>)}</select></label>
       <label>Выкладка из источника<select value={releaseId} onChange={e=>{const id=e.target.value; release(id);
         const linked=releases.find(r=>r.id===id)?.metrics.find(m=>choices.metrics.some(row=>row.id===m)); if (linked) chooseMetric(linked);}}>
-        <option value="">Дата не подтверждена</option>{releases.map(r=><option key={r.id} value={r.id}>{r.id} · {r.date} · {r.title}</option>)}</select></label>
+        <option value="">{linkedRollout ? linkedRollout.id + ' · ' + linkedRollout.date + ' (по связке с задачей)' :
+          'Дата не подтверждена'}</option>{releases.map(r=><option key={r.id} value={r.id}>{r.id} · {r.date} · {r.title}</option>)}</select></label>
       {!archiveOnly && !taskId && !releaseId && <label>Когда изменение вышло<input type="date" name="deployed" defaultValue={!plan?.releaseId ? plan?.deployed || '' : ''}/></label>}
       <label>Метрика проверки<select value={metric} onChange={e=>chooseMetric(e.target.value)}>{choices.metrics.map(m=><option key={m.id} value={m.id}>{m.title}</option>)}</select></label>
       {metricRow?.note && <p>{metricRow.note}</p>}

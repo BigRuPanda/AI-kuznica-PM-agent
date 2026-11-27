@@ -10,7 +10,7 @@ import { workspaceOperation } from '../server/workspace-operations.mjs';
 import { createTeamApp } from '../server/team-http.mjs';
 import { seedWatchFormats } from './watch-fixture.mjs';
 
-test('effect preview requires full comparable coverage and a linked rollout while watch persists the pending plan', () => {
+test('effect preview requires full comparable coverage and a linked rollout while watch persists the pending plan', t => {
   const store = openStore(':memory:', { seedDemo: false });
   try {
     initEvidence(store.db);
@@ -94,7 +94,10 @@ test('effect preview requires full comparable coverage and a linked rollout whil
     assert.equal(interrupted.actual, undefined);
     assert.equal(interrupted.change, undefined);
 
-    const pending = call('watch', { caseId: 'kaspersky', taskId: 'T-08', metric: 'cfg_add_to_cart_rate', segment: 'desktop' });
+    const clock = t.mock.timers;
+    clock.enable({ apis: ['Date'], now: new Date('2026-05-20T09:00:00Z') });
+    const plan = { caseId: 'kaspersky', taskId: 'T-08', metric: 'cfg_add_to_cart_rate', segment: 'desktop' };
+    const pending = call('watch', plan);
     assert.equal(pending.plan.deployed, null);
     assert.equal(pending.plan.releaseId, null);
     assert.equal(pending.checkAfter, undefined);
@@ -102,11 +105,30 @@ test('effect preview requires full comparable coverage and a linked rollout whil
     assert.match(pending.state, /Ожидаем/);
     assert.match(pending.plan.condition, /событием электронной торговли/);
     const savedPending = store.one("SELECT body FROM cases WHERE id='kaspersky'").body;
-    call('watch', { caseId: 'kaspersky', taskId: 'T-08', metric: 'cfg_add_to_cart_rate', segment: 'desktop' });
+    call('watch', plan);
     assert.equal(store.one("SELECT body FROM cases WHERE id='kaspersky'").body, savedPending);
     assert.equal(JSON.parse(store.one("SELECT body FROM cases WHERE id='kaspersky'").body).watch.deployed, null);
     assert.throws(() => call('watch', { caseId: 'kaspersky', taskId: 'T-08', metric: 'cfg_add_to_cart_rate', deployed: '2026-05-12' }),
       /из журнала релизов/);
+    clock.setTime(Date.parse('2026-06-03T09:00:00Z'));
+    importDocs(store, [{ file: 'FollowUp.xlsx', facts: [
+      table('backlog', 'Tasks!A2', { task_id: 'T-08', title: 'Kaspersky', release_id: 'R-09',
+        linked_metric_ids: 'cfg_add_to_cart_rate' }),
+      table('backlog', 'Tasks!A3', { task_id: 'T-09', title: 'Kaspersky', linked_metric_ids: 'cfg_add_to_cart_rate' }),
+      table('releases', 'Release!A2', { ...release('R-09', '2026-06-02', 'minor', 'cfg_add_to_cart_rate', 'T-08'),
+        description: 'Конфигуратор Kaspersky' }),
+    ] }], { notify: false });
+    const resolved = call('view', { caseId: plan.caseId }).effect;
+    assert.equal(resolved.rollout.id, 'R-09');
+    const edited = call('watch', { ...plan, target: 12 });
+    assert.deepEqual(edited.rollout, resolved.rollout);
+    assert.equal(edited.plan.scheduledOn, pending.plan.scheduledOn);
+    assert.equal(edited.plan.sourceCursor, pending.plan.sourceCursor);
+    assert.equal(edited.plan.target, 12);
+    const different = call('watch', { ...plan, taskId: 'T-09', target: 12 });
+    assert.equal(different.rollout, undefined);
+    assert.equal(different.plan.scheduledOn, '2026-06-03');
+    assert.ok(different.plan.sourceCursor > pending.plan.sourceCursor);
   } finally {
     store.close();
   }
@@ -158,6 +180,19 @@ test('both saved version 2 formats and the legacy target survive a restart and r
   open();
   seedWatchFormats(store);
   const before = verify();
+  const preview = (caseId, asOf) => call('effect-preview', { caseId, asOf });
+  const legacy = preview('saved-percent', '2026-02-01');
+  assert.equal(legacy.state, 'Ожидаем данные после исправления');
+  assert.equal(legacy.actual, undefined);
+  assert.deepEqual([legacy.weeks, legacy.controlWeeks], [0, 0]);
+  assert.equal(preview('saved-percent', '2026-02-07').weeks, 0);
+  assert.equal(preview('saved-percent', '2026-02-08').weeks, 1);
+  assert.equal(preview('saved-percent', '2026-02-28').actual, undefined);
+  assert.equal(preview('saved-percent', '2026-03-01').actual, 110);
+  for (const caseId of ['saved-percent', 'saved-measurement', 'saved-observation']) {
+    for (const invalid of ['', '2026-2-03', '2026-02-30', '2099-01-01'])
+      assert.throws(() => preview(caseId, invalid), /дату оценки/i);
+  }
   store.close();
   open();
   assert.deepEqual(verify(), before);
@@ -166,6 +201,50 @@ test('both saved version 2 formats and the legacy target survive a restart and r
   assert.equal(incomplete.observed.count, 4);
   assert.equal(incomplete.observed.expected, 5);
   assert.match(incomplete.state, /Недостаточно сопоставимых наблюдений/);
+});
+
+test('archive watches require complete periods from one comparable series before notifying', async t => {
+  const invalidRows = {
+    partial: i => i === 3 ? { partial: true } : {},
+    cadence: i => i === 3 ? { step_days: 7 } : {},
+    mixed: i => i === 3 ? { source_id: 'alternate' } : {},
+    switched: () => ({ definition_id: 'updated' }),
+  };
+  for (const [variant, override] of Object.entries(invalidRows)) await t.test(variant, async t => {
+    const dir = mkdtempSync(join(tmpdir(), 'archive-watch-'));
+    const env = { SOURCE_ARCHIVE_SHA256: 'fixture', NOTIFICATION_CHANNELS: 'smtp' };
+    const app = createTeamApp({ base: join(dir, 'watches.sqlite'), env, background: false });
+    t.after(async () => {
+      await app.close();
+      rmSync(dir, { recursive: true, force: true, maxRetries: 3 });
+    });
+    const store = app.space('team');
+    const product = 'Astra Linux', metric = 'cfg_family_views';
+    const samples = (start, value, overrides) => Array.from({ length: 7 }, (_, i) => ({
+      kind: 'metrics', loc: 'Metrics!A' + (start + i), row: { product, metric_id: metric, segment: 'desktop',
+        unit: 'visits', date: '2026-05-' + String(start + i).padStart(2, '0'), value, ...overrides?.(i) },
+    }));
+    importDocs(store, [{ file: 'Archive.xlsx', facts: [
+      { kind: 'dictionary', loc: 'Metrics!B2', row: { metric_id: metric, metric_name: 'Визиты' } },
+      { kind: 'releases', loc: 'Releases!A2', row: { release_id: 'R-02', release_date: '2026-05-12',
+        description: product, status: 'выпущен', release_type: 'minor', affected_metrics: metric } },
+      ...samples(5, 10), ...samples(13, 20, override),
+    ] }], { notify: false });
+    store.db.prepare("INSERT INTO cases VALUES('archive',?,?,'Исследуем','{}')").run(product, 'Наблюдение');
+    const user = { id: 'admin', role: 'admin' };
+    const watch = workspaceOperation(store, user, 'watch', {
+      caseId: 'archive', metric, segment: 'desktop', releaseId: 'R-02', baselineWeeks: 1, observationWeeks: 1,
+      target: 15,
+    }, env);
+    assert.equal(watch.baseline.value, 10);
+    assert.equal(watch.actual, undefined);
+    assert.equal(watch.state, 'Недостаточно сопоставимых наблюдений');
+    if (variant === 'mixed') assert.equal(watch.reason, 'В окне есть строки из разных рядов.');
+    if (variant === 'switched') assert.equal(watch.reason, 'До и после выкладки использованы разные ряды.');
+    await app.tick();
+    assert.equal(store.one("SELECT state FROM cases WHERE id='archive'").state, 'Наблюдаем эффект');
+    assert.equal(store.one('SELECT count(*) AS n FROM deliveries').n, 0);
+  });
 });
 
 test('background calculation dispatches all three watch formats and queues each due result once', async t => {
@@ -182,15 +261,17 @@ test('background calculation dispatches all three watch formats and queues each 
   let store = app.space('team');
   seedWatchFormats(store);
   const rows = () => store.db.prepare(
-    "SELECT json_extract(body,'$.caseId') caseId FROM deliveries ORDER BY caseId",
-  ).all().map(row => row.caseId);
+    "SELECT body FROM deliveries ORDER BY json_extract(body,'$.caseId')",
+  ).all().map(row => JSON.parse(row.body));
   const expected = ['saved-measurement', 'saved-observation', 'saved-percent'];
   await Promise.all([app.tick(), app.tick(), app.tick()]);
-  assert.deepEqual(rows(), expected);
+  assert.deepEqual(rows().map(row => row.caseId), expected);
+  assert.equal(rows().find(row => row.caseId === 'saved-observation').awaitingOwner, true);
+  assert.equal(rows().find(row => row.caseId === 'saved-percent').awaitingOwner, undefined);
   for (const id of expected) assert.equal(store.one('SELECT state FROM cases WHERE id=?', id).state, 'Нужно решение');
   await app.close();
   app = start();
   store = app.space('team');
   await app.tick();
-  assert.deepEqual(rows(), expected);
+  assert.deepEqual(rows().map(row => row.caseId), expected);
 });

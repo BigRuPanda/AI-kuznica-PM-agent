@@ -5,10 +5,11 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createTeamApp } from '../server/team-http.mjs';
 import { createThread, enqueue } from '../server/workbench.mjs';
-import { digest, getCase, importDocs } from '../server/evidence.mjs';
+import { digest, getCase, importDocs, updateCase } from '../server/evidence.mjs';
 import { observedEffect } from '../server/effect-plan.mjs';
 import { approveSource, importApproved, sourceHistory, sourcePermission } from '../server/source-policy.mjs';
 import { workspaceOperation } from '../server/workspace-operations.mjs';
+import { seedWatchFormats } from './watch-fixture.mjs';
 
 test('late approved rollout resolves a saved watch and notifies the product owner once with comparable data', async (t) => {
   const dir = await mkdtemp(join(tmpdir(), 'signal-effect-'));
@@ -221,4 +222,49 @@ test('background tick delivers a due observation while a chat job waits for the 
   assert.equal(closed,false);
   reply();
   await closing;
+});
+
+test('an archive result waits for an assigned owner and their verified contact', async t => {
+  const clock = t.mock.timers;
+  clock.enable({ apis: ['Date'], now: new Date('2026-05-20T09:00:00Z') });
+  const dir = await mkdtemp(join(tmpdir(), 'archive-effect-recipient-'));
+  const sent = [];
+  const app = createTeamApp({
+    base: join(dir, 'data.sqlite'), background: false,
+    env: { NOTIFICATIONS_ENABLED: 'true', NOTIFICATION_CHANNELS: 'smtp', SMTP_HOST: 'mail.invalid',
+      SMTP_FROM: 'sender@example.invalid', SMTP_TO: 'team@example.invalid' },
+    sendMail: (text, _env, to) => sent.push({ text, to }),
+  });
+  t.after(async () => {
+    await app.close();
+    await rm(dir, { recursive: true, force: true, maxRetries: 3 });
+  });
+  app.accounts.db.exec("INSERT INTO users(id,login,space,role) VALUES('product','prod','team','member')");
+  const store = app.space('team');
+  seedWatchFormats(store);
+  store.db.prepare("DELETE FROM cases WHERE id != 'saved-observation'").run();
+  const delivery = () => store.one("SELECT state,body FROM deliveries WHERE channel='smtp'");
+  async function tick() {
+    await app.tick();
+    await new Promise(setImmediate);
+  }
+  await tick();
+  assert.equal(getCase(store.db, 'saved-observation').state, 'Нужно решение');
+  assert.equal(delivery().state, 'queued');
+  assert.equal(JSON.parse(delivery().body).awaitingOwner, true);
+  assert.deepEqual(sent, []);
+
+  const c = getCase(store.db, 'saved-observation');
+  c.body.owner = 'product';
+  updateCase(store.db, c);
+  clock.setTime(Date.now() + 61_000);
+  await tick();
+  assert.equal(delivery().state, 'queued');
+  assert.deepEqual(sent, []);
+  app.accounts.db.exec("INSERT INTO email_contacts VALUES('product','product@example.invalid')");
+  clock.setTime(Date.now() + 61_000);
+  await tick();
+  await tick();
+  assert.equal(delivery().state, 'delivered');
+  assert.deepEqual(sent.map(message => message.to), ['product@example.invalid']);
 });
