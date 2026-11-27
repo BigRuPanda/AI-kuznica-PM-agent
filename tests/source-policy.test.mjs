@@ -91,6 +91,11 @@ test('reindexing an original archive preserves superseding revisions, old links,
   assert.ok(evidence[0].refs.every(r=>r.loc.endsWith('3')));
   const offline=await archiveAnswer(store,'LumenValve?',evidence,{LLM_DATA_MODE:'selection'},()=>assert.fail(), 'job');
   assert.equal(offline.readSources.length,2);
+  const rendered=await archiveAnswer(store,'LumenValve?',evidence,{
+    LLM_DATA_MODE:'analysis',LLM_BASE_URL:'http://localhost',LLM_MODEL:'fixture'
+  },()=>assert.fail('Do not rewrite a respondent’s account'), 'job');
+  assert.equal(rendered.outcome,'done');
+  assert.match(rendered.text,/Причина покупки — Нужна гарантия/);
   assert.equal(importApproved(store,[current],refresh,false).inserted,0);
 });
 
