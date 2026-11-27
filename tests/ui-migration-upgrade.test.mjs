@@ -288,7 +288,10 @@ async function signalBridge({ app, origin, store, user, token, expected, state, 
   assert.equal(evaluated.observed.value, observation.observed);
   assert.equal(evaluated.control?.relativeChange, observation.controlChange);
   assert.equal(evaluated.state, observation.state);
-  assert.deepEqual((await api(origin, 'knowledge-source', token, { version: source.version, loc: source.loc })).rows[0], source.row);
+  const savedSource = await api(origin, 'knowledge-source', token, { version: source.version, loc: source.loc });
+  assert.equal(savedSource.version, source.version);
+  // The historical sales row has no linked URLs or comparison offer.
+  assert.deepEqual(savedSource.rows[0], { ...source.row, links: [], offer: false });
 
   const { workPresentations } = await import('../server/presentations.mjs');
   const status = () => api(origin, 'presentation-status', token, { id: deck.id });
@@ -307,11 +310,19 @@ async function signalBridge({ app, origin, store, user, token, expected, state, 
 
   state.sends ??= [];
   const { deliver } = await import('../server/workbench.mjs');
-  for (let attempt = 0; attempt < 2; attempt++) {
-    await deliver(store, expected.env, noTransport, async (_text, _env, to) => state.sends.push(to), app.accounts.db);
+  const pending = () => db.prepare('SELECT id,state,attempts FROM deliveries WHERE id=?')
+    .all(deliveries.id).map(row => ({ ...row }));
+  const recordMail = async (_text, _env, to) => state.sends.push(to);
+  const smtp = { ...expected.env, NOTIFICATION_CHANNELS: 'smtp' };
+  if (boot === 1) {
+    await deliver(store, { ...smtp, NOTIFICATIONS_ENABLED: 'false' }, noTransport, recordMail, app.accounts.db);
+    assert.deepEqual(pending(), [{ id: deliveries.id, state: 'queued', attempts: 0 }]);
+    assert.deepEqual(state.sends, []);
   }
-  const deliveryRows = db.prepare('SELECT id,state,attempts FROM deliveries WHERE id=?').all(deliveries.id);
-  assert.deepEqual(deliveryRows.map(row => ({ ...row })), [{ id: deliveries.id, state: 'delivered', attempts: 1 }]);
+  for (let attempt = 0; attempt < 2; attempt++) {
+    await deliver(store, { ...smtp, NOTIFICATIONS_ENABLED: 'true' }, noTransport, recordMail, app.accounts.db);
+  }
+  assert.deepEqual(pending(), [{ id: deliveries.id, state: 'delivered', attempts: 1 }]);
   assert.deepEqual(state.sends, Array(deliveries.sends).fill(contact));
   assert.equal(db.prepare('SELECT count(*) AS n FROM redmine_results WHERE case_id=?').get(issue.caseId).n, 1);
   assert.equal(db.prepare("SELECT count(*) AS n FROM draft_actions WHERE id=? AND state='done'").get(issue.draft).n, 1);
