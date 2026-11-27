@@ -34,7 +34,7 @@ import { InterviewSearch } from './interview-search';
 import { Icon } from './icons';
 import { Dialog } from './dialog';
 import { ChatThreadRow } from './chat-thread-row';
-import type { ChatAction } from './chat-menu';
+import { ChatMenu, type ChatAction } from './chat-menu';
 import { ThemeProvider, ThemeSwitch } from './theme-switch';
 import { MetricRules } from './metric-rules';
 import { InvestigationSettings } from './investigation-settings';
@@ -276,6 +276,7 @@ function Chat({
   avatar,
   caseId,
   threads,
+  onThreadAction,
   action,
   onResult,
   context,
@@ -289,6 +290,7 @@ function Chat({
   avatar: User['avatar'];
   caseId?: string;
   threads: Thread[];
+  onThreadAction?: (thread: Thread, action: ChatAction) => void;
   action: Action;
   onResult?: (b: Msg['body']) => void;
   context?: string;
@@ -502,6 +504,7 @@ function Chat({
           <h3>{caseId ? 'Обсудить разбор' : activeThread?.title || 'Чат'}</h3>
           <small>{isGroup ? 'Командный чат' : 'Личный чат'}</small>
         </div>
+        {activeThread && onThreadAction && <ChatMenu thread={activeThread} onAction={onThreadAction} />}
       </header>
       <div className="conversation-body">
         <div
@@ -961,6 +964,14 @@ function ChatWorkspace({ home, id, avatar, action, refresh, onRename, onDelete }
   const [query, search] = useState('');
   const [listOpen, toggleList] = useState(false);
   const [listCollapsed, collapseList] = useState(false);
+  const [wide, setWide] = useState(() => matchMedia('(min-width: 821px)').matches);
+  useEffect(() => {
+    const media = matchMedia('(min-width: 821px)');
+    const update = () => setWide(media.matches);
+    media.addEventListener('change', update);
+    update();
+    return () => media.removeEventListener('change', update);
+  }, []);
   const [creating, create] = useState(false);
   const [saving, save] = useState(false);
   const [editing, edit] = useState<{ thread: Thread; action: ChatAction } | null>(null);
@@ -974,6 +985,8 @@ function ChatWorkspace({ home, id, avatar, action, refresh, onRename, onDelete }
     { id: 'personal', title: 'Личные', threads: threads.filter(thread => !thread.caseId) },
     { id: 'cases', title: 'Разборы', threads: threads.filter(thread => thread.caseId) },
   ];
+  const listHidden = wide ? listCollapsed : !listOpen;
+  const activeRowAvailable = !listHidden && groups.some(group => group.threads.some(thread => thread.id === activeId));
   const openAction = (thread: Thread, action: ChatAction) => edit({ thread, action });
 
   function removeChat(deleted: string) {
@@ -1020,7 +1033,7 @@ function ChatWorkspace({ home, id, avatar, action, refresh, onRename, onDelete }
           >
             <Icon name="chat" /> Список чатов <Icon name="down" />
           </button>
-          <div id="thread-panel-content" className="thread-panel-content">
+          <div id="thread-panel-content" className="thread-panel-content" inert={listHidden}>
             <label className="thread-search">
               <Icon name="search" />
               <span className="sr">Поиск чатов</span>
@@ -1048,6 +1061,7 @@ function ChatWorkspace({ home, id, avatar, action, refresh, onRename, onDelete }
           avatar={avatar}
           id={activeId}
           threads={home.threads}
+          onThreadAction={activeRowAvailable ? undefined : openAction}
           action={action}
         />
       </div>

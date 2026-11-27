@@ -8,7 +8,7 @@ export type ChatAction = 'rename' | 'delete';
 export function ChatMenu({ thread, onAction, onOpenChange }: {
   thread: Thread;
   onAction: (thread: Thread, action: ChatAction) => void;
-  onOpenChange: (open: boolean) => void;
+  onOpenChange?: (open: boolean) => void;
 }) {
   if (!thread.canRename && !thread.canDelete) return null;
   return (

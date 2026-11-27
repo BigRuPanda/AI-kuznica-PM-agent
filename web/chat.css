@@ -112,7 +112,8 @@
 }
 .thread-list a[aria-current='page'] { font-weight: 620; }
 .thread-title { overflow: clip; text-overflow: ellipsis; white-space: nowrap; }
-.thread-title-text { white-space: nowrap; }
+.thread-title[data-wrap='true'] { white-space: normal; overflow-wrap: anywhere; }
+.thread-title-measure { white-space: nowrap; }
 .thread-icon { display: grid; place-items: center; }
 .thread-menu-trigger {
   display: inline-grid;
@@ -237,6 +238,7 @@
   border-bottom: 1px solid var(--border);
 }
 .conversation-title { min-width: 0; flex: 1; }
+.conversation-heading .thread-menu-trigger { flex: none; }
 .conversation-heading h3 {
   margin: 0;
   overflow-wrap: anywhere;

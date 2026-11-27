@@ -489,7 +489,6 @@ test('Softline workspace, upgrade and browser journeys', async t => {
       assert.equal(await title.evaluate(el => getComputedStyle(el).textOverflow),'ellipsis');
       const menu = row.locator('.thread-menu-trigger');
       assert.equal(await menu.evaluate(el => getComputedStyle(el).pointerEvents),'none');
-      assert.equal(await admin.locator('.conversation-heading .thread-menu-trigger').count(),0);
       await row.hover();
       await menu.click();
       await visible(admin.getByRole('menuitem',{name:'Переименовать'}));
@@ -639,6 +638,123 @@ test('Softline workspace, upgrade and browser journeys', async t => {
     } finally {
       releaseThread();
       await touch.context().close();
+    }
+  });
+
+  await journey('active chat actions survive collapse and filtering', async () => {
+    const desktop = await login('admin','#chats', {
+      viewport:{width:821,height:844}, reducedMotion:'reduce',
+    });
+    let touch, participant;
+    try {
+      const actions = page => page.getByRole('region',{name:'Переписка'})
+        .getByRole('button',{name:/^Действия чата/});
+      const rows = page => page.getByRole('navigation',{name:'Переписки'});
+      const rename = page => page.getByRole('menuitem',{name:'Переименовать'});
+      const draft = field(desktop,'Вопрос агенту');
+      const search = field(desktop,'Поиск чатов');
+      const name = 'Ш'.repeat(120);
+      await role(desktop,'Новый чат').click();
+      const create = desktop.getByRole('dialog',{name:'Новый чат'});
+      await field(create,'Название').fill('Проверка меню активного чата');
+      await submit(desktop,'thread',()=>role(create,'Создать').click());
+      const original = rows(desktop).getByRole('link',{name:'Проверка меню активного чата'});
+      await visible(original);
+      const hash = await original.getAttribute('href');
+      await desktop.waitForURL(url => url.hash === hash);
+      assert.equal(await actions(desktop).count(),0);
+      await draft.fill('Черновик активного чата');
+      await role(desktop,'Свернуть список чатов').click();
+      await rows(desktop).waitFor({state:'hidden'});
+      assert.equal(await actions(desktop).count(),1,'Collapsed chat list needs a menu in the heading');
+      await actions(desktop).press('ArrowDown');
+      await visible(rename(desktop));
+      assert.equal(await desktop.getByRole('menuitem',{name:'Удалить чат'}).count(),1);
+      assert.ok(await rename(desktop).evaluate(el => el === document.activeElement));
+      await desktop.keyboard.press('Escape');
+      await rename(desktop).waitFor({state:'hidden'});
+      assert.ok(await actions(desktop).evaluate(el => el === document.activeElement));
+      await actions(desktop).press('Enter');
+      await rename(desktop).press('Enter');
+      const dialog = desktop.getByRole('dialog',{name:'Переименовать чат'});
+      await field(dialog,'Название').fill(name);
+      await submit(desktop,'rename-thread',()=>role(dialog,'Сохранить').click());
+      await dialog.waitFor({state:'hidden'});
+      assert.ok(await actions(desktop).evaluate(el => el === document.activeElement));
+      assert.equal(await draft.inputValue(),'Черновик активного чата');
+      assert.equal(new URL(desktop.url()).hash,hash);
+
+      await role(desktop,'Развернуть список чатов').click();
+      const row = rows(desktop).getByRole('link',{name});
+      await visible(row);
+      assert.equal(await actions(desktop).count(),0);
+      const fullyReadable = (page, locator) => page.waitForFunction(el => {
+        const bounds = el.getBoundingClientRect();
+        const range = document.createRange();
+        range.selectNodeContents(el);
+        const lines = Array.from(range.getClientRects());
+        return lines.length > 1 && lines.every(line =>
+          line.left >= Math.max(0,bounds.left)-1 &&
+          line.right <= Math.min(innerWidth,bounds.right)+1 &&
+          line.top >= bounds.top-1 && line.bottom <= bounds.bottom+1);
+      }, locator);
+      const label = row.locator('.thread-title');
+      await row.hover();
+      await fullyReadable(desktop,await label.elementHandle());
+      await desktop.mouse.move(2,2);
+      await search.focus();
+      await desktop.keyboard.press('Tab');
+      assert.ok(await row.evaluate(el => el === document.activeElement));
+      await fullyReadable(desktop,await label.elementHandle());
+      await search.fill('Беседы с таким названием нет');
+      await row.waitFor({state:'detached'});
+      await visible(actions(desktop));
+      assert.equal(await draft.inputValue(),'Черновик активного чата');
+      assert.equal(new URL(desktop.url()).hash,hash);
+      await actions(desktop).click();
+      await visible(rename(desktop));
+      await desktop.keyboard.press('Escape');
+      await desktop.setViewportSize({width:390,height:844});
+      await role(desktop,'Развернуть список чатов').click();
+      await search.fill('');
+      await visible(row);
+      assert.equal(await actions(desktop).count(),0);
+      await row.hover();
+      await fullyReadable(desktop,await label.elementHandle());
+      await desktop.mouse.move(2,2);
+      await search.focus();
+      await desktop.keyboard.press('Tab');
+      assert.ok(await row.evaluate(el => el === document.activeElement));
+      await fullyReadable(desktop,await label.elementHandle());
+
+      touch = await login('admin',hash, {
+        viewport:{width:390,height:844}, hasTouch:true, isMobile:true, reducedMotion:'reduce',
+      });
+      const touchTitle = touch.getByRole('heading',{name});
+      await visible(touchTitle);
+      await fullyReadable(touch,await touchTitle.elementHandle());
+      await actions(touch).tap();
+      await visible(rename(touch));
+      await touch.keyboard.press('Escape');
+      await role(touch,'Развернуть список чатов').tap();
+      await visible(rows(touch).getByRole('link',{name}));
+      assert.equal(await actions(touch).count(),0);
+
+      await go(desktop,'chats/group');
+      await visible(desktop.getByRole('region',{name:'Переписка'}).getByText('Командный чат',{exact:true}));
+      await role(desktop,'Свернуть список чатов').click();
+      await actions(desktop).click();
+      await visible(rename(desktop));
+      assert.equal(await desktop.getByRole('menuitem',{name:'Удалить чат'}).count(),0);
+      participant = await login('member','#chats/group',{
+        viewport:{width:390,height:844}, reducedMotion:'reduce',
+      });
+      await visible(participant.getByRole('region',{name:'Переписка'}).getByText('Командный чат',{exact:true}));
+      assert.equal(await actions(participant).count(),0);
+    } finally {
+      await desktop.context().close();
+      await touch?.context().close();
+      await participant?.context().close();
     }
   });
 

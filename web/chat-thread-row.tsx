@@ -3,7 +3,7 @@ import { ChatMenu, type ChatAction } from './chat-menu';
 import { Icon } from './icons';
 import type { Thread } from './team-data';
 
-type Placement = { top: number; left: number; width: number };
+type Placement = { top: number; left: number; width: number; wrap: boolean };
 
 export function ChatThreadRow({ thread, current, onSelect, onAction }: {
   thread: Thread;
@@ -19,36 +19,37 @@ export function ChatThreadRow({ thread, current, onSelect, onAction }: {
   const slot = useRef<HTMLDivElement>(null);
   const row = useRef<HTMLDivElement>(null);
   const label = useRef<HTMLSpanElement>(null);
-  const text = useRef<HTMLSpanElement>(null);
+  const measurement = useRef<HTMLSpanElement>(null);
   const highlighted = !touched && (hovered || keyboardFocused || menuOpen);
+  const { wrap, ...position } = placement ?? {};
 
   useLayoutEffect(() => {
     const anchor = slot.current;
-    const list = anchor?.parentElement;
+    const list = anchor?.closest('.thread-list');
     const item = row.current;
     const title = label.current;
-    const words = text.current;
+    const words = measurement.current;
     if (!highlighted || !anchor || !list || !item || !title || !words) {
       setPlacement(undefined);
       return;
     }
-    const wide = matchMedia('(min-width: 821px)');
     const align = () => {
       const origin = anchor.getBoundingClientRect();
       const viewport = list.getBoundingClientRect();
-      if (!wide.matches || origin.top < viewport.top - 1 || origin.bottom > viewport.bottom + 1) {
+      if (origin.top < viewport.top - 1 || origin.bottom > viewport.bottom + 1) {
         setPlacement(undefined);
         return;
       }
       const chrome = item.getBoundingClientRect().width - title.getBoundingClientRect().width;
-      const width = Math.min(Math.ceil(words.getBoundingClientRect().width + chrome),
-        document.documentElement.clientWidth - origin.left - 12);
-      if (width <= origin.width + 1) {
+      const naturalWidth = Math.ceil(words.scrollWidth + chrome);
+      if (naturalWidth <= origin.width + 1) {
         setPlacement(undefined);
         return;
       }
-      setPlacement(previous => previous?.top === origin.top && previous.left === origin.left && previous.width === width
-        ? previous : { top: origin.top, left: origin.left, width });
+      const width = Math.min(naturalWidth, document.documentElement.clientWidth - origin.left - 12);
+      const wrap = naturalWidth > width;
+      setPlacement(previous => previous?.top === origin.top && previous.left === origin.left &&
+        previous.width === width && previous.wrap === wrap ? previous : { top: origin.top, left: origin.left, width, wrap });
     };
     const observer = new ResizeObserver(align);
     observer.observe(anchor);
@@ -66,7 +67,7 @@ export function ChatThreadRow({ thread, current, onSelect, onAction }: {
 
   return (
     <div ref={slot} className="thread-slot">
-      <div ref={row} className="thread-row" data-expanded={!!placement} style={placement}
+      <div ref={row} className="thread-row" data-expanded={!!placement} style={position}
         onPointerEnter={event => {
           if (event.pointerType === 'touch') return;
           setTouched(false);
@@ -89,9 +90,10 @@ export function ChatThreadRow({ thread, current, onSelect, onAction }: {
             onSelect();
           }}>
           <span className="thread-icon"><Icon name={thread.scope === 'group' ? 'people' : 'chat'} /></span>
-          <span ref={label} className="thread-title" title={placement ? undefined : thread.title}>
-            <span ref={text} className="thread-title-text">{thread.title}</span>
+          <span ref={label} className="thread-title" data-wrap={wrap} title={placement ? undefined : thread.title}>
+            {thread.title}
           </span>
+          {highlighted && <span ref={measurement} className="sr thread-title-measure" aria-hidden="true">{thread.title}</span>}
         </a>
         <ChatMenu thread={thread} onAction={onAction} onOpenChange={setMenuOpen} />
       </div>
