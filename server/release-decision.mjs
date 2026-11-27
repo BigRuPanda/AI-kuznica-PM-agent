@@ -40,7 +40,25 @@ function released({ data }) {
 }
 
 export function canDecideRelease(row, products) {
-  return released(row) && (isAccountFeature(row) || products.some(name => mentions(row.data.description, name)));
+  return matchedProducts(row, products).length > 0;
+}
+
+function matchedProducts(row, products) {
+  if (!released(row)) return [];
+  return isAccountFeature(row) ? ['ЛК'] : products.filter(name => mentions(row.data.description, name));
+}
+
+export function legacyReleaseProduct(db, releaseId) {
+  const archived = db.prepare(`SELECT json_extract(f.value,'$.row') AS body FROM documents d, json_each(d.body,'$.facts') f
+    WHERE json_extract(f.value,'$.kind')='releases' AND json_extract(f.value,'$.row.release_id')=?`).all(releaseId);
+  const rows = [...facts(db, 'releases').filter(row => row.data.release_id === releaseId),
+    ...archived.map(row => ({ data: JSON.parse(row.body) }))];
+  const archivedProducts = db.prepare(`SELECT DISTINCT json_extract(f.value,'$.row.product_family') AS product
+    FROM documents d, json_each(d.body,'$.facts') f WHERE json_extract(f.value,'$.kind')='sales'`).all();
+  const products = [...new Set([...facts(db, 'sales').map(row => row.data.product_family),
+    ...archivedProducts.map(row => row.product)].filter(Boolean))];
+  const eligible = [...new Set(rows.flatMap(row => matchedProducts(row, products)))];
+  return eligible.length === 1 ? eligible[0] : null;
 }
 
 function interview(db, product) {

@@ -13,7 +13,7 @@ import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/
 import { createTeamApp } from '../server/team-http.mjs';
 import { digest, facts, importDocs } from '../server/evidence.mjs';
 import { saveMetricRule } from '../server/metric-rules.mjs';
-import { addUserMessage, enqueue, openCaseThread, openReleaseThread, saveReleaseDecisionContext, workJobs } from '../server/workbench.mjs';
+import { addUserMessage, enqueue, initWorkbench, openCaseThread, openReleaseThread, saveReleaseDecisionContext, workJobs } from '../server/workbench.mjs';
 import { workspaceOperation } from '../server/workspace-operations.mjs';
 import { readMaterial, saveMaterial } from '../server/materials.mjs';
 import { seedWorkspace, fixtureEnv } from './workspace-fixture.mjs';
@@ -282,6 +282,8 @@ test('release decisions preserve the historical cutoff, cited cells and manual i
     release('DEC-2', '2026-11-24', 'Поздний релиз Kaspersky', 3),
     release('DEC-3', '2026-10-02', 'Изменение Astra', 4, { related_task_ids: 'DEC-ASTRA' }),
     release('R-50', '2026-10-04', 'Карусель рекомендаций ЛК', 5, { affected_metrics: 'lk_reco_click_visits', related_task_ids: 'T-9' }),
+    release('MIX-1', '2026-10-03', 'Изменения для Astra и Kaspersky', 6),
+    release('OLD-1', '2026-10-01', 'Обновление Astra', 7),
     { kind: 'interview', loc: 'Интервью!L9', text: 'Темы ответа: Kaspersky · сложность выбора\nФрагмент записи: Неясно, какую лицензию выбрать' },
     { kind: 'backlog', loc: 'Задачи!A8', row: { task_id: 'DEC-T', title: 'Kaspersky: проверить сбор событий',
       created_date: '2026-09-20', status: 'New', description_short: 'Проверить передачу событий', linked_metric_ids: 'cfg_add_to_cart_rate' } },
@@ -300,9 +302,36 @@ test('release decisions preserve the historical cutoff, cited cells and manual i
     } });
   }
   importDocs(store, imported, { notify: false });
+  const legacy = digest(user.id + '/release/OLD-1');
+  const legacyMixed = digest(user.id + '/release/MIX-1');
+  store.db.exec('DROP TABLE release_threads; CREATE TABLE release_threads(thread TEXT PRIMARY KEY, release_id TEXT NOT NULL)');
+  for (const [id, releaseId] of [[legacy, 'OLD-1'], [legacyMixed, 'MIX-1']]) {
+    store.db.prepare("INSERT INTO conversations VALUES(?,?,'private',?)").run(id, user.id, 'Переименованный чат');
+    store.db.prepare('INSERT INTO release_threads VALUES(?,?)').run(id, releaseId);
+    addUserMessage(store.db, user, id, { text: 'Сообщение исходного чата ' + releaseId });
+  }
+  initWorkbench(store.db);
   const call = (op, body) => workspaceOperation(store, user, op, body, fixtureEnv, transport);
   const linked = call('create-case', { title: 'Связанный разбор Kaspersky', product: 'Kaspersky', release: 'DEC-2' });
   const unrelated = call('create-case', { title: 'Обычный разбор Astra', product: 'Astra' });
+  const astraMixed = call('create-case', { title: 'Разбор Astra', product: 'Astra', release: 'MIX-1' });
+  const kasperskyMixed = call('create-case', { title: 'Разбор Kaspersky', product: 'Kaspersky', release: 'MIX-1' });
+  const astraScope = call('release_decision', { releaseId: 'MIX-1', product: 'Astra' });
+  const kasperskyScope = call('release_decision', { releaseId: 'MIX-1', product: 'Kaspersky' });
+  const astraMixedChat = openReleaseThread(store, user, astraScope);
+  assert.notEqual(astraMixedChat, legacyMixed);
+  addUserMessage(store.db, user, astraMixedChat, { text: 'Частные выводы Astra' });
+  const kasperskyMixedChat = openReleaseThread(store, user, kasperskyScope);
+  assert.notEqual(kasperskyMixedChat, astraMixedChat);
+  assert.notEqual(kasperskyMixedChat, legacyMixed);
+  assert.equal(openCaseThread(store.db, user, astraMixed.id), astraMixedChat);
+  assert.equal(openCaseThread(store.db, user, kasperskyMixed.id), kasperskyMixedChat);
+  addUserMessage(store.db, user, kasperskyMixedChat, { text: 'Частные выводы Kaspersky' });
+  const kasperskyContext = saveReleaseDecisionContext(store.db, user, kasperskyScope);
+  assert.throws(() => enqueue(store, user, { thread: astraMixedChat, question: 'Каков эффект?', decisionContext: kasperskyContext }),
+    /другой переписке/);
+  assert.equal(openReleaseThread(store, user, call('release_decision', { releaseId: 'OLD-1' })), legacy);
+  assert.equal(store.db.prepare('SELECT product FROM release_threads WHERE thread=?').get(legacy).product, 'Astra');
   assert.throws(() => call('release-tracker-draft', { caseId: linked.id, releaseId: 'DEC-1' }), /другому релизу/);
   assert.equal(call('release_decision', { releaseId: 'DEC-1' }).caseId, null);
   assert.equal(call('release_decision', { releaseId: 'DEC-2' }).asOf, '2026-11-24');
@@ -362,9 +391,21 @@ test('release decisions preserve the historical cutoff, cited cells and manual i
   await visible(page.getByText('Исторический срез · 08.11.2026', { exact: true }));
   await field(page, 'Семейство или раздел').selectOption('Astra');
   await visible(page.getByRole('heading', { name: 'Astra', exact: true }));
+  await field(page, 'Релиз').selectOption('DEC-3');
+  await visible(page.locator('.decision-hero').getByText('DEC-3 · 02.10.2026', { exact: true }));
   assert.equal(await field(page, 'Релиз').inputValue(), 'DEC-3');
   await role(page, 'Открыть чат разбора').click();
   await visible(page.getByText('История до создания связанного разбора', { exact: true }));
+
+  await field(page, 'Релиз').selectOption('MIX-1');
+  await role(page, 'Открыть чат разбора').click();
+  await visible(page.getByText('Частные выводы Astra', { exact: true }));
+  assert.equal(await page.getByText('Частные выводы Kaspersky', { exact: true }).count(), 0);
+  await field(page, 'Семейство или раздел').selectOption('Kaspersky');
+  await field(page, 'Релиз').selectOption('MIX-1');
+  await role(page, 'Открыть чат разбора').click();
+  await visible(page.getByText('Частные выводы Kaspersky', { exact: true }));
+  assert.equal(await page.getByText('Частные выводы Astra', { exact: true }).count(), 0);
 
   await page.goto(base + '/#release-detail/DEC-2');
   await page.getByRole('link', { name: 'Решение по релизу', exact: true }).click();

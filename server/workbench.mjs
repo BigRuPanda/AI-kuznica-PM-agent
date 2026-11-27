@@ -41,7 +41,7 @@ import {
 } from './agent-research.mjs';
 import { asksToDraw, chartFindings, chartObservations, resolveChartFocus } from './chart-focus.mjs';
 import { dayComparison, explicitDayWindow, investigationPeriod } from './day-comparison.mjs';
-import { canDecideRelease } from './release-decision.mjs';
+import { canDecideRelease, legacyReleaseProduct } from './release-decision.mjs';
 
 const chatItemColumns = '(seq INTEGER PRIMARY KEY AUTOINCREMENT,thread TEXT,author TEXT,role TEXT,body TEXT,created INTEGER);';
 
@@ -157,37 +157,55 @@ export function thread(db, user, id) {
   if (!t || (t.scope !== 'group' && t.owner !== user.id)) throw Error('Беседа недоступна');
   return t;
 }
+function hasOtherReleaseContext(db, id, releaseId, product) {
+  return !!db.prepare(`SELECT 1 FROM jobs WHERE thread=? AND json_extract(body,'$.decisionReleaseId')=?
+    AND COALESCE(json_extract(body,'$.releaseDecisionSnapshot.product'),json_extract(body,'$.product'))<>? LIMIT 1`)
+    .get(id, releaseId, product);
+}
+function releaseThreadProduct(db, row) {
+  const product = row.product || legacyReleaseProduct(db, row.release_id);
+  return product && !hasOtherReleaseContext(db, row.thread, row.release_id, product) ? product : null;
+}
 export function openCaseThread(db, user, caseId) {
   const c = visibleCase(db, user, caseId);
-  const linked = c.body.release && db.prepare(`SELECT c.id FROM release_threads r JOIN conversations c ON c.id=r.thread
-    WHERE r.case_id=? AND r.release_id=? AND c.owner=? AND c.scope='private'`).get(c.id, c.body.release, user.id);
-  if (linked) return linked.id;
-  const id = caseThreadId(user.id, c.id);
+  const releaseId = c.body.release;
+  const linked = releaseId && db.prepare(`SELECT r.* FROM release_threads r JOIN conversations c ON c.id=r.thread
+    WHERE r.case_id=? AND r.release_id=? AND c.owner=? AND c.scope='private'`).all(c.id, releaseId, user.id)
+    .find(row => releaseThreadProduct(db, row) === c.product);
+  if (linked) return linked.thread;
+  const original = caseThreadId(user.id, c.id);
+  const id = releaseId && hasOtherReleaseContext(db, original, releaseId, c.product)
+    ? digest(JSON.stringify(['case-thread', user.id, c.id])) : original;
   db.prepare("INSERT OR IGNORE INTO conversations VALUES(?,?,'private',?)").run(id, user.id, c.title);
   return id;
 }
-const releaseThreadId = (user, releaseId) => digest(user.id + '/release/' + releaseId);
+const legacyReleaseThreadId = (user, releaseId) => digest(user.id + '/release/' + releaseId);
 export function openReleaseThread(store, user, decision) {
   const { db } = store;
   const releaseId = decision.release.id;
-  const dedicated = releaseThreadId(user, releaseId);
+  const product = decision.product;
+  const legacy = legacyReleaseThreadId(user, releaseId);
   const linkedCase = decision.caseId && decision.scope !== 'account' && visibleCase(db, user, decision.caseId);
-  const caseId = linkedCase?.body?.release === releaseId ? linkedCase.id : null;
+  const caseId = linkedCase?.body?.release === releaseId && linkedCase.product === product ? linkedCase.id : null;
   return store.tx(() => {
-    const existing = db.prepare(`SELECT c.id FROM conversations c LEFT JOIN release_threads r ON r.thread=c.id
-      WHERE c.owner=? AND c.scope='private' AND (r.release_id=? OR c.id=?)
-      ORDER BY (c.id=?) DESC, c.rowid LIMIT 1`).get(user.id, releaseId, dedicated, dedicated);
-    const id = existing?.id ?? (caseId ? openCaseThread(db, user, caseId) : dedicated);
+    const candidates = db.prepare(`SELECT c.id AS thread, r.release_id, r.product, r.case_id
+      FROM conversations c LEFT JOIN release_threads r ON r.thread=c.id
+      WHERE c.owner=? AND c.scope='private' AND (r.release_id=? OR (r.release_id IS NULL AND c.id=?))
+      ORDER BY (c.id=?) DESC, c.rowid`).all(user.id, releaseId, legacy, legacy);
+    const existing = candidates.find(row => (!caseId || !row.case_id || row.case_id === caseId) &&
+      releaseThreadProduct(db, { ...row, release_id: releaseId }) === product);
+    const id = existing?.thread ?? (caseId ? openCaseThread(db, user, caseId) :
+      digest(JSON.stringify(['release-thread', user.id, releaseId, product])));
     db.prepare("INSERT OR IGNORE INTO conversations VALUES(?,?,'private',?)")
-      .run(id, user.id, decision.product + ' · ' + releaseId);
+      .run(id, user.id, product + ' · ' + releaseId);
     db.prepare(`INSERT INTO release_threads(thread,release_id,case_id,product) VALUES(?,?,?,?)
       ON CONFLICT(thread) DO UPDATE SET case_id=COALESCE(case_id,excluded.case_id),product=COALESCE(product,excluded.product)`)
-      .run(id, releaseId, caseId, decision.product);
+      .run(id, releaseId, caseId, product);
     return id;
   });
 }
 export function bindReleaseThreadCase(db, user, releaseId, caseId, product) {
-  db.prepare(`UPDATE release_threads SET case_id=? WHERE release_id=? AND case_id IS NULL AND (product IS NULL OR product=?)
+  db.prepare(`UPDATE release_threads SET case_id=? WHERE release_id=? AND case_id IS NULL AND product=?
     AND thread IN (SELECT id FROM conversations WHERE owner=? AND scope='private')`).run(caseId, releaseId, product, user.id);
 }
 
@@ -276,19 +294,30 @@ export function enqueue(store, user, b, { telegramReply } = {}) {
     if (store.db.prepare('SELECT id FROM jobs WHERE id=?').get(id)) return id;
     const { decisionContext, decisionReleaseId: _release, decisionThrough: _through, releaseDecisionSnapshot: _snapshot, ...input } = b;
     b = input;
-    const release = store.db.prepare('SELECT release_id,product FROM release_threads WHERE thread=?').get(t.id);
-    const legacyRelease = !release && t.scope === 'private' && /^[a-f0-9]{64}$/.test(t.id) && facts(store.db, 'releases')
-      .find(row => releaseThreadId(user, row.data.release_id) === t.id)?.data.release_id;
-    if (legacyRelease) store.db.prepare('INSERT OR IGNORE INTO release_threads(thread,release_id) VALUES(?,?)').run(t.id, legacyRelease);
-    const releaseId = release?.release_id || legacyRelease;
+    let release = store.db.prepare('SELECT * FROM release_threads WHERE thread=?').get(t.id);
+    if (!release && t.scope === 'private' && /^[a-f0-9]{64}$/.test(t.id)) {
+      const legacy = facts(store.db, 'releases').find(row => legacyReleaseThreadId(user, row.data.release_id) === t.id);
+      if (legacy) release = { thread: t.id, release_id: legacy.data.release_id };
+    }
+    const product = release && releaseThreadProduct(store.db, release);
+    const releaseId = product && release.release_id;
+    if (product && !release.product) store.db.prepare(`INSERT INTO release_threads(thread,release_id,product) VALUES(?,?,?)
+      ON CONFLICT(thread) DO UPDATE SET product=excluded.product`).run(t.id, releaseId, product);
+    if (releaseId && b.caseId) {
+      const c = visibleCase(store.db, user, b.caseId);
+      if (c.product !== product || (c.body.release || c.body.signal?.releaseId) !== releaseId ||
+          (release.case_id && c.id !== release.case_id)) throw Error('Разбор относится к другой переписке.');
+    }
     if (decisionContext) {
       const snapshot = readReleaseDecisionContext(store.db, user, decisionContext);
-      if (snapshot.releaseId !== releaseId)
+      const snapshotCase = snapshot.decision.caseId;
+      if (snapshot.releaseId !== releaseId || snapshot.product !== product ||
+          (release.case_id && snapshotCase && snapshotCase !== release.case_id))
         throw Error('Срез относится к другой переписке.');
-      b = { ...b, caseId: snapshot.decision.caseId || undefined, decisionReleaseId: releaseId,
-        decisionThrough: snapshot.through, product: snapshot.product, releaseDecisionSnapshot: snapshot };
+      b = { ...b, caseId: snapshotCase || undefined, decisionReleaseId: releaseId,
+        decisionThrough: snapshot.through, product, releaseDecisionSnapshot: snapshot };
     } else if (releaseId) {
-      b = { ...b, decisionReleaseId: releaseId, product: release?.product || b.product };
+      b = { ...b, decisionReleaseId: releaseId, product };
     }
     if (b.caseId && t.scope === 'group' && getCase(store.db, b.caseId).body.owner)
       throw Error('Сначала опубликуйте личный разбор');
