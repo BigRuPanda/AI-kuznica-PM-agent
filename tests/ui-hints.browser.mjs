@@ -288,11 +288,13 @@ test('UI hints: chats', async t => {
 
 test('UI hints: cases', async t => {
   const page = await pageFor(t);
+  const errors = [];
+  page.on('pageerror', error => errors.push(error.message));
   await visit(page, 'cases');
   await showHint(page, button(page, 'Новый разбор'), 'Откроет форму личного исследования.');
   await page.mouse.move(5, 5);
   await tooltip(page).waitFor({ state: 'detached' });
-  await showHint(page, page.getByRole('link', { name: /Журнал релизов/ }), 'Откроет календарь из загруженных материалов.');
+  await showHint(page, navLink(page, 'Релизы'), 'Откроет календарь из загруженных материалов.');
   await button(page, 'Новый разбор').click();
   await page.mouse.move(5, 5);
   await showHint(page, button(page, 'Новый разбор'), 'Свернёт форму нового разбора.');
@@ -311,9 +313,17 @@ test('UI hints: cases', async t => {
   await showHint(page, button(dialog, 'Опубликовать'), 'Отправит выбранные материалы и вывод в командный чат.');
   await button(dialog, 'Отмена').click();
   await dialog.waitFor({ state: 'hidden' });
-  await showHint(page, page.getByText('Период расчёта', { exact: true }), 'Меняет даты, которые попадают в расчёт.');
+  const period = button(page, 'Период расчёта');
+  await showHint(page, period, 'Меняет даты, которые попадают в расчёт.');
   await page.keyboard.press('Escape');
-  await showHint(page, page.getByText('Поиск по интервью', { exact: true }), 'Ищет обезличенные выдержки по теме или цитате.');
+  await period.click();
+  const periodForm = page.getByRole('form', { name: 'Период расчёта', exact: true });
+  await periodForm.waitFor();
+  await page.keyboard.press('Escape');
+  await periodForm.waitFor({ state: 'hidden' });
+  assert.deepEqual(errors, []);
+  const interview = page.locator('.interview-search > summary');
+  await showHint(page, interview, 'Ищет обезличенные выдержки по теме или цитате.');
   await page.keyboard.press('Escape');
   await button(page, 'Сбросить вид').click();
   const reset = page.getByRole('dialog', { name: 'Сбросить вид?' });

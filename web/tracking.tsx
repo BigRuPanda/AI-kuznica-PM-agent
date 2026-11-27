@@ -4,6 +4,7 @@ import { HelpMarker } from './ui-hints';
 import type { Home } from './team-data';
 import { useTrackingVisibility } from './tracking-visibility';
 import type { Workbook } from './knowledge-source';
+import { Icon } from './icons';
 
 type Action = (fn: () => Promise<void>) => void;
 type Link = { key: string; url: string };
@@ -334,7 +335,11 @@ function Search({
           {service === 'issue' ? 'Поиск задач' : 'Поиск страниц'}
           <input value={q} onChange={(e) => setQuery(e.target.value)} />
         </label>
-        {service === 'issue' && <label><input type="checkbox" checked={generated} onChange={e => setGenerated(e.target.checked)} /> Только с меткой ai-generated</label>}
+        {service === 'issue' && <label className="tracker-search-switch">
+          <input type="checkbox" role="switch" className="search-switch-track"
+            checked={generated} onChange={e => setGenerated(e.target.checked)} />
+          Только с меткой ai-generated
+        </label>}
         <button>{service === 'issue' ? 'Найти похожие задачи' : 'Найти страницы'}</button>
       </form>
       {hits?.length === 0 && <p>Совпадений нет</p>}
@@ -635,7 +640,7 @@ function PageForm({
   );
 }
 export function Tracking({
-  headingRef,
+  panelRef,
   documentation,
   caseId,
   product,
@@ -652,7 +657,7 @@ export function Tracking({
   title: string;
   conclusion: string;
   home: Home;
-  headingRef?: React.Ref<HTMLHeadingElement>;
+  panelRef?: React.Ref<HTMLDetailsElement>;
   drafts: TrackerPreview[];
   action: Action;
   reload: () => Promise<void>;
@@ -687,57 +692,62 @@ export function Tracking({
   const site = home.integrations[tab];
   const latest = drafts.find((d) => d.kind === 'issue' && d.state === 'done')?.receipt;
   return (
-    <section className="paper task-panel">
-      <h3 ref={headingRef} tabIndex={-1}>{showConfluence ? 'Задачи и документация' : 'Задачи Redmine'}</h3>
-      {visibleTrackers.length > 1 && <div className="toolbar">
-        {visibleTrackers.map((t) => (
-          <button aria-pressed={t === tab} key={t} onClick={() => select(t)}>
-            {t === 'redmine' ? 'Redmine' : home.integrations.confluence.local ? 'База знаний' : 'Confluence'}
-          </button>
-        ))}
-      </div>}
-      <p className="muted">{site.local ? 'Локальное демо' : site.scope + ' · ' + site.url}</p>
-      {!site.local && !site.connected && !(tab === 'confluence' && params.get('page')) ? (
-        <a href="#settings/personal">Подключить личный доступ</a>
-      ) : tab === 'redmine' ? (
-        <IssueForm
-          caseId={caseId}
-          product={product}
-          canAttachReport={site.canAttachReport}
-          action={action}
-          reload={reload}
-          onIssue={(i) => pick(i.key)}
-        />
-      ) : (
-        <PageForm
-          caseId={caseId}
-          title={title}
-          conclusion={conclusion}
-          issueKey={picked || latest?.key || ''}
-          internal={Boolean(site.local)}
-          externalAvailable={!site.local && site.connected}
-          startPage={params.get('page') || undefined}
-          action={action}
-          reload={reload}
-        />
-      )}
-      {linkError && <p role="status">{linkError}</p>}
-      {otherLinks.length > 0 && (
-        <>
-          <h4>{showConfluence ? 'Связанные задачи и страницы' : 'Связанные задачи'}</h4>
-          {otherLinks.map((l) => (
-            <p key={l.url}>
-              <a href={l.url}>
-                {l.title} · {l.key}
-              </a>
-            </p>
+    <details className="paper task-panel" ref={panelRef}>
+      <summary>
+        <Icon name="cases" />
+        {showConfluence ? 'Задачи и документация' : 'Задачи Redmine'}
+      </summary>
+      <div className="task-panel-content">
+        {visibleTrackers.length > 1 && <div className="toolbar">
+          {visibleTrackers.map((t) => (
+            <button aria-pressed={t === tab} key={t} onClick={() => select(t)}>
+              {t === 'redmine' ? 'Redmine' : home.integrations.confluence.local ? 'База знаний' : 'Confluence'}
+            </button>
           ))}
-        </>
-      )}
-      {visibleDrafts.map((d) => (
-        <PreviewCard key={d.id} anchor={'case-draft-' + d.id} item={d} action={action} reload={reload} />
-      ))}
-    </section>
+        </div>}
+        <p className="muted">{site.local ? 'Локальное демо' : site.scope + ' · ' + site.url}</p>
+        {!site.local && !site.connected && !(tab === 'confluence' && params.get('page')) ? (
+          <a href="#settings/personal">Подключить личный доступ</a>
+        ) : tab === 'redmine' ? (
+          <IssueForm
+            caseId={caseId}
+            product={product}
+            canAttachReport={site.canAttachReport}
+            action={action}
+            reload={reload}
+            onIssue={(i) => pick(i.key)}
+          />
+        ) : (
+          <PageForm
+            caseId={caseId}
+            title={title}
+            conclusion={conclusion}
+            issueKey={picked || latest?.key || ''}
+            internal={Boolean(site.local)}
+            externalAvailable={!site.local && site.connected}
+            startPage={params.get('page') || undefined}
+            action={action}
+            reload={reload}
+          />
+        )}
+        {linkError && <p role="status">{linkError}</p>}
+        {otherLinks.length > 0 && (
+          <>
+            <h4>{showConfluence ? 'Связанные задачи и страницы' : 'Связанные задачи'}</h4>
+            {otherLinks.map((l) => (
+              <p key={l.url}>
+                <a href={l.url}>
+                  {l.title} · {l.key}
+                </a>
+              </p>
+            ))}
+          </>
+        )}
+        {visibleDrafts.map((d) => (
+          <PreviewCard key={d.id} anchor={'case-draft-' + d.id} item={d} action={action} reload={reload} />
+        ))}
+      </div>
+    </details>
   );
 }
 export function Connections({

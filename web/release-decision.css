@@ -1,14 +1,15 @@
 .overview-actions { display: flex; flex-wrap: wrap; align-items: center; gap: .6rem; }
 .release-decision { display: grid; gap: 1rem; }
 .release-decision :is(.page-head, .paper) { margin-block: 0; }
+.release-decision .paper > h2:first-child { margin-block-start: 0; }
 .decision-filters {
   display: flex;
   align-items: end;
   flex-wrap: wrap;
   gap: .75rem 1rem;
 }
-.decision-filters label { display: grid; gap: .35rem; min-width: 0; max-width: 100%; }
-.decision-filters select { max-width: 100%; }
+.decision-filters label { display: grid; gap: .35rem; min-width: 0; max-width: 100%; margin: 0; }
+.decision-filters :is(select, input, button) { min-block-size: 42px; }
 .decision-hero { align-items: start; }
 .decision-hero h2 { margin: .55rem 0; }
 .decision-next { display: grid; justify-items: start; gap: .6rem; }
@@ -30,7 +31,7 @@
 .decision-evidence { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 .decision-chat-grid { grid-template-columns: minmax(260px, .8fr) minmax(0, 1.2fr); }
 .decision-chat-grid > :only-child { grid-column: 1 / -1; }
-.decision-evidence h2 { font-size: 1.05rem; }
+.decision-evidence h2 { margin-block: 0 .65rem; font-size: 1.05rem; }
 .decision-evidence blockquote {
   margin: 1rem 0;
   border-inline-start: 2px solid currentColor;

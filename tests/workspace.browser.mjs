@@ -23,6 +23,7 @@ import { saveClosure } from '../server/redmine-bridge.mjs';
 const role = (p, name) => p.getByRole('button', { name, exact: true });
 const field = (p, name) => p.getByLabel(name);
 const visible = locator => locator.waitFor({ state: 'visible' });
+const redmineSummary = page => page.locator('.task-panel > summary').filter({ hasText: 'Задачи Redmine' });
 const pinActions = root => root.getByRole('button', {name:/Добавить в разбор|Добавлено ·|Убрать с экрана/});
 const submit = (page, operation, click) => Promise.all([
   page.waitForResponse(r => r.url().endsWith('/api/team/' + operation) && r.ok()), click()
@@ -390,6 +391,7 @@ test('release decisions preserve the historical cutoff, cited cells and manual i
   await field(page, 'Пароль').press('Enter');
   await page.getByRole('link', { name: 'Решение по релизу', exact: true }).click();
   await visible(page.getByRole('heading', { name: 'Решение по релизу' }));
+  const releaseSelect = field(page.locator('.decision-filters'), 'Релиз');
   await field(page, 'Семейство или раздел').selectOption('Kaspersky');
   await visible(page.getByText('«Неясно, какую лицензию выбрать»'));
   await page.getByRole('link', { name: /Интервью!L9/ }).click();
@@ -399,7 +401,7 @@ test('release decisions preserve the historical cutoff, cited cells and manual i
   await field(page, 'Дата среза').fill('2026-11-08');
   await role(page, 'Показать на дату').click();
   await visible(page.getByText('Исторический срез · 08.11.2026', { exact: true }));
-  assert.equal(await field(page, 'Релиз').locator('option[value="R-09"]').count(), 0);
+  assert.equal(await releaseSelect.locator('option[value="R-09"]').count(), 0);
   assert.equal(await page.getByText('«Неясно, какую лицензию выбрать»').count(), 0);
   await page.getByText('16 недель и исходные строки').click();
   await page.getByRole('link', { name: /Kaspersky!A20/ }).click();
@@ -408,18 +410,18 @@ test('release decisions preserve the historical cutoff, cited cells and manual i
   await visible(page.getByText('Исторический срез · 08.11.2026', { exact: true }));
   await field(page, 'Семейство или раздел').selectOption('Astra');
   await visible(page.getByRole('heading', { name: 'Astra', exact: true }));
-  await field(page, 'Релиз').selectOption('DEC-3');
+  await releaseSelect.selectOption('DEC-3');
   await visible(page.locator('.decision-hero').getByText('DEC-3 · 02.10.2026', { exact: true }));
-  assert.equal(await field(page, 'Релиз').inputValue(), 'DEC-3');
+  assert.equal(await releaseSelect.inputValue(), 'DEC-3');
   await role(page, 'Открыть чат разбора').click();
   await visible(page.getByText('История до создания связанного разбора', { exact: true }));
 
-  await field(page, 'Релиз').selectOption('MIX-1');
+  await releaseSelect.selectOption('MIX-1');
   await role(page, 'Открыть чат разбора').click();
   await visible(page.getByText('Частные выводы Astra', { exact: true }));
   assert.equal(await page.getByText('Частные выводы Kaspersky', { exact: true }).count(), 0);
   await field(page, 'Семейство или раздел').selectOption('Kaspersky');
-  await field(page, 'Релиз').selectOption('MIX-1');
+  await releaseSelect.selectOption('MIX-1');
   await role(page, 'Открыть чат разбора').click();
   await visible(page.getByText('Частные выводы Kaspersky', { exact: true }));
   assert.equal(await page.getByText('Частные выводы Astra', { exact: true }).count(), 0);
@@ -796,8 +798,7 @@ test('Softline workspace, upgrade and browser journeys', async t => {
 
   await journey('a new case started from the case list does not inherit a previous release', async () => {
     try {
-      await admin.getByRole('navigation').getByRole('link',{name:'Разборы',exact:true}).click();
-      await admin.getByRole('link',{name:'Журнал релизов →',exact:true}).click();
+      await admin.getByRole('navigation',{name:'Основные разделы'}).getByRole('link',{name:'Релизы',exact:true}).click();
       await admin.getByRole('link',{name:/DEMO-R/}).click();
       await role(admin,'Запланировать оценку').click();
       const releaseSelect = field(admin,'Связанный релиз');
@@ -982,7 +983,7 @@ test('Softline workspace, upgrade and browser journeys', async t => {
       const rows = admin.getByRole('navigation',{name:'Переписки'});
       const row = rows.locator('.thread-row').filter({has:admin.locator('[aria-current="page"]')});
       const title = row.locator('.thread-title');
-      assert.equal(await title.evaluate(el => getComputedStyle(el).textOverflow),'ellipsis');
+      assert.equal(await title.evaluate(el => getComputedStyle(el).whiteSpace),'normal');
       const menu = row.locator('.thread-menu-trigger');
       assert.equal(await menu.evaluate(el => getComputedStyle(el).pointerEvents),'none');
       await row.hover();
@@ -998,7 +999,7 @@ test('Softline workspace, upgrade and browser journeys', async t => {
       const width = admin.getByRole('separator',{name:'Ширина списка чатов'});
       await admin.mouse.move(10,10);
       await width.press('Home');
-      assert.ok(await title.evaluate(el => el.scrollWidth > el.clientWidth && getComputedStyle(el).whiteSpace === 'nowrap'));
+      assert.ok(await title.evaluate(el => el.scrollWidth <= el.clientWidth && el.getClientRects().length > 0));
       assert.equal(await title.getAttribute('title'),await title.textContent());
       const before = Number(await width.getAttribute('aria-valuenow'));
       const edge = await width.boundingBox();
@@ -1056,8 +1057,8 @@ test('Softline workspace, upgrade and browser journeys', async t => {
       await checkDock();
       await visible(admin.getByText('Очередь',{exact:true}).first());
       const atOpen = await discussion.boundingBox();
-      const investigation = await admin.getByRole('region',{name:'Исследование'}).boundingBox();
-      assert.ok(Math.abs(atOpen.y - investigation.y) <= 2);
+      const actionRow = await role(admin,'Собрать презентацию').boundingBox();
+      assert.ok(Math.abs(atOpen.y - actionRow.y) <= 2);
       assert.equal(await admin.getByRole('separator',{name:'Высота обсуждения'}).count(),0);
       await admin.evaluate(() => window.scrollBy(0,370));
       await checkDock();
@@ -1106,7 +1107,7 @@ test('Softline workspace, upgrade and browser journeys', async t => {
       const touchMenu = touch.getByRole('button',{name:'Действия чата «Исходная переписка»'});
       await touchMenu.tap();
       await visible(touch.getByRole('menuitem',{name:'Переименовать'}));
-      assert.equal(await touchMenu.evaluate(el => el.closest('.thread-row').dataset.expanded),'false');
+      assert.equal(await touchMenu.evaluate(el => getComputedStyle(el.closest('.thread-row')).position),'static');
       await touch.keyboard.press('Escape');
       await touch.setViewportSize({width:390,height:844});
       await role(touch,'Развернуть список чатов').tap();
@@ -1437,7 +1438,10 @@ test('Softline workspace, upgrade and browser journeys', async t => {
     const endpoint = base+'/api/team/integration-config';
     const service = 'redmine';
     const overview = await admin.request.post(base+'/api/team/overview',{data:{}});
-    const previous = (await overview.json()).integrations[service];
+    const { integrations, cases } = await overview.json();
+    const previous = integrations[service];
+    const signalCase = cases.find(item => item.body.signal && item.body.signal.status !== 'withdrawn');
+    assert.ok(signalCase);
     try {
       await go(admin,'settings');
       await admin.getByText('Адрес и назначение команды',{exact:true}).click();
@@ -1447,8 +1451,12 @@ test('Softline workspace, upgrade and browser journeys', async t => {
       await visible(admin.getByText('https://settings-redmine.test · settings',{exact:true}));
       assert.equal(await role(admin,'Подключить Redmine').count(),0);
 
-      await go(member,caseRoute);
-      const connect = member.getByRole('link',{name:'Подключить личный доступ'});
+      await go(member,'case/'+signalCase.id);
+      const prepare = role(member,'Подготовить задачу по сигналу');
+      await visible(prepare);
+      assert.equal(await prepare.isEnabled(),false);
+      await redmineSummary(member).click();
+      const connect = member.locator('.task-panel').getByRole('link',{name:'Подключить личный доступ'});
       await connect.click();
       assert.equal(new URL(member.url()).hash,'#settings/personal');
       await visible(member.getByRole('heading',{name:'Личные подключения'}));
@@ -1508,15 +1516,18 @@ test('Softline workspace, upgrade and browser journeys', async t => {
     await visible(panel.getByText('Гипотеза «'+hypothesis+'» · опровергает',{exact:true}));
     assert.ok(await member.evaluate(()=>document.documentElement.scrollWidth <= innerWidth));
 
-    await member.getByText('Период расчёта',{exact:true}).click();
-    await field(member,'Срез по дату включительно').fill('2026-10-08');
-    await submit(member,'view',()=>role(member,'Применить период').click());
+    const period = member.getByRole('form',{name:'Период расчёта',exact:true});
+    const periodButton = role(member,'Период расчёта');
+    await periodButton.click();
+    await field(period,'Срез по дату включительно').fill('2026-10-08');
+    await submit(member,'view',()=>role(period,'Применить период').click());
     await panel.getByText('Интервью по 2026-10-08 включительно').waitFor({state:'attached'});
     assert.deepEqual(fromUploadedBook(await findExcerpts()).map(hit => hit.data),[positive]);
     await visible(panel.getByText(positive,{exact:true}));
     assert.equal(await panel.getByText(negative,{exact:true}).count(),0);
-    await field(member,'Срез по дату включительно').fill('');
-    await submit(member,'view',()=>role(member,'Применить период').click());
+    await periodButton.click();
+    await field(period,'Срез по дату включительно').fill('');
+    await submit(member,'view',()=>role(period,'Применить период').click());
   });
 
   await journey('signal, publication to the team and effect monitoring', async () => {
@@ -1564,9 +1575,17 @@ test('Softline workspace, upgrade and browser journeys', async t => {
     await go(member, route);
     assert.equal(await member.locator('#case-draft-' + draft.id).count(), 0);
     const panel = member.locator('.task-panel');
+    await redmineSummary(member).click();
     await field(panel, 'Поиск задач').fill(draft.title);
-    await field(panel, 'Только с меткой ai-generated').check();
-    await submit(member, 'issue_search', () => role(panel, 'Найти похожие задачи').click());
+    const generated = panel.getByRole('switch', {name:'Только с меткой ai-generated'});
+    assert.equal(await generated.isChecked(),false);
+    await generated.press('Space');
+    assert.equal(await generated.isChecked(),true);
+    const [filtered] = await submit(member, 'issue_search', () => role(panel, 'Найти похожие задачи').click());
+    assert.equal(filtered.request().postDataJSON().origin,'ai-generated');
+    await generated.uncheck();
+    const [unfiltered] = await submit(member, 'issue_search', () => role(panel, 'Найти похожие задачи').click());
+    assert.equal(unfiltered.request().postDataJSON().origin,undefined);
     const result = role(panel, receipt.key + ' · ' + draft.title + ' · ai-generated');
     await submit(member, 'issue_read', () => result.click());
     await visible(panel.getByText('Происхождение задачи · ai-generated', {exact:true}));
@@ -1581,7 +1600,7 @@ test('Softline workspace, upgrade and browser journeys', async t => {
     }
     await go(admin,caseRoute);
     const panel=admin.locator('.task-panel');
-    await visible(panel.getByRole('heading',{name:'Задачи Redmine'}));
+    await redmineSummary(admin).click();
     assert.equal(await panel.getByRole('button',{name:/^(Redmine|Confluence)$/}).count(),0);
     const draft=admin.locator('.tracker-preview').filter({hasText:'Исходный черновик'});
     await submit(admin,'confirm',()=>role(draft,'Подтвердить запись').click());
@@ -1599,6 +1618,7 @@ test('Softline workspace, upgrade and browser journeys', async t => {
     const receipt=await post('confirm',{id:page.id,revision:page.revision});
     assert.equal((await post('page_read',{key:receipt.key})).title,'Результаты приёмки');
     await admin.reload();
+    await redmineSummary(admin).click();
     await visible(issue);
     assert.equal(await panel.getByText('Результаты приёмки').count(),0);
     await issue.click();
@@ -1606,6 +1626,7 @@ test('Softline workspace, upgrade and browser journeys', async t => {
     assert.equal(await admin.getByText(/Confluence/i).count(),0);
     assert.equal(await admin.locator('a[href*="#demo-page/"]').count(),0);
     await go(member,caseRoute);
+    await redmineSummary(member).click();
     await visible(member.locator('a[href="'+issueHref+'"]'));
     assert.equal(await member.getByText('Результаты приёмки').count(),0);
     let pageReads=0;
@@ -1717,30 +1738,38 @@ test('Softline workspace, upgrade and browser journeys', async t => {
 
   await journey('a historical period survives reload and reaches the filter, chat, MCP and saved calculations', async () => {
     await go(admin,caseRoute);
-    const options = admin.getByText('Период расчёта',{exact:true});
-    await options.click();
+    const options = admin.getByRole('form',{name:'Период расчёта',exact:true});
+    const periodButton = role(admin,'Период расчёта');
+    await periodButton.click();
     const from = '2026-09-07', through = '2026-09-13';
-    await field(admin,'Начало периода').fill(from);
-    await field(admin,'Срез по дату включительно').fill(through);
+    const start = field(options,'Начало периода'), end = field(options,'Срез по дату включительно');
+    await start.fill('2026-09-14');
+    await end.fill(through);
+    await role(options,'Применить период').click();
+    await visible(options.getByRole('alert').filter({hasText:'Начало периода должно быть не позже конца.'}));
+    await start.fill(from);
     const historicalView = full => admin.waitForResponse(r => {
       if (!r.url().endsWith('/api/team/view') || !r.ok()) return false;
       const args = r.request().postDataJSON();
       return args?.from === from && args?.through === through && args?.full === full;
     });
-    const [selected] = await Promise.all([historicalView(false),role(admin,'Применить период').click()]);
+    const [selected] = await Promise.all([historicalView(false),role(options,'Применить период').click()]);
+    await options.waitFor({state:'hidden'});
     const calculated = (await selected.json()).view;
     assert.equal(calculated.base,from);
     assert.equal(calculated.cut,through);
     assert.deepEqual(calculated.summary[0].rows.map(r=>r.week),[from]);
-    const filter = field(admin,'Только полные недели');
+    const filter = admin.getByRole('switch',{name:'Только полные недели',exact:true});
     const [filtered] = await Promise.all([historicalView(true),filter.check()]);
     const fullView = (await filtered.json()).view;
     assert.equal(fullView.cut,through);
     assert.equal(fullView.full,true);
     await Promise.all([historicalView(true),admin.reload()]);
-    await options.click();
-    assert.equal(await field(admin,'Начало периода').inputValue(),from);
-    assert.equal(await field(admin,'Срез по дату включительно').inputValue(),through);
+    await periodButton.click();
+    assert.equal(await start.inputValue(),from);
+    assert.equal(await end.inputValue(),through);
+    await admin.keyboard.press('Escape');
+    await options.waitFor({state:'hidden'});
     assert.equal(await filter.isChecked(),true);
 
     const proof = admin.locator('.card-summary');
@@ -1774,13 +1803,21 @@ test('Softline workspace, upgrade and browser journeys', async t => {
       assert.deepEqual(JSON.parse(result.content[0].text),fullView);
     } finally { await mcp.close(); }
 
-    await filter.uncheck();
-    await field(admin,'Начало периода').fill('');
-    await field(admin,'Срез по дату включительно').fill('');
-    await Promise.all([
+    await periodButton.click();
+    await start.fill('');
+    await end.fill('');
+    const [cleared] = await Promise.all([
       admin.waitForResponse(r => r.url().endsWith('/api/team/view') && r.ok() && !r.request().postDataJSON()?.through),
-      role(admin,'Применить период').click(),
+      role(options,'Применить период').click(),
     ]);
+    const clearedRequest = cleared.request().postDataJSON();
+    assert.equal(clearedRequest.from,undefined);
+    assert.equal(clearedRequest.full,true);
+    await periodButton.click();
+    assert.equal(await start.inputValue(),'');
+    assert.equal(await end.inputValue(),'');
+    await admin.keyboard.press('Escape');
+    await filter.uncheck();
     await go(admin,href.slice(1));
     await visible(admin.getByRole('heading',{name:'Сохранённый расчёт'}));
     await proof.getByText('Источники и период',{exact:true}).click();
@@ -2093,6 +2130,7 @@ test('Softline workspace, upgrade and browser journeys', async t => {
   await journey('judge writes in an isolated demo and mobile attachment returns to its conversation', async () => {
     await go(judge,'overview');
     await judge.getByRole('link',{name:'Открыть разбор'}).first().click();
+    await redmineSummary(judge).click();
     await field(judge,'Заголовок').fill('Задача из пространства жюри');
     await role(judge,'Подготовить черновик задачи').hover();
     await visible(judge.locator('.ui-hint-tooltip').getByText('Покажет черновик перед записью в Redmine.',{exact:true}));
@@ -2177,7 +2215,9 @@ test('Softline workspace, upgrade and browser journeys', async t => {
     await go(admin,'case/'+id);
     assert.equal(admin.url(),route);
     await visible(investigation.getByRole('status').filter({hasText:'Сигнал отозван после пересчёта'}));
-    const history = admin.locator('.signal-history');
+    assert.equal(await role(admin,'Подготовить задачу по сигналу').isEnabled(),false);
+    await visible(admin.locator('.case-main > .interview-search:has(+ .signal-history)'));
+    const history = admin.locator('.case-main > .signal-history:last-child');
     await history.getByText('История сигнала',{exact:true}).click();
     const rows = history.locator('li');
     await visible(rows.first());
@@ -2544,7 +2584,7 @@ test('Softline workspace, upgrade and browser journeys', async t => {
     const cardOrder = () => page.locator('.case-main .analysis-card').evaluateAll(elements =>
       elements.map(element => [...element.classList].find(name => name.startsWith('card-')).slice(5)));
     const full = field(page,'Только полные недели');
-    const peer = field(page,'Контроль');
+    const peer = field(page,'Сравнить с');
     const controlOption = peer.getByRole('option',{name:control,exact:true});
     const sourceQuestion = 'Покажи источники о переносе лицензии' + ' и соответствующие детали'.repeat(18);
     const query = sourceQuestion.slice(0,400);

@@ -195,7 +195,7 @@ export function Cards({
               <div className="kpis">
                 {view.summary.map((s) => (
                   <div key={s.product}>
-                    <small>{s.product}{s.product !== view.product && ' · контроль'}</small>
+                    <small>{s.product}{s.product !== view.product && ' · для сравнения'}</small>
                     <strong data-negative={s.product === view.product && (s.change ?? 0) < 0}>
                       {s.change == null ? 'Нет сравнения' : changeLabel(s.change)}
                     </strong>

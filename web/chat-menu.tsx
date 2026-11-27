@@ -1,6 +1,7 @@
 import { useEffect, useId, useRef, useState } from 'react';
 import type { ReactNode, RefObject } from 'react';
 import { Icon } from './icons';
+import { positionPopover } from './popover-position';
 import type { Thread } from './team-data';
 
 export type ChatAction = 'rename' | 'delete';
@@ -65,14 +66,7 @@ export function ChatPopupMenu({ label, triggerLabel = label, triggerContent, tri
     const anchor = trigger.current;
     if (!menu || !anchor) return;
     if (!menu.matches(':popover-open')) menu.showPopover();
-    const bounds = anchor.getBoundingClientRect();
-    const { clientWidth, clientHeight } = document.documentElement;
-    const top = bounds.bottom + menu.offsetHeight + 12 <= clientHeight
-      ? bounds.bottom + 4
-      : Math.max(8, bounds.top - menu.offsetHeight - 4);
-    const left = Math.max(8, Math.min(bounds.right - menu.offsetWidth, clientWidth - menu.offsetWidth - 8));
-    menu.style.top = top + 'px';
-    menu.style.left = left + 'px';
+    positionPopover(menu, anchor);
     const items = menu.querySelectorAll<HTMLButtonElement>('button');
     items[last ? items.length - 1 : 0]?.focus({ preventScroll: true });
   }

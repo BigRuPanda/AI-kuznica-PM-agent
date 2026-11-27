@@ -94,6 +94,7 @@ export function UiHintsScope({ enabled, viewKey, children }: { enabled: boolean;
 
     let showTimer: number | undefined;
     let hideTimer: number | undefined;
+    let focusFrame = 0;
     let pending: HTMLElement | null = null;
     let active: HTMLElement | null = null;
     let keyboard = true;
@@ -103,6 +104,8 @@ export function UiHintsScope({ enabled, viewKey, children }: { enabled: boolean;
 
     function cancelShow() {
       window.clearTimeout(showTimer);
+      window.cancelAnimationFrame(focusFrame);
+      focusFrame = 0;
       pending = null;
     }
 
@@ -158,7 +161,14 @@ export function UiHintsScope({ enabled, viewKey, children }: { enabled: boolean;
 
     function focusIn(event: FocusEvent) {
       const target = targetOf(event.target);
-      if (keyboard && target?.matches(':focus-visible')) show(target);
+      if (!keyboard || !target?.matches(':focus-visible')) return;
+      cancelShow();
+      pending = target;
+      // A native popover can restore focus before it finishes closing.
+      focusFrame = window.requestAnimationFrame(() => {
+        cancelShow();
+        if (target === document.activeElement && target.matches(':focus-visible')) show(target);
+      });
     }
 
     function focusOut(event: FocusEvent) {
