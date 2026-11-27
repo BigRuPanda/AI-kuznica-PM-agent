@@ -1,5 +1,7 @@
 import { cases, facts, fmt, listSales, metricStepDays, productFamily, setting } from './evidence.mjs';
 import { workspaceOperation } from './workspace-operations.mjs';
+import { releaseDecision } from './release-decision.mjs';
+import { isAccountFeature } from './account-release.mjs';
 
 const normalize = text => String(text || '').toLowerCase().replace(/ё/gu, 'е')
   .replace(/[^\p{L}\p{N}_]+/gu, ' ').trim();
@@ -141,6 +143,35 @@ export function releaseObservationAnswer(store, user, b, env, shared, history) {
   const metricIds = [...new Set(plain.match(/(?<![\p{L}\p{N}_])[a-z][a-z0-9]*(?:_[a-z0-9]+)+(?![\p{L}\p{N}_])/gu) || [])];
   const previous = history.at(-1)?.body.releaseObservation;
   const db = store.db;
+  const carousel = /карусел/u.test(plain);
+  const selected = releaseIds[0] || b.decisionReleaseId;
+  const transitionQuestion = /переход|перешл|клик|нажима|ctr|частот/u.test(plain);
+  if ((carousel || selected) && (transitionQuestion || launchFacts.test(question)) &&
+      releaseIds.length <= 1 && !taskIds.length && segmentIds.length <= 1 &&
+      metricIds.every(id => ['lk_reco_click_visits', 'lk_reco_ctr'].includes(id))) {
+    const matching = facts(db, 'releases').filter(row => isAccountFeature(row) &&
+      (selected ? row.data.release_id === selected : /карусел/iu.test(row.data.description)) &&
+      String(row.data.affected_metrics).split(/\s*,\s*/u).includes('lk_reco_click_visits'));
+    if (matching.length === 1) {
+      const row = matching[0];
+      const result = { mode: 'release-observation', outcome: 'done', steps: ['release_decision'], readSources: [] };
+      if (asOf === '' || asOf && asOf > localDate.format())
+        return { ...result, text: 'Укажите одну дату среза, не позднее сегодняшней.' };
+      if (asOf && asOf < row.data.release_date)
+        return { ...result, text: 'К указанной дате в календаре нет такой выпущенной функции ЛК.' };
+      if ([baselineWeeks, observationWeeks].some(n => n !== undefined && (n < 1 || n > 12)))
+        return { ...result, text: 'Для сравнения выберите от 1 до 12 недель с каждой стороны.' };
+      const decision = releaseDecision(db, user, { product: 'ЛК', releaseId: row.data.release_id, through: asOf }, shared,
+        { segment: segmentIds[0], baselineWeeks, observationWeeks });
+      const { release, delivered, accountEvidence } = decision;
+      result.readSources = [release, ...delivered, ...(transitionQuestion ? accountEvidence.sources : [])].map(s => ref(s));
+      return { ...result, product: decision.product, text: [
+        release.id + ' · ' + release.date + '. ' + release.description + '.',
+        delivered.length && 'Связанные задачи: ' + delivered.map(t => t.id + ' — ' + t.title).join(', ') + '.',
+        ...(transitionQuestion ? accountEvidence.lines : []),
+      ].filter(Boolean).join('\n\n') };
+    }
+  }
   const shortReply = /^(?:тогда |для |возьми |выбери |дата |срез )*(?:на |по |as\s*of |по состоянию на )?(?:\d|desktop|mobile|tablet|all|компьютер|десктоп|мобильн|телефон|планшет|[a-z]+_|(?:одну|одна|две|три|четыре|пять|шесть|семь|восемь|девять|десять|одиннадцать|двенадцать)\s)/u;
   const followsPending = previous?.pending && !releaseIds.length && !taskIds.length && question.length <= 180;
   const followupMetric = followsPending && previous.pending === 'metric' && namedMetrics(question,

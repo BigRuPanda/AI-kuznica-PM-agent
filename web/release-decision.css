@@ -28,6 +28,7 @@
 .decision-evidence, .decision-chat-grid { display: grid; gap: 1rem; align-items: start; }
 .decision-evidence { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 .decision-chat-grid { grid-template-columns: minmax(260px, .8fr) minmax(0, 1.2fr); }
+.decision-chat-grid > :only-child { grid-column: 1 / -1; }
 .decision-evidence h2 { font-size: 1.05rem; }
 .decision-evidence blockquote {
   margin: 1rem 0;

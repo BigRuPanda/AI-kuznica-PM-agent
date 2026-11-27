@@ -421,6 +421,14 @@ export function createTeamApp({
           db.prepare("INSERT OR IGNORE INTO conversations VALUES(?,?,'private',?)").run(id, user.id, c.title);
           return reply(200, { id });
         }
+        if (op === 'release-thread') {
+          const decision = workspaceOperation(store, user, 'release_decision', { releaseId: b.releaseId }, env, send);
+          if (!b.releaseId || !decision.release || decision.scope !== 'account') throw Error('Релиз ЛК недоступен.');
+          const id = digest(user.id + '/release/' + decision.release.id);
+          db.prepare("INSERT OR IGNORE INTO conversations VALUES(?,?,'private',?)")
+            .run(id, user.id, decision.product + ' · ' + decision.release.id);
+          return reply(200, { id });
+        }
         if (op === 'thread') return reply(200, { id: createThread(db, user, b.title, !!b.group) });
         if (op === 'rename-thread') return reply(200, renameThread(db, user, b.thread, b.title));
         if (op === 'delete-thread') return reply(200, deleteThread(store, user, b.thread));

@@ -1,5 +1,6 @@
 import { cases, facts, productFamily } from './evidence.mjs';
 import { sellerUrl } from './competitor-check.mjs';
+import { accountDataDate, isAccountFeature, recommendationEvidence } from './account-release.mjs';
 
 const DAY = 86400000;
 const addDays = (date, n) => new Date(Date.parse(date + 'T00:00:00Z') + n * DAY).toISOString().slice(0, 10);
@@ -79,7 +80,7 @@ function visibleOnDate(signal, through) {
   return count >= (signal.rule === 'absolute' ? 2 : 1);
 }
 
-export function releaseDecision(db, user, { product, caseId, releaseId, through } = {}, sharedOnly = false) {
+export function releaseDecision(db, user, { product, caseId, releaseId, through } = {}, sharedOnly = false, observation) {
   if (through && (!/^\d{4}-\d{2}-\d{2}$/.test(through) || !Number.isFinite(Date.parse(through)) || addDays(through, 0) !== through))
     throw Error('Укажите корректную дату среза.');
   let historical = Boolean(through);
@@ -92,12 +93,35 @@ export function releaseDecision(db, user, { product, caseId, releaseId, through 
     a.id.localeCompare(b.id));
   const sales = facts(db, 'sales');
   const products = [...new Set(sales.map(r => r.data.product_family))].sort();
+  const calendar = facts(db, 'releases');
+  const accountFeatures = calendar.filter(isAccountFeature);
+  const requestedRelease = releaseId && calendar.find(r => r.data.release_id === releaseId);
+  if (!product && !requestedCase && requestedRelease) {
+    product = isAccountFeature(requestedRelease) ? 'ЛК' : products.find(name => mentions(requestedRelease.data.description, name));
+  }
+  if (accountFeatures.length && !products.includes('ЛК')) products.push('ЛК');
+  product = requestedCase?.product || product ||
+    signals.find(c => !historical || visibleOnDate(c.body.signal, through))?.product || products[0];
+  if (product === 'ЛК' && accountFeatures.length) {
+    const asOf = through || accountDataDate(db, accountFeatures);
+    const releases = accountFeatures.filter(r => r.data.release_date <= asOf)
+      .sort((a,b) => b.data.release_date.localeCompare(a.data.release_date));
+    const selected = releaseId || requestedCase?.body.release;
+    const row = selected ? releases.find(r => r.data.release_id === selected) : releases[0];
+    if (releaseId && !row) throw Error('На выбранную дату этого релиза ЛК нет в календаре.');
+    const linked = ids(row?.data.related_task_ids);
+    const delivered = row ? facts(db, 'backlog').filter(r => r.data.created_date <= asOf &&
+      (linked.includes(r.data.task_id) || ids(r.data.release_id).includes(row.data.release_id))) : [];
+    return { product: 'ЛК', products, scope: 'account', asOf, historical, caseId: requestedCase?.id || null,
+      releases: releases.map(releaseInfo), release: row ? releaseInfo(row) : null,
+      delivered: delivered.map(r => taskInfo(r, asOf, historical)),
+      accountEvidence: recommendationEvidence(db, row, calendar, asOf, observation),
+      recommendation: { title: 'Проверить эффект в личном кабинете', next: 'Сопоставьте целевой показатель с датами выкладки и изменениями учёта.' } };
+  }
   if (!requestedCase && product && !products.includes(product)) {
     const similar = products.filter(name => productFamily(name) === productFamily(product));
     if (similar.length === 1) [product] = similar;
   }
-  product = requestedCase?.product || product ||
-    signals.find(c => !historical || visibleOnDate(c.body.signal, through))?.product || products[0];
   if (!product || !products.includes(product)) throw Error('В книге нет недельных продаж выбранного семейства.');
   const series = sales.filter(r => r.data.product_family === product);
   const latest = series.filter(fullWeek).map(r => r.data.week_start).sort().at(-1);
@@ -107,7 +131,7 @@ export function releaseDecision(db, user, { product, caseId, releaseId, through 
   const requestedVisible = requestedCase && (!historical || visibleOnDate(requestedCase.body.signal, asOf));
   const signalCase = requestedVisible ? requestedCase :
     signals.find(c => c.product === product && (!historical || visibleOnDate(c.body.signal, asOf)));
-  const releases = facts(db, 'releases').filter(r => r.data.release_date <= asOf &&
+  const releases = calendar.filter(r => r.data.release_date <= asOf &&
     ['major','minor'].includes(r.data.release_type) && /^(выпущен[аоы]?|released)$/iu.test(r.data.status || '') &&
     mentions(r.data.description, product))
     .sort((a, b) => b.data.release_date.localeCompare(a.data.release_date));
@@ -150,14 +174,15 @@ export function decisionDraft(decision, appUrl = '') {
   const source = row => row.file + ' · ' + row.loc + (appUrl ?
     ' · ' + appUrl.replace(/\/+$/, '') + '/#knowledge-source/' + row.version + '/' + encodeURIComponent(row.loc) : '');
   const title = measurementIssue ? 'Проверить передачу событий · ' + product : 'Проверить эффект ' + release.id + ' · ' + product;
-  const index = trend.available && 'Недельный индекс заказов: ' +
+  const index = trend?.available && 'Недельный индекс заказов: ' +
     trend.baseline.start + '–' + trend.baseline.end + ' — ' + number(trend.baseline.mean) + '; ' +
     trend.current.start + '–' + trend.current.end + ' — ' + number(trend.current.mean) + '.';
-  const evidence = [release, backlog, measurement, trend.baseline?.rows.at(-1), trend.current?.rows.at(-1)]
+  const evidence = [release, backlog, measurement, trend?.baseline?.rows.at(-1), trend?.current?.rows.at(-1),
+    ...(decision.accountEvidence?.sources || [])]
     .filter(Boolean).map(source);
   const description = [
     product + ' · ' + release.id + ' · срез ' + decision.asOf + '.',
-    release.description, index,
+    release.description, index, ...(decision.accountEvidence?.lines || []),
     backlog && backlog.id + ' — ' + backlog.title + '. ' + backlog.description,
     measurement?.comment, recommendation.next, recommendation.uncertainty,
     'Исходные строки:\n' + evidence.join('\n'),

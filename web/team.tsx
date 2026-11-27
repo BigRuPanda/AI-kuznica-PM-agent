@@ -1981,7 +1981,7 @@ function Workspace({ user, onLogout }: { user: User; onLogout: () => void }) {
             <MaterialDetail id={id} />
           </section>
         ) : route === 'release-decision' ? (
-          <ReleaseDecision action={action} renderChat={(thread, caseId, releaseId) => (
+          <ReleaseDecision action={action} initialRelease={id || undefined} renderChat={(thread, caseId, releaseId) => (
             <Chat key={thread + '/' + releaseId} id={thread} caseId={caseId} decisionReleaseId={releaseId}
               userId={home.user.id} threads={home.threads} action={action} />
           )} />
@@ -2042,6 +2042,8 @@ function Workspace({ user, onLogout }: { user: User; onLogout: () => void }) {
                   <small>{r?.release_date}</small>
                   <p>{r?.description}</p>
                   <p>Связанные задачи: {r?.related_task_ids}</p>
+                  {['major', 'minor'].includes(r.release_type) && /^(выпущен[аоы]?|released)$/iu.test(r.status) &&
+                    <a href={'#release-decision/' + r.release_id}>Решение по релизу</a>}
                   <button
                     onClick={() => {
                       selectRelease(id);

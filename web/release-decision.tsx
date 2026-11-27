@@ -13,6 +13,8 @@ type Trend =
   | { available: true; baseline: Period; current: Period; change: number | null }
   | { available: false; reason: string };
 type Decision = {
+  scope?: 'account';
+  accountEvidence?: { lines: string[]; sources: Citation[] };
   caseId: string | null;
   product: string;
   products: string[];
@@ -21,7 +23,7 @@ type Decision = {
   release: Release | null;
   releases: Release[];
   delivered: Task[];
-  trend: Trend;
+  trend?: Trend;
   competitor: Citation & {
     product: string; merchant: string; license: string | null; terms: string | null;
     competitorPrice: number; storePrice: number; checked: string; match?: string; sku: string | null; url?: string | null;
@@ -162,12 +164,13 @@ function TrackerActions({ caseId, releaseId, action }: { caseId: string; release
 }
 
 export function ReleaseDecision({
-  action, renderChat,
+  action, renderChat, initialRelease,
 }: {
   action: Action;
-  renderChat: (thread: string, caseId: string, releaseId: string) => React.ReactNode;
+  initialRelease?: string;
+  renderChat: (thread: string, caseId: string | undefined, releaseId: string) => React.ReactNode;
 }) {
-  const [criteria, setCriteria] = useState<{ product?: string; releaseId?: string; through?: string }>({});
+  const [criteria, setCriteria] = useState<{ product?: string; releaseId?: string; through?: string }>({releaseId: initialRelease});
   const [data, setData] = useState<Decision>();
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -195,14 +198,16 @@ export function ReleaseDecision({
     setLoading(true);
     setCriteria(next);
   }
-  async function openChat(caseId: string) {
+  async function openChat(caseId: string | null, releaseId: string) {
     if (thread) {
       chatAnchor.current?.scrollIntoView({ block: 'start' });
       return;
     }
     setOpening(true);
     try {
-      setThread((await post<{ id: string }>('case-thread', { caseId })).id);
+      const result = caseId ? await post<{ id: string }>('case-thread', { caseId })
+        : await post<{ id: string }>('release-thread', { releaseId });
+      setThread(result.id);
     } finally {
       setOpening(false);
     }
@@ -213,12 +218,12 @@ export function ReleaseDecision({
     <div className="page-head"><h1>Решение по релизу</h1></div>
     {data && <form className="paper decision-filters" onSubmit={event => {
       event.preventDefault();
-      if (cut) select({ product: data.product, through: cut });
+      if (cut) select({ product: data.product, through: cut, releaseId: release && release.date <= cut ? release.id : undefined });
     }}>
-      <label>Семейство
+      <label>Семейство или раздел
         <select value={criteria.product || data.product} disabled={opening} onChange={event =>
           select({ product: event.target.value, through: criteria.through })}>
-          {data.products.map(product => <option key={product}>{product}</option>)}
+          {data.products.map(product => <option key={product} value={product}>{product === 'ЛК' ? 'Личный кабинет' : product}</option>)}
         </select>
       </label>
       <label>Релиз
@@ -232,14 +237,14 @@ export function ReleaseDecision({
       <button type="submit" disabled={!cut || opening}>Показать на дату</button>
       {criteria.through && <button type="button" disabled={opening} onClick={() => {
         setCut('');
-        select({ product: data.product });
+        select({ product: data.product, releaseId: release?.id });
       }}>Вернуться к текущему срезу</button>}
     </form>}
     {error ? <p role="alert">{error}</p> : loading ? <p role="status">Читаем источники…</p> : data && <>
       <section className="signal-panel decision-hero" aria-labelledby="decision-subject">
         <div>
           <span className="state">{data.historical ? 'Исторический срез' : 'Срез загруженных данных'} · {date(data.asOf)}</span>
-          <h2 id="decision-subject">{data.product}</h2>
+          <h2 id="decision-subject">{data.scope === 'account' ? 'Личный кабинет' : data.product}</h2>
           {release ? <>
             <p><b>{release.id} · {date(release.date)}</b></p>
             <p>{release.description}</p>
@@ -252,17 +257,24 @@ export function ReleaseDecision({
         <div className="decision-next">
           <h3>{data.recommendation.title}</h3>
           <p>{data.recommendation.next}</p>
-          {data.caseId && release && !data.historical && <>
-            <button type="button" className="primary" disabled={opening} onClick={() => action(() => openChat(data.caseId!))}>
+          {(data.caseId || data.scope === 'account') && release && !data.historical && <>
+            <button type="button" className="primary" disabled={opening} onClick={() => action(() => openChat(data.caseId, release.id))}>
               {opening ? 'Открываем чат…' : 'Открыть чат разбора'}
             </button>
-            <a href={'#case/' + data.caseId + '/effect'}>Настроить проверку эффекта <Icon name="arrow" /></a>
+            {data.caseId && <a href={'#case/' + data.caseId + '/effect'}>Настроить проверку эффекта <Icon name="arrow" /></a>}
           </>}
         </div>
       </section>
       {data.historical && <p className="muted">Срез по датам событий в загруженной версии архива. Для части источников дата публикации неизвестна.</p>}
-      <WeeklyIndex trend={data.trend} />
-      <div className="decision-evidence">
+      {data.accountEvidence && <section className="paper">
+        <h2>Переходы из рекомендаций</h2>
+        {data.accountEvidence.lines.map(line => <p key={line}>{line}</p>)}
+        <details><summary>Источники расчёта</summary><ul>
+          {data.accountEvidence.sources.map(s => <li key={s.version + s.loc}><Source source={s} /></li>)}
+        </ul></details>
+      </section>}
+      {data.trend && <WeeklyIndex trend={data.trend} />}
+      {data.scope !== 'account' && <div className="decision-evidence">
         <section className="paper">
           <h2>Измерение и бэклог</h2>
           {data.backlog ? <>
@@ -305,12 +317,12 @@ export function ReleaseDecision({
             {!data.historical && <CurrentOffer key={data.competitor.version + data.competitor.loc} offer={data.competitor} />}
           </> : <p>К этой дате нет проверенной строки с обеими ценами для семейства.</p>}
         </section>
-      </div>
-      {thread && data.caseId && release && <div className="decision-chat" ref={chatAnchor}>
+      </div>}
+      {thread && release && <div className="decision-chat" ref={chatAnchor}>
         <h2>Чат разбора · {release.id}</h2>
         <div className="decision-chat-grid">
-          <TrackerActions key={data.caseId + release.id} caseId={data.caseId} releaseId={release.id} action={action} />
-          {renderChat(thread, data.caseId, release.id)}
+          {data.caseId && <TrackerActions key={data.caseId + release.id} caseId={data.caseId} releaseId={release.id} action={action} />}
+          {renderChat(thread, data.caseId || undefined, release.id)}
         </div>
       </div>}
     </>}

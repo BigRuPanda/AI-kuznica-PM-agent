@@ -32,6 +32,9 @@ export type Release = {
   release_date: string;
   description: string;
   related_task_ids: string;
+  release_type: string;
+  status: string;
+  affected_metrics: string;
 };
 export type Home = {
   bridgeEnabled: boolean;

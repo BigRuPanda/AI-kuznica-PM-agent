@@ -9,11 +9,48 @@ import { digest, initEvidence } from '../server/evidence.mjs';
 import { createTeamApp } from '../server/team-http.mjs';
 import { workspaceOperation } from '../server/workspace-operations.mjs';
 import { releaseDecision } from '../server/release-decision.mjs';
+import { releaseObservationAnswer } from '../server/release-observation-chat.mjs';
 
 const archive = process.env.SIGNAL_RELEASE_ARCHIVE ||
   join(homedir(), 'Downloads', 'drive-download-20261127T092715Z-1-001.zip');
 const hasArchive = existsSync(archive);
 const adminPassword = 'release-test-password';
+
+test('carousel question uses the imported release and actual click series without a sales family', () => {
+  const db = new DatabaseSync(':memory:');
+  try {
+    initEvidence(db);
+    const add = (kind, id, data) => db.prepare('INSERT INTO facts VALUES(?,?,?,?,?,?)')
+      .run(kind, id, 'v1', 'source.xlsx', 'Sheet!' + id, JSON.stringify(data));
+    add('releases', 'A2', { release_id: 'R-50', release_type: 'minor', status: 'выпущен', release_date: '2026-08-20',
+      description: 'Прокрутка карусели в ЛК', affected_metrics: 'lk_reco_click_visits', related_task_ids: 'T-9' });
+    add('releases', 'A3', { release_id: 'R-65', release_type: 'analytics', status: 'выпущен', release_date: '2026-10-21',
+      description: 'Начало измерения просмотров', affected_metrics: 'lk_reco_viewed_visits,lk_reco_ctr' });
+    add('backlog', 'B2', { task_id: 'T-9', title: 'Карусель', created_date: '2026-08-15' });
+    for (let i = 0; i < 29; i++) {
+      const date = new Date(Date.UTC(2026, 7, 6 + i)).toISOString().slice(0,10);
+      add('metrics', 'C' + (2 + i), { date, product: 'ЛК', metric_id: 'lk_reco_click_visits',
+        segment: 'mobile', unit: 'visits', value: i === 14 ? 500 : i < 14 ? 1 : 2 });
+    }
+    const user = { id: 'reader' };
+    const question = 'После обновления карусели пользователи стали чаще переходить в магазин?';
+    const ask = suffix => releaseObservationAnswer({ db }, user, { question: question + suffix }, {}, false, []);
+    const reply = ask('');
+    assert.match(reply.text, /R-50/);
+    assert.match(reply.text, /T-9/);
+    assert.match(reply.text, /14 → 28/);
+    assert.doesNotMatch(reply.text, /осталось прежним/);
+    assert.doesNotMatch(reply.text, /R-65/); // The latest observed data are still in September.
+    assert.match(ask(' На 2026-10-30.').text, /R-65/);
+    assert.match(ask(' На 2026-08-10.').text, /нет такой выпущенной/);
+    db.prepare("DELETE FROM facts WHERE kind='metrics' AND key='C4'").run();
+    assert.match(ask('').text, /13\/14/);
+    assert.doesNotMatch(ask('').text, /13 → 28/);
+    assert.equal(releaseDecision(db, user, { releaseId: 'R-50' }).product, 'ЛК');
+  } finally {
+    db.close();
+  }
+});
 
 test('release decision validates dates and rejects private cases before loading source facts', () => {
   const db = new DatabaseSync(':memory:');
@@ -102,6 +139,18 @@ test('organizer archive supplies both families, verifiable evidence, and histori
     assert.equal(source.rows[0].loc, evidence.loc);
   }
   const astra = await call('release_decision', { product: 'Astra' });
+  const carousel = await call('release_decision', { releaseId: 'R-05' });
+  assert.equal(carousel.product, 'ЛК');
+  assert.equal(carousel.release.loc, 'Релизы!A6');
+  assert.deepEqual(carousel.delivered.map(row => row.id), ['T-05']);
+  assert.ok(carousel.accountEvidence.lines.some(line => line.includes('3 → 3')));
+  assert.ok(carousel.accountEvidence.lines.some(line => line.includes('2 → 2')));
+  assert.ok(carousel.accountEvidence.sources.some(row => row.loc === 'Релизы!A12'));
+  const archived = await call('release_decision', { releaseId: 'R-05', through: '2026-08-23' });
+  assert.ok(archived.accountEvidence.lines.some(line => line.includes('3/14')));
+  assert.doesNotMatch(JSON.stringify(archived), /R-11|2026-10-21/);
+  const linkedThread = await call('release-thread', { releaseId: 'R-05' });
+  assert.deepEqual(await call('release-thread', { releaseId: 'R-05' }), linkedThread);
   assert.equal(astra.product, 'Astra Linux Special Edition');
   assert.equal(astra.release.id, 'R-02');
   assert.equal(astra.trend.baseline.mean, 112);

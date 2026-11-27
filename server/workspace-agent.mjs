@@ -129,7 +129,8 @@ function note(state, op, r) {
   }
   const references = op === 'release_decision'
     ? [r.release, r.backlog, r.measurement, r.customer, r.competitor,
-      r.trend.baseline?.rows.at(-1), r.trend.current?.rows.at(-1)].filter(Boolean)
+      ...(r.delivered || []), ...(r.accountEvidence?.sources || []),
+      r.trend?.baseline?.rows.at(-1), r.trend?.current?.rows.at(-1)].filter(Boolean)
     : ['source_value', 'search'].includes(op) ? r : [];
   for (const row of references.slice(0, 8)) {
     const url = '#knowledge-source/' + row.version + '/' + encodeURIComponent(row.loc);
@@ -316,7 +317,7 @@ export async function runAssistant(
             }
           : null,
       visible,
-      releaseDecision: c && b.decisionReleaseId && !shared && !smallTalk
+      releaseDecision: b.decisionReleaseId && !shared && !smallTalk
         ? workspaceOperation(store, user, 'release_decision', { caseId, releaseId: b.decisionReleaseId }, env, send)
         : undefined,
       selection: range ? concise('range_read', range) : null,
