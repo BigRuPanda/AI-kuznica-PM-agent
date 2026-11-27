@@ -36,26 +36,19 @@
 }
 .release-management-actions button { text-align: start; }
 
-.release-filters, .release-tabs {
+.release-filters {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   gap: 8px;
   margin-block: 0 16px;
 }
-.release-filters button[aria-pressed='true'], .release-tabs button[aria-selected='true'] {
+.release-filters button[aria-pressed='true'] {
   border-color: var(--accent);
   background: var(--accent-soft);
   color: var(--accent-text);
   font-weight: 650;
 }
-.release-tabs {
-  margin-block-start: 16px;
-  padding-block-end: 12px;
-  border-block-end: 1px solid var(--border);
-}
-.release-workspace [role='tabpanel'][hidden] { display: none; }
-.release-workspace [role='tabpanel'] { min-width: 0; }
 .release-table-card {
   border: 1px solid var(--border);
   border-radius: var(--radius);
@@ -97,6 +90,15 @@
 .release-task-ids { display: flex; flex-wrap: wrap; gap: 8px 24px; padding-inline-start: 1.1rem; }
 
 .release-workspace > .report-head { margin-block-start: 12px; }
+.release-workspace { container: release-workspace / inline-size; }
+.release-columns {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  align-items: start;
+  gap: 16px;
+  margin-block-start: 16px;
+}
+.release-metrics { min-width: 0; }
 .release-report-filters { margin-block-end: 12px; }
 .release-workspace .release-metrics > .card {
   margin: 0 0 14px;
@@ -114,19 +116,29 @@
 .release-other, .release-about { margin: 0 0 12px; }
 .release-other > table { margin-block-start: 10px; }
 .release-other > table thead th:first-child { width: 46%; }
-.release-other-graph { scroll-margin-block-start: 16px; }
 .metric-row-actions { margin-block-start: 6px; }
 .release-workspace .metric-row-actions button { padding: 3px 7px; font-size: .78rem; }
-.release-saved label { margin-block-end: 14px; }
-.release-saved h2 { margin-block-end: 8px; }
+.release-workspace .release-card-action { margin-block-start: 8px; }
+.release-saved label { margin-block: 12px; }
+.release-metric-dialog { margin-block-start: 16px; }
 .release-workspace .release-discussion {
-  height: clamp(480px, 69dvh, 710px);
-  max-width: 880px;
+  height: clamp(400px, 63dvh, 640px);
   overflow: hidden;
   border: 1px solid var(--border);
   border-radius: var(--radius);
 }
 .release-discussion .conversation-body { flex: 1; min-height: 0; }
+
+@container release-workspace (min-width: 560px) {
+  .release-columns { grid-template-columns: minmax(0, 1fr) minmax(14.5rem, .55fr); }
+  @media (min-width: 821px) and (min-height: 580px) {
+    .release-workspace .release-discussion {
+      position: sticky;
+      inset-block-start: var(--discussion-top, 16px);
+      height: min(var(--discussion-height, calc(100dvh - 32px)), 760px);
+    }
+  }
+}
 
 @media (max-width: 560px) {
   .release-page-head { margin-block-end: 12px; }
@@ -135,5 +147,4 @@
   .release-table thead th { font-size: .76rem; }
   .release-journal-table thead th:first-child { width: 49%; }
   .release-journal-table thead th:nth-child(2) { width: 27%; }
-  .release-workspace .release-discussion { height: min(610px, max(440px, 63dvh)); }
 }

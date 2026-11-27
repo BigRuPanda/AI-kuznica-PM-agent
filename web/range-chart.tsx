@@ -353,6 +353,7 @@ export function RangeChart({
             onFocus={() => point((p) => p ?? { index: 0 })}
             onBlur={() => point(null)}
             onKeyDown={(e) => {
+              if (e.target !== e.currentTarget) return;
               const current = cursor?.index ?? 0;
               if (e.key === 'Escape') {
                 point(null);

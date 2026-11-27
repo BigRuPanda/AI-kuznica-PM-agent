@@ -55,12 +55,91 @@ test('the release journal sorts both sources and keeps their routes distinct', a
   assert.equal(await rows.count(), 2);
   await rows.first().getByRole('link').click();
   await page.getByRole('columnheader', { name: 'После выпуска' }).waitFor();
-  assert.equal(await page.getByRole('tab', { name: 'Сохранённые графики' }).count(), 0);
+});
+
+test('metric charts and calculations open over the release and restore focus when closed', async t => {
+  const { app, page, origin } = await openWorkspace(t);
+  const release = origin + '/#release/R-002';
+  const metric = 'Конверсия из оформления в оплату';
+  const marker = 'Сохранённая проверка периода';
+  const report = await page.request.get(origin + '/api/report?releaseId=R-002&segment=new');
+  assert.ok(report.ok());
+  const { context } = await report.json();
+  const comparison = await page.request.post(origin + '/api/compare', { data: { ...context, metric: 0 } });
+  assert.ok(comparison.ok());
+  const saved = await comparison.json();
+  const store = app.space('team');
+  store.db.prepare('INSERT INTO notes (id, release, body) VALUES (?, ?, ?)').run('popup-fixture', 'R-002', JSON.stringify({
+    version: context.version, observedDay: context.day, metric: 0, segment: 'new',
+    start: 0, end: 2, reason: marker, calc: saved.id,
+  }));
+  await page.goto(release);
+  const segment = page.getByRole('combobox', { name: /Сегмент/u });
+  await segment.selectOption('new');
   await page.getByText('Другие метрики', { exact: true }).click();
-  await page.getByRole('button', { name: 'График: Конверсия из оформления в оплату' }).click();
-  await page.getByRole('heading', { name: 'Конверсия из оформления в оплату', exact: true }).waitFor();
-  await page.getByRole('tab', { name: 'Метрики' }).press('ArrowRight');
-  await page.getByRole('textbox', { name: 'Спросить агента' }).waitFor();
+  const graphButton = page.getByRole('button', { name: 'График: ' + metric, exact: true });
+  await graphButton.click();
+  const graph = page.getByRole('dialog', { name: 'График: ' + metric });
+  await graph.locator('.range-plot').waitFor();
+  assert.equal(await page.locator('.release-metrics .range-plot').count(), 1);
+  assert.equal(page.url(), release);
+  const point = graph.getByRole('link', { name: marker, exact: true });
+  await point.press('Enter');
+  const source = page.getByRole('dialog', { name: 'Расчёт', exact: true });
+  await source.getByRole('heading', { name: metric, exact: true }).waitFor();
+  assert.equal(page.url(), release);
+  await source.getByRole('button', { name: '← К графику' }).click();
+  await point.waitFor();
+  await page.waitForFunction(label => document.activeElement?.getAttribute('aria-label') === label, marker);
+  await page.keyboard.press('Escape');
+  await graph.waitFor({ state: 'hidden' });
+  assert.ok(await graphButton.evaluate(button => button === document.activeElement));
+
+  const proofButton = page.getByRole('button', { name: 'Расчёт: ' + metric, exact: true });
+  const [response] = await Promise.all([
+    page.waitForResponse(reply => reply.url().endsWith('/api/compare') && reply.ok()),
+    proofButton.click(),
+  ]);
+  const { id } = await response.json();
+  const proof = page.getByRole('dialog', { name: 'Расчёт: ' + metric });
+  await proof.getByText('Новые клиенты', { exact: true }).waitFor();
+  assert.equal(page.context().pages().length, 1);
+  assert.equal(page.url(), release);
+  await page.keyboard.press('Escape');
+  await proof.waitFor({ state: 'hidden' });
+  assert.ok(await proofButton.evaluate(button => button === document.activeElement));
+  assert.equal(await segment.inputValue(), 'new');
+
+  await page.getByRole('button', { name: 'Показать расчёт', exact: true }).click();
+  await page.getByRole('dialog', { name: /^Расчёт:/u }).waitFor();
+  await page.keyboard.press('Escape');
+  await page.goto(origin + '/#calc/' + id);
+  await page.getByRole('heading', { name: metric, exact: true }).waitFor();
+});
+
+test('release discussion is visible beside metrics and stacks on a narrow screen', async t => {
+  const { page, origin } = await openWorkspace(t);
+  await page.goto(origin + '/#release/R-002');
+  const chat = page.getByRole('complementary', { name: 'Обсуждение релиза' });
+  const metrics = page.locator('.release-metrics');
+  await metrics.getByRole('columnheader', { name: 'После выпуска' }).waitFor();
+  await chat.getByRole('textbox', { name: 'Спросить агента' }).waitFor();
+  assert.equal(await page.getByRole('tablist', { name: 'Релиз' }).count(), 0);
+  for (const width of [1440, 900, 800, 390]) {
+    await page.setViewportSize({ width, height: 900 });
+    await page.waitForFunction(viewport => {
+      if (innerWidth !== viewport) return false;
+      const main = document.querySelector('.release-metrics').getBoundingClientRect();
+      const discussion = document.querySelector('.release-discussion').getBoundingClientRect();
+      return viewport === 390 ? discussion.top >= main.bottom : discussion.left >= main.right;
+    }, width);
+    assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
+  }
+  await page.setViewportSize({ width: 900, height: 450 });
+  const textarea = chat.getByRole('textbox', { name: 'Спросить агента' });
+  await textarea.scrollIntoViewIfNeeded();
+  const field = await textarea.boundingBox();
+  assert.ok(field.y >= 0 && field.y + field.height <= 450, 'composer can fully scroll into view in a short window');
 });
 
 test('finishing a case has its own row below archive observation at every width', async t => {

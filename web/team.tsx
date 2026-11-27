@@ -632,7 +632,7 @@ function Chat({
                 s.source === 'metric' ? (
                   <Snapshot key={s.calc} id={s.calc} previewTitle={s.title} />
                 ) : s.source === 'release' ? (
-                  <SavedChart key={s.calc} id={s.calc} preview />
+                  <SavedChart key={s.calc} id={s.calc} />
                 ) : (
                   <a
                     key={s.calc}

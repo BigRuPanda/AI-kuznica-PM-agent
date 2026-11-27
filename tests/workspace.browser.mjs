@@ -2083,26 +2083,43 @@ test('Softline workspace, upgrade and browser journeys', async t => {
     await role(dlg,'Создать релиз').click();
     await visible(admin.getByRole('heading',{name:'Релиз приёмки',exact:true}));
     await admin.locator('summary').filter({hasText:/^Первый разбор · /}).waitFor({state:'attached'});
-    await admin.getByRole('tab', { name: 'Обсуждение' }).click();
-    await field(admin,'Спросить агента').fill('Сколько дней до оплаты? Построй график.');
+    const discussion = admin.getByRole('complementary', { name: 'Обсуждение релиза' });
+    await field(discussion,'Спросить агента').fill('Сколько дней до оплаты? Построй график.');
     const [reply] = await Promise.all([
       admin.waitForResponse(r => r.url().endsWith('/api/chat')),
-      role(admin,'Отправить вопрос').click(),
+      role(discussion,'Отправить вопрос').click(),
     ]);
     assert.ok(reply.ok(), await reply.text());
-    assert.ok((await reply.json()).refs.some(ref => ref.op === 'build_chart'));
-    await admin.getByRole('button',{name:/Раскрыть график/}).first().click();
+    const graph = (await reply.json()).refs.find(ref => ref.op === 'build_chart');
+    assert.ok(graph);
+    const releaseUrl = admin.url();
+    await discussion.getByRole('button',{name:/Раскрыть график/}).first().click();
     dlg=admin.getByRole('dialog');
+    const plot = dlg.locator('.range-plot svg');
+    await plot.press('Home');
+    await plot.press('Space');
+    const rangeStart = await field(dlg,'Начало A').inputValue();
     await field(dlg,'Дашборд релиза').fill('Проверенные расчёты');
     await role(dlg,'Сохранить в релиз').click();
     await visible(dlg.getByText('Сохранено',{exact:true}));
-    const calc=await dlg.getByRole('link',{name:/Источник расчёта/}).getAttribute('href');
+    await role(dlg,'Источник расчёта').click();
+    await visible(dlg.getByRole('heading', { name: /^Расчёт:/u }));
+    await visible(dlg.getByText('Формула и версия данных', { exact: true }));
+    assert.equal(admin.url(), releaseUrl);
+    await role(dlg,'← К графику').click();
+    await visible(role(dlg,'Сохранить в релиз'));
+    assert.equal(await field(dlg,'Начало A').inputValue(), rangeStart);
     await admin.keyboard.press('Escape');
     await dlg.waitFor({state:'hidden'});
-    await admin.getByRole('tab', { name: 'Сохранённые графики' }).click();
-    await field(admin,'Дашборд').selectOption('Проверенные расчёты');
-    await visible(admin.getByRole('heading',{name:'Проверенные расчёты'}));
-    await go(admin,calc.slice(1));
+    await admin.getByText('Сохранённые графики', { exact: true }).click();
+    const saved = admin.locator('.release-saved');
+    await field(saved,'Дашборд').selectOption('Проверенные расчёты');
+    await saved.getByRole('button',{name:/Раскрыть график/}).first().click();
+    await visible(dlg);
+    assert.equal(admin.url(), releaseUrl);
+    await admin.keyboard.press('Escape');
+    await dlg.waitFor({state:'hidden'});
+    await go(admin,'calc/'+graph.id);
     await visible(admin.locator('.proof-page h1'));
     await visible(admin.locator('#workspace-sidebar'));
     await member.goto(base+'/?legacy=1#release/R-001');
@@ -2124,7 +2141,6 @@ test('Softline workspace, upgrade and browser journeys', async t => {
     });
     const openDiscussion = async page => {
       await go(page, route);
-      await page.getByRole('tab', { name: 'Обсуждение' }).click();
       return page.getByRole('complementary',{name:'Обсуждение релиза'});
     };
     const sidebarPhoto = page => page.getByRole('link',{name:'Профиль',exact:true}).locator('img');
@@ -2202,7 +2218,6 @@ test('Softline workspace, upgrade and browser journeys', async t => {
     for (const width of [1440, 390]) {
       const page = await login('member','#release/'+releaseId,{viewport:{width,height:900}});
       try {
-        await page.getByRole('tab', { name: 'Обсуждение' }).click();
         const discussion = page.getByRole('complementary',{name:'Обсуждение релиза'});
         await discussion.getByRole('button',{name:/Предыдущие сообщения/}).click();
         const history = discussion.locator('.chat-history');

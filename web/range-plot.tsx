@@ -2,7 +2,7 @@ import { useId, useMemo } from 'react';
 import type { ChartLine, Point, WindowRange } from './range-chart';
 
 export type PlotSeries = ChartLine & { by: Map<number, Point> };
-export type PlotMarker = WindowRange & { reason: string; href: string };
+export type PlotMarker = WindowRange & { reason: string; href: string; open?: () => void };
 
 const tickNumber = new Intl.NumberFormat('ru-RU', {
   notation: 'compact',
@@ -111,7 +111,13 @@ export function RangePlot({
       <rect className="range-canvas" x={left} y={top} width={right - left} height={bottom - top} rx="9" />
       <g clipPath={'url(#' + clip + ')'}>
         {markers.map((marker, index) => (
-          <a href={marker.href} key={marker.href + index} aria-label={marker.reason}>
+          <a href={marker.href} key={marker.href + index} aria-label={marker.reason}
+            aria-haspopup={marker.open ? 'dialog' : undefined}
+            onClick={event => {
+              if (!marker.open || event.button !== 0 || event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
+              event.preventDefault();
+              marker.open();
+            }}>
             <rect
               className="range-saved-band"
               x={boundary(marker.from)}

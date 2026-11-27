@@ -1,4 +1,4 @@
-import {useEffect,useId,useState} from 'react';
+import {useEffect,useId,useState,type ReactNode} from 'react';
 import {api,calcHref,dayDate,fmt,segmentNames} from './types';
 import type {Card,Context,Derived,Row,Segment,Series} from './types';
 import {ChartSummary,Comparisons,CustomChart} from './charts';
@@ -18,10 +18,20 @@ export type Calculation=Base & (
   {op:'build_chart';result:Derived}|{op:'funnel';result:{definition:string;missing:string[];steps:{period:string;checkout:number;invoiced:number;paid:number}[]}}|
   {op:'interval';result:{title:string;reason:string;unit:string;formula?:string;metric?:number;start:number;end?:number;rows:IntervalRow[]}}
 );
-export function useCalculation(id:string){
-  const [calc,set]=useState<Calculation|null>(null),[error,fail]=useState('');
-  useEffect(()=>{let active=true;set(null);fail('');api<Calculation>('calculations/'+encodeURIComponent(id)).then(v=>{if(active)set(v);}).catch(e=>{if(active)fail(e.message);});return()=>{active=false;};},[id]);
-  return {calc,error};
+type CalculationSource = string | Context;
+
+function useCalculation(source:CalculationSource):{calc?:Calculation;error?:string}{
+  const [response,setResponse] = useState<{source:CalculationSource; calc?:Calculation; error?:string}>();
+  useEffect(() => {
+    let active = true;
+    const request = typeof source === 'string'
+      ? api<Calculation>('calculations/' + encodeURIComponent(source))
+      : api<Calculation>('compare', source);
+    request.then(calc => { if (active) setResponse({source,calc}); })
+      .catch(error => { if (active) setResponse({source,error:error.message}); });
+    return () => { active = false; };
+  }, [source]);
+  return response?.source === source ? response : {};
 }
 function Sparkline({chart,launch}:{chart:Derived;launch:number}){
   const values=chart.daily.map(p=>p.value),known=values.filter((v):v is number=>v!==null);
@@ -38,20 +48,32 @@ function Sparkline({chart,launch}:{chart:Derived;launch:number}){
     {isolated.map(p=><circle key={p.x} cx={p.x} cy={p.y} r="2"/>)}<path d={path} fill="none" stroke="currentColor" strokeWidth="2" strokeLinejoin="round" strokeLinecap="round" vectorEffect="non-scaling-stroke"/></svg>
     <span className="mini-dates"><span>{dayDate(launch,chart.days[0])}</span><span>{dayDate(launch,chart.days[n-1]+1)}</span></span></span></span>;
 }
-export function SavedChart({id,author,suggested,onSave,preview=false}:{id:string;author?:string;suggested?:string[];onSave?:()=>void;preview?:boolean}){
-  const {calc,error}=useCalculation(id),[board,setBoard]=useState('Скорость оплаты'),[state,setState]=useState(''),[open,setOpen]=useState(false),listId=useId();
+export function SavedChart({id,author,suggested,onSave}:{id:string;author?:string;suggested?:string[];onSave?:()=>void}){
+  const {calc,error}=useCalculation(id),[board,setBoard]=useState('Скорость оплаты'),[state,setState]=useState('');
+  const [view,setView]=useState<'chart'|'calculation'|null>(null),listId=useId();
   if(!calc||calc.op!=='build_chart')return <p>{error||'Загружается график…'}</p>;
   const content=<div className="saved-chart"><small>{segmentNames[calc.context.segment]} · на {dayDate(calc.launch,calc.context.day)}</small>
-    <CustomChart calcId={calc.id} version={calc.context.version} chart={calc.result} launch={calc.launch} day={calc.context.day} showTitle={!preview}/><a href={calcHref(id)} target={preview?'_blank':undefined} rel={preview?'noreferrer':undefined}>Источник расчёта ↗</a>
+    <CustomChart calcId={calc.id} version={calc.context.version} chart={calc.result} launch={calc.launch} day={calc.context.day} showTitle={false}/>
     {author&&<form onSubmit={async e=>{e.preventDefault();if(state==='Сохранение…')return;setState('Сохранение…');try{await api('boards',{calc:id,name:board,releaseId:calc.context.releaseId,author});setState('Сохранено');onSave?.();}catch(ex){setState((ex as Error).message);}}}>
     <label>Дашборд релиза<input value={board} onChange={e=>{setBoard(e.target.value);setState('');}} list={listId} required maxLength={100}/></label>
     <datalist id={listId}>{suggested?.map(s=><option key={s}>{s}</option>)}</datalist>
     <button disabled={state==='Сохранение…'||state==='Сохранено'}>Сохранить в релиз</button><small role="status">{state}</small></form>}</div>;
-  if(!preview)return <div className="release-chart">{content}</div>;
-  return <div className="release-chart"><button className="chart-preview" type="button" aria-haspopup="dialog" aria-label={'Раскрыть график: '+calc.result.title} aria-describedby={listId+'-summary'} onClick={()=>setOpen(true)}>
+  return <div className="release-chart"><button className="chart-preview" type="button" aria-haspopup="dialog" aria-label={'Раскрыть график: '+calc.result.title} aria-describedby={listId+'-summary'} onClick={()=>setView('chart')}>
     <span className="preview-line"><span>{calc.result.title}</span><Icon name="expand"/></span>
     <span id={listId+'-summary'}><ChartSummary chart={calc.result} launch={calc.launch} day={calc.context.day}/></span><Sparkline chart={calc.result} launch={calc.launch}/>
-  </button>{open&&<Dialog title={calc.result.title} wide close={()=>setOpen(false)}><div className="release-chart">{content}</div></Dialog>}</div>;
+  </button>{view&&<Dialog title={view==='chart'?calc.result.title:'Расчёт: '+calc.result.title} wide close={()=>setView(null)}>
+    <div className="release-chart">
+      <button type="button" className="text-action saved-chart-switch"
+        onClick={()=>setView(view==='chart'?'calculation':'chart')}>
+        {view==='chart'?'Источник расчёта':'← К графику'}
+      </button>
+      <div hidden={view==='calculation'}>{content}</div>
+      {view==='calculation'&&<div className="calculation-dialog-body">
+        <CalculationDetails calc={calc}/>
+        <CopyCalculationLink id={calc.id}/>
+      </div>}
+    </div>
+  </Dialog>}</div>;
 }
 const fullDate = new Intl.DateTimeFormat('ru-RU', { dateStyle: 'short', timeZone: 'Europe/Moscow' });
 
@@ -140,33 +162,70 @@ function CalculationResult({calc}:{calc:Calculation}) {
   </>;
 }
 
-export function CalculationPage({id}:{id:string}){
-  const {calc,error}=useCalculation(id);
-  if (!calc) return <section className="proof-page calculation-proof">
-    <a className="crumb" href="#releases">← К релизам</a>
-    {error ? <p role="alert">{error}</p> : <p role="status">Открываем расчёт…</p>}
-  </section>;
-  const {context,launch} = calc;
+function describeCalculation(calc:Calculation) {
   const metric = calc.op === 'breakdown' ? calc.result.all ?? Object.values(calc.result)[0] : calc.result;
   const title = calc.op === 'funnel' ? 'Шаги воронки' : metric && 'title' in metric ? metric.title : 'Расчёт по сегментам';
   const formula = calc.op === 'funnel' ? calc.result.definition : metric && 'formula' in metric ? metric.formula : undefined;
+  return {title,formula};
+}
+
+function CalculationDetails({calc}:{calc:Calculation}) {
+  const {context,launch} = calc;
+  const {formula} = describeCalculation(calc);
   const period = calc.op === 'interval' ? dayDate(launch, calc.result.start) + ' – ' + dayDate(launch, calc.result.end ?? calc.result.start + calc.result.rows.length) :
     dayDate(launch, -7) + ' – ' + dayDate(launch, Math.min(context.day, 7));
-  return <section className="proof-page calculation-proof">
-    <a className="crumb" href={'#release/' + encodeURIComponent(context.releaseId)}>← К релизу {context.releaseId}</a>
-    <header className="proof-header">
-      <h1>{title}</h1>
-      <dl className="proof-context">
-        <div><dt>Срез на</dt><dd>{fullDate.format(launch + context.day * 86400000)}</dd></div>
-        <div><dt>Период</dt><dd>{period}</dd></div>
-        <div><dt>Сегмент</dt><dd>{segmentNames[context.segment]}</dd></div>
-      </dl>
-    </header>
+  return <>
+    <dl className="proof-context">
+      <div><dt>Срез на</dt><dd>{fullDate.format(launch + context.day * 86400000)}</dd></div>
+      <div><dt>Период</dt><dd>{period}</dd></div>
+      <div><dt>Сегмент</dt><dd>{segmentNames[context.segment]}</dd></div>
+    </dl>
     <div className="paper proof-result"><CalculationResult calc={calc}/></div>
     <details className="paper proof-method">
       <summary>{formula ? 'Формула и версия данных' : 'Версия данных'}</summary>
       {formula && <p>{formula}</p>}
       <p>Версия данных <code>{context.version}</code></p>
     </details>
+  </>;
+}
+
+function CopyCalculationLink({id}:{id:string}) {
+  const link = new URL(calcHref(id), location.href).href;
+  const [state,setState] = useState<'copied'|'manual'>();
+  return <div className="calculation-link">
+    <button type="button" className="text-action" onClick={async () => {
+      try { await navigator.clipboard.writeText(link); setState('copied'); }
+      catch { setState('manual'); }
+    }}>Скопировать ссылку на расчёт</button>
+    {state === 'copied' && <span role="status">Ссылка скопирована</span>}
+    {state === 'manual' && <label>Ссылка на расчёт<input readOnly value={link} onFocus={event => event.target.select()}/></label>}
+  </div>;
+}
+
+export function CalculationPreview({source,children,showTitle=false}:{
+  source:CalculationSource;children?:ReactNode;showTitle?:boolean;
+}) {
+  const {calc,error} = useCalculation(source);
+  return <div className="release-chart calculation-dialog-body">
+    {calc ? <>
+      {showTitle && <h3>{describeCalculation(calc).title}</h3>}
+      <CalculationDetails calc={calc}/>
+      {children}
+      <CopyCalculationLink id={calc.id}/>
+    </> : error ? <p role="alert">{error}</p> : <p role="status">Открываем расчёт…</p>}
+  </div>;
+}
+
+export function CalculationPage({id}:{id:string}){
+  const {calc,error}=useCalculation(id);
+  if (!calc) return <section className="proof-page calculation-proof">
+    <a className="crumb" href="#releases">← К релизам</a>
+    {error ? <p role="alert">{error}</p> : <p role="status">Открываем расчёт…</p>}
+  </section>;
+  const {releaseId} = calc.context;
+  return <section className="proof-page calculation-proof">
+    <a className="crumb" href={'#release/' + encodeURIComponent(releaseId)}>← К релизу {releaseId}</a>
+    <header className="proof-header"><h1>{describeCalculation(calc).title}</h1></header>
+    <CalculationDetails calc={calc}/>
   </section>;
 }

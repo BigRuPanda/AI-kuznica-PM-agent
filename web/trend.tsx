@@ -23,15 +23,16 @@ export function seriesPath(points:{value:number|null}[],x:(index:number)=>number
 }
 
 const time=new Intl.DateTimeFormat('ru-RU',{hour:'2-digit',minute:'2-digit',timeZone:'Europe/Moscow'});
-export function Trend({series,days,launch,unit,title,marks=[],metric,sampleEvent,pick,completed}:{
- series:Record<string,Point[]>;days:number[];launch:number;unit:string;title:string;marks?:Mark[];onInspect?:()=>void;rate?:boolean;metric?:number;sampleEvent?:string;unknown?:Point[];pick?:RangePick;completed?:number|null
+export function Trend({series,days,launch,unit,title,marks=[],metric,sampleEvent,pick,completed,openCalculation}:{
+ series:Record<string,Point[]>;days:number[];launch:number;unit:string;title:string;marks?:Mark[];metric?:number;sampleEvent?:string;pick?:RangePick;completed?:number|null;openCalculation?:(id:string)=>void
 }){
  const [tableOpen,setTableOpen]=useState(false),keys=Object.keys(series);
  function sample(p:Point){return metric===undefined||p.d===undefined?eventSample(p.n,sampleEvent):metricSample({...p,d:p.d},metric)??'—';}
  if(!days.length)return <p>Нет дней для отображения</p>;
  return <div className="trend"><small className="daily-label">По дням · {unit} · начало суток {time.format(launch)} МСК</small>
  <RangeChart release title={title} unit={unit} step={DAY} pivot={launch} pick={pick}
- markers={marks.map(m=>({from:launch+m.start*DAY,to:launch+m.end*DAY,reason:m.reason,href:calcHref(m.calc)}))}
+ markers={marks.map(m=>({from:launch+m.start*DAY,to:launch+m.end*DAY,reason:m.reason,href:calcHref(m.calc),
+   open:openCalculation ? ()=>openCalculation(m.calc) : undefined}))}
  lines={keys.map(k=>({key:k,name:lines[k].title,color:lines[k].color,points:series[k].map((p,i)=>({at:launch+days[i]*DAY,...p,partial:!!p.pending||completed===null||(completed!==undefined&&completed<launch+(days[i]+1)*DAY)}))}))}/>
     <details className="daily-table" onToggle={e=>setTableOpen(e.currentTarget.open)}><summary>Данные по дням</summary>
       {tableOpen&&<div className="table-scroll"><table className="numbers"><caption>{title} · {time.format(launch)} МСК, начало суток</caption>

@@ -1,5 +1,4 @@
-import {useState} from 'react';
-import {api,calcHref,dayDate,fmt,segmentNames} from './types';
+import {api,dayDate,fmt,segmentNames} from './types';
 import type {Card,Report,Row,Series,Derived} from './types';
 import {Trend,lines} from './trend';
 import {eventSample,metricSample} from './metric-values';
@@ -15,25 +14,57 @@ export function Comparisons({series,unit,metric}:{series:Record<string,Pick<Seri
 const launchTime = new Intl.DateTimeFormat('ru-RU', {
   hour: '2-digit', minute: '2-digit', timeZone: 'Europe/Moscow',
 });
-export function MetricCard({card:c,report:r,select,insight}:{card:Card;report:Report;select:()=>void;insight?:string}){
-  const mark=r.report?.highlights.find(h=>h.metric===c.metric),notes=r.notes.filter(n=>n.metric===c.metric);
-  const [proof,setProof]=useState(''),[error,setError]=useState('');
-  const {before,after}=c.series.all;
-  return <article className={'card '+(mark?'important':'')}><div className="metric-head"><h3>{c.title}</h3>
-    <PeriodSummary before={{...before,sample:metricSample(before,c.metric)}} after={{...after,sample:metricSample(after,c.metric)}} unit={c.unit} launch={r.release.launch} day={r.context.day} status={c.status} asTable/></div>
-    <Trend days={r.days} launch={r.release.launch} unit={c.unit} title={c.title} series={Object.fromEntries(Object.entries(c.series).map(([k,v])=>[k,v.daily]))} marks={notes} onInspect={select} rate={c.metric<2} unknown={c.unknown.daily} metric={c.metric} completed={r.completed} pick={async(series,ranges)=>{const saved=await api<{id:string}>('compare',{...r.context,metric:c.metric});return {label:'',selection:{source:'release',calcId:saved.id,version:r.context.version,metric:String(c.metric),series,ranges}};}}/>
-    <p className="caption">{c.status==='ready'&&mark&&r.context.segment==='all'&&r.report?.version===r.context.version?mark.reason:c.caption}</p>
-    {insight&&<p className="caption">{insight}</p>}
-    <details onToggle={e=>{if(e.currentTarget.open)select();}}><summary>Показать расчёт</summary>
+export function MetricChart({card,report,openCalculation}:{
+  card:Card;report:Report;openCalculation:(id:string)=>void;
+}){
+  const series = Object.fromEntries(Object.entries(card.series).map(([key, value]) => [key, value.daily]));
+  return <Trend days={report.days} launch={report.release.launch} unit={card.unit} title={card.title}
+    series={series} marks={report.notes.filter(note => note.metric === card.metric)} openCalculation={openCalculation}
+    metric={card.metric} completed={report.completed}
+    pick={async (series, ranges) => {
+      const saved = await api<{id:string}>('compare', { ...report.context, metric: card.metric });
+      return { label: '', selection: {
+        source: 'release', calcId: saved.id, version: report.context.version, metric: String(card.metric), series, ranges,
+      } };
+    }}/>;
+}
+
+export function MetricEvidence({card:c,report:r,openCalculation}:{
+  card:Card;report:Report;openCalculation:(id:string)=>void;
+}){
+  const mark = r.report?.highlights.find(item => item.metric === c.metric);
+  const notes = r.notes.filter(note => note.metric === c.metric);
+  return <details className="paper">
+    <summary>Источники и охват</summary>
     <p>Сравниваются семь суток до и после запуска. Границы суток в {launchTime.format(r.release.launch)} МСК.</p>
-    {mark&&<p className="hint">Первый разбор · <a href={calcHref(mark.calc)}>{mark.reason}</a></p>}
-    {notes.map(n=><p key={n.calc} className="hint"><a href={calcHref(n.calc)}>{dayDate(r.release.launch,n.start)} – {dayDate(r.release.launch,n.end)} · {segmentNames[n.segment]} · {n.reason}</a></p>)}
-    <p>{c.formula}</p><div className="table-scroll"><Comparisons series={c.series} unit={c.unit} metric={c.metric}/></div>
+    {mark&&<p className="hint">Первый разбор · <button type="button" className="text-action"
+      onClick={()=>openCalculation(mark.calc)}>{mark.reason}</button></p>}
+    {notes.map(n=><p key={n.calc} className="hint"><button type="button" className="text-action"
+      onClick={()=>openCalculation(n.calc)}>{dayDate(r.release.launch,n.start)} – {dayDate(r.release.launch,n.end)} · {segmentNames[n.segment]} · {n.reason}</button></p>)}
     {Object.keys(c.series).length===1&&<small>Нет данных о версии интерфейса</small>}
     {!!(c.unknown.after.d+c.unknown.after.pending)&&<p>После запуска без версии · {c.unknown.after.d+c.unknown.after.pending}</p>}
     {!!c.both.length&&<details><summary>Видели обе версии · {c.both.length}</summary><p>Учтены по первому показу.</p>{c.both.map((o,j)=><p key={j}>{o.id} · {lines[o.first].title} → {lines[o.first==='old'?'new':'old'].title} · {new Date(o.other).toLocaleString('ru-RU',{timeZone:'Europe/Moscow'})} МСК</p>)}</details>}
-    {proof?<a href={calcHref(proof)}>Открыть сохранённый расчёт</a>:<button onClick={async()=>{try{setProof((await api<{id:string}>('compare',{...r.context,metric:c.metric})).id);}catch(e){setError(String(e));}}}>Получить ссылку на расчёт</button>}
-    {error&&<p role="alert">{error}</p>}</details></article>;
+  </details>;
+}
+
+export function MetricCard({card:c,report:r,insight,openComparison,openCalculation}:{
+  card:Card;report:Report;insight?:string;openComparison:()=>void;openCalculation:(id:string)=>void;
+}){
+  const mark = r.report?.highlights.find(item => item.metric === c.metric);
+  const {before,after} = c.series.all;
+  return <article className={'card ' + (mark ? 'important' : '')}>
+    <div className="metric-head">
+      <h3>{c.title}</h3>
+      <PeriodSummary before={{...before,sample:metricSample(before,c.metric)}} after={{...after,sample:metricSample(after,c.metric)}}
+        unit={c.unit} launch={r.release.launch} day={r.context.day} status={c.status} asTable/>
+    </div>
+    <MetricChart card={c} report={r} openCalculation={openCalculation}/>
+    <p className="caption">{c.status==='ready'&&mark&&r.context.segment==='all'&&r.report?.version===r.context.version ? mark.reason : c.caption}</p>
+    {insight&&<p className="caption">{insight}</p>}
+    <button type="button" className="text-action release-card-action" aria-haspopup="dialog" onClick={openComparison}>
+      Показать расчёт
+    </button>
+  </article>;
 }
 export function ChartSummary({chart,launch,day}:{chart:Derived;launch:number;day:number}){
   const {before,after,spec}=chart;
