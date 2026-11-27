@@ -141,6 +141,8 @@ export function listSales(db) {
       value: f.data.orders_index,
       partial: /неполн/i.test(f.data.comment || ''),
       source: f.file + ' · ' + f.loc,
+      file: f.file,
+      loc: f.loc,
       version: f.version,
     }))
     .sort((a, b) => a.week.localeCompare(b.week));
@@ -292,10 +294,13 @@ function checkDate(value) {
 function ratioCard(rows, metric, limits, selection) {
   const available = aggregateMetric(rows, metric, limits);
   const result = selection ? aggregateMetric(rows, metric, { ...limits, ...selection }) : available;
+  const selected = result.selectedRows.map(({date,numerator,denominator,source,file,loc,version}) => ({
+    date, n:numerator, d:denominator, source, file, loc, version,
+  }));
   return { n: result.n, d: result.d, reason: result.reason,
     ...(available.choices.length && {choices: available.choices}),
     ...(selection && {selection}),
-    sources: result.selectedRows?.map(r => r.evidenceSource) || [] };
+    rows: selected, sources: selected.map(r => r.source) };
 }
 export function analysisView(
   db,
@@ -307,7 +312,9 @@ export function analysisView(
   const c = caseId ? getCase(db, caseId) : null,
     all = listSales(db);
   product = c?.product || product || all.at(-1)?.product || '';
-  const metrics = facts(db, 'metrics').map(f => ({ ...f.data, evidenceSource: f.file + ' · ' + f.loc }));
+  const metrics = facts(db, 'metrics').map(({data,file,loc,version}) => ({
+    ...data, source: file + ' · ' + loc, file, loc, version,
+  }));
   const reported = all.filter(x => x.product === product);
   const latestWeek = reported.at(-1)?.week;
   const latestDay = metrics.reduce((max, r) => {

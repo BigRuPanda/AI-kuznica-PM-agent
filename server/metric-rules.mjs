@@ -52,7 +52,7 @@ export function saveMetricRule(db, input) {
 
 function readInputs(db) {
   const rows = facts(db,'metrics').filter(f => Object.hasOwn(specs, f.data.metric_id))
-    .map(f => ({...f.data, source: f.file + ' · ' + f.loc, version: f.version}));
+    .map(({data,file,loc,version}) => ({...data, source: file + ' · ' + loc, file, loc, version}));
   return {rows, releases: facts(db,'releases').map(f => f.data)};
 }
 
@@ -60,7 +60,7 @@ function weekEvidence(week, sample) {
   return {
     week, n: sample.n, d: sample.d,
     rows: sample.selectedRows.map(r => ({ date:r.date, segment:r.segment, n:r.numerator, d:r.denominator,
-      sourceId:r.source_id, source:r.source, version:r.version })),
+      sourceId:r.source_id, source:r.source, file:r.file, loc:r.loc, version:r.version })),
   };
 }
 

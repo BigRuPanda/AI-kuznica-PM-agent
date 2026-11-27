@@ -9,7 +9,7 @@ import { chromium } from 'playwright';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { createTeamApp } from '../server/team-http.mjs';
-import { importDocs } from '../server/evidence.mjs';
+import { facts, importDocs } from '../server/evidence.mjs';
 import { saveMetricRule } from '../server/metric-rules.mjs';
 import { workJobs } from '../server/workbench.mjs';
 import { workspaceOperation } from '../server/workspace-operations.mjs';
@@ -1132,6 +1132,100 @@ test('Softline workspace, upgrade and browser journeys', async t => {
     assert.match(await rows.nth(0).textContent(),/Отозван.*BI · пересчёт\.xlsx/);
     assert.match(await rows.nth(1).textContent(),/Подтверждён.*70 п\. индекса.*BI · пересчёт\.xlsx/);
     assert.notEqual(await rows.nth(0).locator('small').getAttribute('title'),await rows.nth(1).locator('small').getAttribute('title'));
+  });
+
+  await journey('ratio evidence points to the selected workbook revision', async () => {
+    const store = app.space('team');
+    const {user} = await app.accounts.login({login:'fixture-admin',password:'fixture-password'});
+    const product = 'ЛК для проверки версий';
+    const file = 'Проверка долей.xlsx', date = '2026-08-03', loc = 'Визиты и клики!B4';
+    const load = (numerator, denominator) => {
+      importDocs(store, [{file,facts:[
+        {kind:'metrics',loc,row:{metric_id:'lk_reco_ctr',product,date,segment:'all',unit:'ratio',numerator,denominator,value:0.99}},
+        {kind:'metrics',loc:'Охват!C7',row:{metric_id:'cfg_reach_rate',product,date,segment:'all',unit:'ratio',
+          numerator:6,denominator:20,value:0.99}},
+      ]}], {notify:false});
+      return facts(store.db,'metrics').find(f => f.file === file && f.loc === loc).version;
+    };
+    const calculate = () => workspaceOperation(store,user,'view',{product,from:date,through:'2026-08-09',
+      ratioSelections:{ctr:{product,segment:'all',sourceId:'office:'+file,definitionId:'office'}}}).view.id;
+    const firstVersion = load(2,40), first = calculate();
+    const route = 'snapshot/'+first+'/evidence,ctr,reach';
+    const sources = admin.locator('.card-evidence').getByRole('button',{name:/^Метрики/});
+    const openRatio = async (dialog, metric, value, target) => {
+      const row = dialog.getByRole('row').filter({hasText:metric});
+      await visible(row.getByRole('cell',{name:date,exact:true}));
+      await visible(row.getByRole('cell',{name:value,exact:true}));
+      const link = row.getByRole('link');
+      assert.equal(await link.getAttribute('href'),target);
+      return link;
+    };
+    const ctrSource = '#knowledge-source/'+firstVersion+'/'+encodeURIComponent(loc);
+    await go(admin,route);
+    await sources.click();
+    const dialog = admin.getByRole('dialog');
+    await openRatio(dialog,/CTR рекомендаций/,'5% (2 / 40)',ctrSource);
+    await openRatio(dialog,/Охват/,'30% (6 / 20)',
+      '#knowledge-source/'+firstVersion+'/'+encodeURIComponent('Охват!C7'));
+    await admin.keyboard.press('Escape');
+    await dialog.waitFor({state:'hidden'});
+
+    const secondVersion = load(0,0), second = calculate();
+    assert.notEqual(secondVersion,firstVersion);
+    await go(admin,'snapshot/'+second+'/evidence,ctr');
+    await sources.click();
+    await openRatio(dialog,/CTR рекомендаций/,'0 / 0','#knowledge-source/'+secondVersion+'/'+encodeURIComponent(loc));
+    assert.equal(await dialog.getByRole('row').filter({hasText:/CTR рекомендаций/}).filter({hasText:'%'}).count(),0);
+    await admin.keyboard.press('Escape');
+    await dialog.waitFor({state:'hidden'});
+
+    await go(admin,route);
+    await admin.reload();
+    await sources.click();
+    const link = await openRatio(dialog,/CTR рекомендаций/,'5% (2 / 40)',ctrSource);
+    await link.click();
+    assert.equal(new URL(admin.url()).hash,ctrSource);
+    await visible(admin.getByRole('heading',{name:file}));
+    await visible(admin.getByText(new RegExp('Версия '+firstVersion.slice(0,12))));
+    const cell = admin.locator('.excerpt').first();
+    await visible(cell.getByText(loc,{exact:true}));
+    await visible(cell.getByText(/numerator = 2 · denominator = 40/));
+  });
+
+  await journey('saved signal cites its own metric', async () => {
+    const store = app.space('team');
+    const {user} = await app.accounts.login({login:'fixture-admin',password:'fixture-password'});
+    const product = 'ЛК для проверки сигнала', metric = 'lk_reco_ctr', releaseId = 'Релиз проверки сигнала';
+    const file = 'Исходные наблюдения сигнала.xlsx';
+    const week = index => new Date(Date.UTC(2026, 4, 4 + index * 7)).toISOString().slice(0,10);
+    const loc = index => 'Наблюдения!A' + (index + 2);
+    importDocs(store,[{file,facts:[
+      {kind:'releases',loc:'Релизы!A2',row:{release_id:releaseId,release_date:week(4),product_family:product}},
+      {kind:'sales',loc:'Индекс!A2',row:{week_start:week(1),product_family:product,orders_index:123}},
+    ]}],{notify:false});
+    saveMetricRule(store.db,{metric,product,releaseId,sourceId:'office:'+file});
+    importDocs(store,[{file,facts:Array.from({length:6},(_, i) => ({
+      kind:'metrics',loc:loc(i),row:{metric_id:metric,product,date:week(i),segment:'all',unit:'ratio',
+        numerator:i < 4 ? 10 : 2,denominator:100,value:0.99},
+    }))}],{notify:false});
+    const version = facts(store.db,'metrics').find(f => f.file === file && f.loc === loc(5)).version;
+    const {id:caseId} = store.db.prepare('SELECT id FROM cases WHERE product=?').get(product);
+    const {view} = workspaceOperation(store,user,'view',{caseId});
+    assert.equal(view.summary[0].rows[0].value,123);
+
+    await go(admin,'snapshot/'+view.id+'/signal');
+    await admin.reload();
+    const proof = admin.locator('.card-signal details.proof');
+    await proof.getByText('Источники и период',{exact:true}).click();
+    const orderIndexRowsInSignalProof = await proof.locator('small').filter({hasText:/Индекс!A2/}).count();
+    assert.equal(orderIndexRowsInSignalProof,0);
+    await visible(proof.getByText('База до релиза',{exact:true}));
+    await visible(proof.getByText('Неделя сигнала',{exact:true}));
+    const latest = proof.locator('details').filter({hasText:'2 / 100'}).last();
+    await latest.locator('summary').click();
+    await visible(latest.getByText(new RegExp(week(5))));
+    assert.equal(await latest.getByRole('link',{name:file+' · '+loc(5)}).getAttribute('href'),
+      '#knowledge-source/'+version+'/'+encodeURIComponent(loc(5)));
   });
 
   await journey('CTR signal, absolute target and saved versions work through the browser and HTTP MCP', async () => {

@@ -1,5 +1,6 @@
 import React from 'react';
 import { changeLabel, signalBaseline, signalEvidenceWeek, signalPeriod } from './case-periods';
+import { SourceLink } from './knowledge-source';
 import { num, type Signal, type SignalWeekEvidence } from './team-data';
 
 const countLabels: Record<string, string> = {
@@ -17,7 +18,8 @@ function WeekEvidence({ sample }: { sample: SignalWeekEvidence }) {
     <summary>{signalEvidenceWeek(sample.week)} · {num(sample.n)} / {num(sample.d)}</summary>
     {sample.rows.map(row => <small key={[row.version, row.source, row.date, row.segment].join('/')}>
       {row.date} · {row.segment === 'all' ? 'Весь трафик' : row.segment} · {num(row.n)} / {num(row.d)}<br/>
-      {row.source} · версия {row.version.slice(0, 12)}
+      <SourceLink {...row}/>
+      {row.version && <> · версия {row.version.slice(0, 12)}</>}
       {row.sourceId?.startsWith('metrika:') && <> · {describeSource(row.sourceId)}</>}
     </small>)}
   </details>;

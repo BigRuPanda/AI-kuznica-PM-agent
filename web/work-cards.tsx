@@ -2,9 +2,10 @@ import { RangeChart, WEEK } from './range-chart';
 import type { Attachment } from './range-chart';
 import React, { useState } from 'react';
 import { num } from './team-data';
-import type { View, Issue, MetricSeries } from './team-data';
-import { analysisPeriods, changeLabel } from './case-periods';
+import type { View, Issue, MetricSeries, RatioCard, SourceReference } from './team-data';
+import { analysisPeriods, changeLabel, signalPeriod } from './case-periods';
 import { SignalEvidence } from './signal-evidence';
+import { SourceLink } from './knowledge-source';
 import { metricName, WatchSummary } from './measurement';
 import { Icon } from './icons';
 import { Dialog } from './dialog';
@@ -29,30 +30,38 @@ const sourceKinds = [
   { key: 'backlog', label: 'Связанные задачи', icon: 'cases' },
 ] as const;
 
-type MetricSourceRow = { label: string; date?: string; value?: string; source: string; partial?: boolean };
+type MetricSourceRow = SourceReference & { label: string; date?: string; value?: string; partial?: boolean };
+
+function ratioValue(n?: number | null, d?: number | null) {
+  if (n == null || d == null) return undefined;
+  const counts = num(n) + ' / ' + num(d);
+  return d > 0 && n >= 0 && n <= d ? num(n / d * 100) + '% (' + counts + ')' : counts;
+}
+
+function ratioSources(card: RatioCard | undefined): (SourceReference & { date?: string; value?: string })[] {
+  return card?.rows?.map(row => ({...row, value: ratioValue(row.n, row.d)})) ??
+    [...new Set(card?.sources)].map(source => ({source}));
+}
 
 function metricSourceRows(view: View): MetricSourceRow[] {
-  const orders = view.summary.flatMap(series => series.rows.map(row => ({
-    label: 'Индекс заказов · ' + series.product,
-    date: row.week, value: num(row.value) + ' п.', source: row.source, partial: row.partial,
+  const orders = view.summary.flatMap(series => series.rows.map(({week, value, ...row}) => ({
+    ...row, label: 'Индекс заказов · ' + series.product,
+    date: week, value: num(value) + ' п.',
   })));
   const signal = view.signal;
   const signalLabel = signal?.metric && metricName(signal.metric);
   const observed = signalLabel && signal.evidence
     ? [...signal.evidence.baseline, signal.evidence.latest].flatMap(week => week.rows.map(row => ({
+      ...row,
       label: signalLabel + (row.segment && row.segment !== 'all' ? ' · ' + row.segment : ''),
-      date: row.date,
-      value: row.n != null && row.d != null && row.d > 0
-        ? num(row.n / row.d * 100) + '% (' + num(row.n) + ' / ' + num(row.d) + ')' : undefined,
-      source: row.source,
+      value: ratioValue(row.n, row.d),
     })))
     : [];
-  const observations = new Set(observed.map(row => row.source));
   const ratios = [
-    { label: metricName('lk_reco_ctr'), sources: view.ctr?.sources },
-    { label: metricName('cfg_reach_rate'), sources: view.reach?.sources },
-  ].flatMap(({label, sources}) => [...new Set(sources)].filter(source => label !== signalLabel || !observations.has(source))
-    .map(source => ({ label, source })));
+    ...ratioSources(view.ctr).map(row => ({...row, label: metricName('lk_reco_ctr')})),
+    ...ratioSources(view.reach).map(row => ({...row, label: metricName('cfg_reach_rate')})),
+  ].filter(row => row.label !== signalLabel || !observed.some(observation => observation.source === row.source &&
+    (!row.date || observation.date === row.date && observation.version === row.version)));
   return [...orders, ...observed, ...ratios];
 }
 
@@ -62,7 +71,7 @@ function Sources({ view }: { view: View }) {
   const rows = metrics ? metricSourceRows(view) : [];
   const entries = category && !metrics ? view.evidence.filter(item => item.kind === category.key) : [];
   const hasMetrics = view.summary.some(series => series.rows.length) || view.signal?.evidence ||
-    !!view.ctr?.sources?.length || !!view.reach?.sources?.length;
+    !!(view.ctr?.rows?.length || view.ctr?.sources?.length || view.reach?.rows?.length || view.reach?.sources?.length);
   return (
     <div className="sources-grid">
       {sourceKinds.map(kind => {
@@ -96,7 +105,7 @@ function Sources({ view }: { view: View }) {
                       <td>{row.label}</td>
                       <td>{row.date || '—'}{row.partial && <small>Неполная неделя</small>}</td>
                       <td>{row.value || '—'}</td>
-                      <td>{row.source}</td>
+                      <td><SourceLink {...row} /></td>
                     </tr>
                   )) : entries.map(item => (
                     <tr key={item.key}>
@@ -110,7 +119,7 @@ function Sources({ view }: { view: View }) {
                         {item.metadata?.hypothesis && <small>Гипотеза · {item.metadata.hypothesis}</small>}
                         {item.metadata?.relation && <small>Связь с гипотезой · {item.metadata.relation}</small>}
                       </td>
-                      <td>{item.source}</td>
+                      <td><SourceLink {...item} /></td>
                     </tr>
                   ))}
                 </tbody>
@@ -288,7 +297,9 @@ export function Cards({
           )}
           {k === 'watch' && (view.monitoring ? <WatchSummary {...view.monitoring} /> :
             <p>Период наблюдения и критерий успеха указаны в разделе «Проверка эффекта».</p>)}
-          {k === 'signal' && view.signal?.metric && <SignalEvidence signal={view.signal} />}
+          {k === 'signal' && view.signal && (
+            <p className="big-number">{num(view.signal.value)}{view.signal.metric ? '%' : ' п.'}</p>
+          )}
           {k !== 'watch' && <div className="card-foot">
             {k === 'evidence' ? openVersion : <details className="proof">
               <summary>Источники и период</summary>
@@ -298,14 +309,19 @@ export function Cards({
                   {view.full ? 'Только полные недели.' : ''}
                 </p>
               )}
-              {k === 'ctr' ? (
-                view.ctr.sources.map((s) => <small key={s}>{s}</small>)
-              ) : k === 'reach' ? (
-                (view.reach.sources || []).map((s) => <small key={s}>{s}</small>)
+              {k === 'ctr' || k === 'reach' ? (
+                ratioSources(view[k]).map((row, i) => <small key={i}>
+                  {row.date && row.date + ' · '}{row.value && row.value + ' · '}<SourceLink {...row} />
+                </small>)
+              ) : k === 'signal' ? (
+                view.signal?.metric ? <SignalEvidence signal={view.signal} /> : view.signal && <>
+                  <p>Период сигнала · {signalPeriod(view.signal)}</p>
+                  {view.signal.source && <small>{view.signal.source}</small>}
+                </>
               ) : k === 'timeline' ? (
                 view.timeline.map((s) => (
                   <small key={s.file + '/' + s.loc}>
-                    {s.file} · {s.loc}
+                    <SourceLink {...s} source={s.file + ' · ' + s.loc} />
                   </small>
                 ))
               ) : k === 'gap' ? (
@@ -316,13 +332,13 @@ export function Cards({
                     {s.key} · {s.source}
                   </small>
                 ))
-              ) : (
+              ) : (k === 'summary' || k === 'trend') && (
                 view.summary.map((s) => (
                   <details key={s.product}>
                     <summary>{s.product}</summary>
                     {s.rows.map((r) => (
                       <small key={r.week}>
-                        {r.week} · {r.value} · {r.source}
+                        {r.week} · {r.value} · <SourceLink {...r} />
                       </small>
                     ))}
                   </details>

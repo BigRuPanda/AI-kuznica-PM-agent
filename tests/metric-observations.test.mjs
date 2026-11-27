@@ -7,6 +7,7 @@ import { aggregateMetric, normalizeObservation } from '../server/metric-observat
 import { createThread, initWorkbench } from '../server/workbench.mjs';
 import { workspaceOperation } from '../server/workspace-operations.mjs';
 import { grant } from '../server/chart-ranges.mjs';
+import { sourceRows } from '../server/knowledge.mjs';
 
 const user = { id: 'tester', name: 'PM', role: 'admin' };
 const date = '2026-11-02';
@@ -71,6 +72,41 @@ test('two counters, weighted bases, explicit nonoverlap and separate Excel scope
   const chosen = workspaceOperation(s,user,'view',{product:'ЛК',from:date,through:date,
     ratioSelections:{ctr:sources[0]}}).view.ctr;
   assert.deepEqual([chosen.n,chosen.d,chosen.sources.length], [11,60,2]);
+  assert.deepEqual(chosen.rows.map(r => r.source), chosen.sources);
+  assert.ok(chosen.rows.every(r => r.file === 'Яндекс Метрика API'));
+});
+
+test('ratio evidence points to the selected workbook revision', t => {
+  const s = mem(t);
+  const file = 'Рекомендации.xlsx', loc = 'Визиты и клики!B4', reachLoc = 'Охват!C7';
+  const row = (metric_id, loc, numerator, denominator, segment = 'all') => ({
+    kind:'metrics', loc, row:{product:'ЛК', segment, date, metric_id, unit:'ratio', numerator, denominator, value:0.99},
+  });
+  const load = (clicks, views) => {
+    importDocs(s, [{file, facts:[
+      row(report.id,loc,clicks,views),
+      row(report.id,'Визиты и клики!B5',8,10,'mobile'),
+      row('cfg_reach_rate',reachLoc,6,20),
+    ]}]);
+    return facts(s.db,'metrics').find(f => f.loc === loc).version;
+  };
+  const view = () => workspaceOperation(s,user,'view',{product:'ЛК',from:date,through:'2026-11-08'}).view;
+  const first = load(2,40);
+  const saved = view();
+  const evidence = {date,n:2,d:40,source:file + ' · ' + loc,file,loc,version:first};
+  assert.deepEqual(saved.ctr.rows,[evidence]);
+  assert.deepEqual(saved.ctr.sources,[evidence.source]);
+  assert.deepEqual(saved.reach.rows,[{date,n:6,d:20,source:file + ' · ' + reachLoc,file,loc:reachLoc,version:first}]);
+  const second = load(0,0);
+  assert.notEqual(second,first);
+  const live = view().ctr;
+  assert.match(live.reason,/Знаменатель равен нулю/);
+  assert.deepEqual(live.rows,[{...evidence,n:0,d:0,version:second}]);
+  assert.deepEqual(workspaceOperation(s,user,'calc',{id:saved.id}).ctr.rows,[evidence]);
+  const archive = sourceRows(s.db,first,0,loc);
+  assert.equal(archive.rows[0].loc,loc);
+  assert.equal(archive.rows[0].value.numerator,2);
+  assert.equal(archive.rows[0].value.denominator,40);
 });
 
 test('legacy documents restore overwritten counters while keeping saved snapshots and keys stable on resync', async t => {

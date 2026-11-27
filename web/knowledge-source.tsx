@@ -1,5 +1,11 @@
 import React, { useEffect, useState } from 'react';
-import { post } from './team-data';
+import { post, type SourceReference } from './team-data';
+
+export function SourceLink({ source, file, loc, version }: SourceReference) {
+  return file && /\.(xlsx|pptx)$/i.test(file) && loc && version
+    ? <a href={'#knowledge-source/' + version + '/' + encodeURIComponent(loc)}>{source}</a>
+    : <>{source}</>;
+}
 
 export type Workbook = { file: string; version: string; created: number; total: number };
 type Extract = Workbook & {

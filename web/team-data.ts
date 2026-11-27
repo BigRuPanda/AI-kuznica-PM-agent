@@ -1,9 +1,10 @@
 export type User = { id: string; name: string; login: string; role: string; space: string; avatar?: string | null };
+export type SourceReference = { source: string; file?: string; loc?: string; version?: string };
 export type SignalWeekEvidence = {
   week: string;
   n: number;
   d: number;
-  rows: { date: string; segment?: string; n?: number; d?: number; sourceId?: string; source: string; version: string }[];
+  rows: (SourceReference & { date: string; segment?: string; n?: number; d?: number; sourceId?: string })[];
 };
 export type Signal = {
   status?: 'provisional' | 'confirmed' | 'withdrawn';
@@ -101,11 +102,10 @@ export type Home = {
   notificationChannels: string[];
   deliveries: { state: string; channel: string; n: number }[];
 };
-export type Sample = {
+export type Sample = SourceReference & {
   week: string;
   value: number;
   partial: boolean;
-  source: string;
   version: string;
   rolling?: number | null;
 };
@@ -118,17 +118,24 @@ export type Comparison = {
   weeks: number;
   rows: Sample[];
 };
-export type Evidence = {
+export type Evidence = SourceReference & {
   kind: string;
   key: string;
-  source: string;
   metadata?: {question?: string; hypothesis?: string; relation?: string; date?: string};
   data: string | { title?: string; description_short?: string; description?: string };
 };
 export type MetricSeries = { product: string; segment: string; sourceId: string; definitionId: string };
 export type MetricChoice = MetricSeries & { metric: string; stepDays: number; unit: string };
 export type RatioSelections = Partial<Record<'ctr' | 'reach', MetricSeries>>;
-type RatioCard = { n: number | null; d: number | null; reason?: string; choices?: MetricChoice[]; selection?: Partial<MetricSeries> };
+export type RatioCard = {
+  n: number | null;
+  d: number | null;
+  rows?: (SourceReference & { date: string; n: number | null; d: number | null })[];
+  sources?: string[];
+  reason?: string;
+  choices?: MetricChoice[];
+  selection?: Partial<MetricSeries>;
+};
 export type View = {
   id: string;
   product: string;
@@ -139,11 +146,11 @@ export type View = {
   requested?: { from?: string; through?: string; releaseWeek?: string };
   full: boolean;
   summary: Comparison[];
-  timeline: { file: string; loc: string; data: Release }[];
+  timeline: { file: string; loc: string; version?: string; data: Release }[];
   evidence: Evidence[];
   corrections: { source: string; comment: string; author: string }[];
   ctr: RatioCard & { sources: string[] };
-  reach: RatioCard & { sources?: string[] };
+  reach: RatioCard;
   gap?: string;
   signal?: Signal;
   monitoring?: Monitoring;
