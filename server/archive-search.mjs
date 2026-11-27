@@ -1,4 +1,4 @@
-import { normalizeObservation } from './metric-observations.mjs';
+import { normalizeObservation, observationWithin } from './metric-observations.mjs';
 import { explicitDates } from './day-comparison.mjs';
 import { apiConfigured, providerCall } from './agent.mjs';
 
@@ -120,39 +120,54 @@ function excerpt(r, words) {
   return {text:retained.map(f=>f.field.slice(0,130)+' — '+passage(f.answer,words,size)).join('\n'),refs:retained.map(f=>f.ref)};
 }
 
-function archiveScope(db, {product,from,through}) {
+function archiveScope(db, {product,from,through,full,snapshot}) {
   const idx=archiveIndex(db);
   const corrections=product?db.prepare('SELECT source,comment FROM feedback WHERE product=? ORDER BY id').all(product):[];
   const excluded=new Map(corrections.map(row=>[row.source,row.comment.startsWith('[Исключить связь]')]));
   const visible=r=>!r.refs.some(s=>excluded.get(s.file+' · '+s.loc)) &&
     !excluded.get(r.data?.sourceFile+' · '+r.data?.sourceLoc);
   const inPeriod=date=>!date || (!from || from<=date) && (!through || date<=through);
-  const records=idx.records.filter(r=>visible(r) && inPeriod(r.data?.release_date || r.data?.created_date || r.data?.date));
+  const isComplete=r=>!full || !r.data?.partial && !/неполн/i.test(r.data?.comment || '');
+  const releaseVersions = snapshot?.releaseVersions && new Set(snapshot.releaseVersions);
+  const metricVersions = snapshot?.metricVersions && new Set(snapshot.metricVersions);
+  const records=idx.records.filter(r=>visible(r) && inPeriod(r.data?.release_date || r.data?.created_date || r.data?.date) &&
+    (r.kind!=='releases' || !releaseVersions || releaseVersions.has(r.refs[0].version)));
+  const indexedReleases = new Set(records.filter(r=>r.kind==='releases').map(r=>r.refs[0].version+'/'+r.refs[0].loc));
+  for (const row of snapshot?.timeline || []) {
+    if (!row.version || !row.loc || !row.file || !row.data?.release_date ||
+        indexedReleases.has(row.version+'/'+row.loc) || !inPeriod(row.data.release_date)) continue;
+    const text=values(row.data), record={kind:'releases',data:row.data,text,
+      refs:[ref(row.version,row.file,row.loc)],words:new Set(stems(text)),titleWords:new Set()};
+    if (visible(record)) records.push(record);
+  }
   const visibleTasks=new Set(records.filter(r=>r.kind==='backlog').map(r=>r.data.task_id));
   return {
     records,
     hiddenTasks:new Set(idx.records.filter(r=>r.kind==='backlog' && !visibleTasks.has(r.data.task_id)).map(r=>r.data.task_id)),
-    metrics:idx.metrics.filter(r=>visible(r) && inPeriod(r.data.date) && (!product || r.data.product===product)),
-    sales:idx.sales.filter(r=>visible(r) && inPeriod(r.data.week_start)),
+    metrics:idx.metrics.filter(r=>visible(r) && isComplete(r) && observationWithin(r.data,from,through) &&
+      (!metricVersions || metricVersions.has(r.refs[0].version)) && (!product || r.data.product===product)),
+    sales:snapshot ? [] : idx.sales.filter(r=>visible(r) && isComplete(r) &&
+      observationWithin({date:r.data.week_start,step_days:7},from,through)),
   };
 }
 
-const archiveIds = question => question.match(/(?<![\p{L}\d_-])[a-z][a-z\d]*-\d+(?![\p{L}\d_-])/giu) || [];
+const archiveIds = question => (question.match(/(?<![\p{L}\d_-])[a-z][a-z\d]*[-–‑]\d+(?![\p{L}\d_-])/giu) || [])
+  .map(id=>id.replace(/[–‑]/u,'-'));
 
 export function archiveIdStatus(db, question, scope = {}) {
   const ids=archiveIds(question);
   if (!ids.length || !/релиз|задач|тикет|б[еэ]клог/iu.test(question)) return;
   const { records,hiddenTasks }=archiveScope(db,scope);
   const entries=records.flatMap(r=>r.kind==='releases' ? [r.data.release_id,...taskIdsOf(r).filter(id=>!hiddenTasks.has(id))] :
-    r.kind==='backlog' ? [r.data.task_id,...list(r.data.release_id)] : []);
+    r.kind==='backlog' ? [r.data.task_id] : []);
   const known=new Set(entries.filter(Boolean).map(id=>id.toUpperCase()));
   const prefixes=new Set([...known].map(id=>id.split('-')[0]));
   const requested=[...new Set(ids.map(id=>id.toUpperCase()))].filter(id=>/^[RT]-/u.test(id) || prefixes.has(id.split('-')[0]));
   return {found:requested.filter(id=>known.has(id)),missing:requested.filter(id=>!known.has(id))};
 }
 
-export function archiveEvidence(db, question, {releaseId,product,from,through,now = Date.now()}={}) {
-  const idx=archiveScope(db,{product,from,through}), words=stems(question);
+export function archiveEvidence(db, question, {releaseId,now = Date.now(),...scope}={}) {
+  const idx=archiveScope(db,scope), words=stems(question);
   const q=question.toLowerCase(), dates=explicitDates(q,String(new Date(now).getFullYear()));
   const visible=idx.records;
   const candidates=ranked(visible,words,termStatistics(visible));
@@ -248,7 +263,7 @@ export function archiveEvidence(db, question, {releaseId,product,from,through,no
       const series=idx.metrics.filter(r=>r.data.metric_id===m.metric_id && (!segment || r.data.segment===segment));
       const requestedDates = dates.length ? dates : feature && /день (?:запуска|выкладки|релиза)/iu.test(q) ? [feature.data.release_date] : [];
       if(requestedDates.length) {
-        const observations=series.filter(r=>requestedDates.includes(r.data.date) && (!product || r.data.product===product));
+        const observations=series.filter(r=>requestedDates.includes(r.data.date));
         const definitions=new Set(observations.map(({data:d})=>JSON.stringify([d.source_id,d.definition_id,d.step_days])));
         if(definitions.size>1) {
           add('Для этих дат есть несколько рядов. Уточните источник и определение показателя: '+[...definitions].join(', '),observations.map(r=>r.refs[0]),'measurement');

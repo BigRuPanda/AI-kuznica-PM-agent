@@ -1,7 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { openStore } from '../server/store.mjs';
-import { initEvidence, importDocs } from '../server/evidence.mjs';
+import { analysisView, initEvidence, importDocs } from '../server/evidence.mjs';
+import { grant } from '../server/chart-ranges.mjs';
 import { initWorkbench, createThread, enqueue, workJobs, messages } from '../server/workbench.mjs';
 import { webQuestion } from '../server/web-search.mjs';
 import { competitorQuestion } from '../server/competitor-chat.mjs';
@@ -17,8 +18,9 @@ function context(t) {
     row('sales','Sales!A2',{product_family:'Astra OS', week_start:'2026-04-06', orders_index:33}),
     row('sales','Sales!A3',{product_family:'Kaspersky Pro', week_start:'2026-04-06', orders_index:21}),
     row('sales','Sales!A4',{product_family:'Astra OS', week_start:'2026-03-30', orders_index:40}),
+    row('sales','Sales!A5',{product_family:'Astra OS', week_start:'2026-04-20', orders_index:55, comment:'Неполная неделя'}),
     row('releases','Calendar!A2',{release_id:'R-38',release_date:'2026-04-06',description:'Доставка через архив',related_task_ids:'T-871,T-999'}),
-    row('backlog','Tasks!A2',{task_id:'T-999',created_date:'2026-05-01',title:'Поздняя задача'}),
+    row('backlog','Tasks!A2',{task_id:'T-999',created_date:'2026-05-01',title:'Поздняя задача',release_id:'R-999'}),
     row('dictionary','Dictionary!A2',{metric_id:'impressions',metric_name:'Видимые показы витрины',what_it_means:'Видимый показ требует 72% площади за 3 секунды',formula_or_logic:'Число событий видимого показа'}),
     {kind:'interview',loc:'Interview!C8',text:'Недостающую лицензию доставили, устанавливал отдел инженеров.',detail:{field:'Опыт клиента',answer:'Недостающую лицензию доставили, устанавливал отдел инженеров.'}},
     {kind:'competitor',loc:'Prices!A4',prices:{'Продукт':'Лицензия для доставки'},row:{}},
@@ -27,12 +29,13 @@ function context(t) {
   ]}], {notify:false});
   const thread = createThread(store.db,user,'Аудит');
   const other = createThread(store.db,user,'Другой разговор');
-  return async (question,{ otherThread, ...options }={}) => {
+  const ask = async (question,{ otherThread, ...options }={}) => {
     const target = otherThread ? other : thread;
     enqueue(store,user,{thread:target,question,...options});
     await workJobs(store,{publicUser:()=>user},{});
     return messages(store.db,user,target).items.at(-1).body;
   };
+  return Object.assign(ask,{store,thread});
 }
 test('weekly comparisons and subsequent questions resolve the named products and the same week', async t => {
   const ask=context(t);
@@ -94,6 +97,40 @@ test('historical archive lookup excludes releases beyond the selected cutoff', a
   assert.doesNotMatch(linked.text,/T-999|Поздняя задача/);
   assert.ok(!linked.readSources.some(s=>s.label.includes('Tasks!A2')));
 });
+
+test('selected screen enforces its date bounds and complete-week filter before archive lookup', async t => {
+  const ask=context(t);
+  const db=ask.store.db;
+  const snapshot=analysisView(db,{product:'Astra OS',from:'2026-04-13',through:'2026-04-26',full:true});
+  grant(db,snapshot.id,'thread',ask.thread);
+  const screen={calc:snapshot.id,asOf:'2026-05-10',full:false};
+  const early=await ask('Какой индекс заказов Астры за неделю с 2026-04-06?',{screen});
+  const partial=await ask('Какой индекс заказов Астры за неделю с 2026-04-20?',{screen});
+  const release=await ask('Что известно в архиве о релизе R-38?',{screen});
+  const later=await ask('Что известно в архиве о задаче T-999 по состоянию на 2026-05-10?',{screen});
+  for (const reply of [early,partial,release,later]) assert.deepEqual(reply.readSources,[]);
+  assert.doesNotMatch(early.text,/33/u);
+  assert.doesNotMatch(partial.text,/55/u);
+  assert.doesNotMatch(release.text,/Доставка через архив/u);
+  assert.doesNotMatch(later.text,/Поздняя задача/u);
+});
+
+test('an exact weekly question on a saved screen uses the cited version after a new import', async t => {
+  const ask=context(t);
+  const db=ask.store.db;
+  const snapshot=analysisView(db,{product:'Astra OS',from:'2026-04-06',through:'2026-04-12'});
+  grant(db,snapshot.id,'thread',ask.thread);
+  const old=snapshot.summary[0].rows[0].version;
+  importDocs(ask.store,[{file:'sample.xlsx',facts:[{kind:'sales',loc:'Sales!A2',
+    row:{product_family:'Astra OS',week_start:'2026-04-06',orders_index:99},
+  }]}],{notify:false});
+  const question='Какой индекс заказов Астры за неделю с 2026-04-06?';
+  const selected=await ask(question,{screen:{calc:snapshot.id}});
+  assert.match(selected.text,/— 33/u);
+  assert.equal(selected.readSources[0].url,'#knowledge-source/'+old+'/Sales!A2');
+  const current=await ask(question);
+  assert.match(current.text,/— 99/u);
+});
 test('source requests use the meaning field and respondents’ own accounts', async t => {
   const ask=context(t);
   const term=await ask('Как в справочнике определяют видимые показы витрины?');
@@ -132,8 +169,8 @@ test('carousel chat links the release, its task and actual clicks from the impor
     })),
   ] }], { notify:false });
   const thread=createThread(store.db,user,'Личный кабинет');
-  const ask=async suffix=>{
-    enqueue(store,user,{thread,question:'После обновления карусели пользователи стали чаще переходить в магазин?' + suffix});
+  const ask=async (suffix,question='После обновления карусели пользователи стали чаще переходить в магазин?')=>{
+    enqueue(store,user,{thread,question:question + suffix});
     await workJobs(store,{publicUser:()=>user},{});
     return messages(store.db,user,thread).items.at(-1).body;
   };
@@ -146,6 +183,9 @@ test('carousel chat links the release, its task and actual clicks from the impor
   assert.ok(reply.readSources.some(s=>s.label.includes('Calendar!A2')));
   assert.ok(reply.readSources.some(s=>s.label.includes('Tasks!A2')));
   assert.ok(reply.readSources.some(s=>s.label.includes('Clicks!')));
+  const broad=await ask('','Что известно про карусель рекомендаций ЛК после выкладки?');
+  assert.match(broad.text,/14 → 28/u);
+  assert.ok(broad.readSources.some(s=>s.label.includes('Clicks!')));
   assert.match((await ask(' На 2026-10-30.')).text,/R-65/);
   assert.match((await ask(' На 2026-08-10.')).text,/нет такой выпущенной/);
 });

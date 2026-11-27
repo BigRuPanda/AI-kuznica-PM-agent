@@ -1,6 +1,7 @@
 import { explicitDates } from './day-comparison.mjs';
 import { facts, fmt, listSales, productFamily } from './evidence.mjs';
 import { sourceValues } from './knowledge.mjs';
+import { observationWithin } from './metric-observations.mjs';
 
 function namedProducts(text,catalog) {
   const families = new Set((text.match(/[\p{L}\p{N}_-]+/gu) || []).map(productFamily));
@@ -11,7 +12,7 @@ function namedProducts(text,catalog) {
 
 // A single dated week is an exact lookup. Leave chart requests, explanations,
 // multi-period analyses and compound tasks in the analytical workflow.
-export function weeklySourceAnswer(db, question, previous, { from, through, now = Date.now() } = {}) {
+export function weeklySourceAnswer(db, question, previous, { from, through, full, snapshot, now = Date.now() } = {}) {
   const q = question.toLowerCase();
   const sameWeek = /(?:ту же|эту же|за ту же самую) недел/u.test(q);
   if (!/недел/u.test(q) || /почему|объясни|причин|график|построй|релиз|задач|визит|конверси|динамик|средн(?:ее|ий)|прогноз|интервью|до и после|и (?:составь|подготовь|найди|создай|посчитай изменение)/u.test(q)) return;
@@ -20,15 +21,19 @@ export function weeklySourceAnswer(db, question, previous, { from, through, now 
   if (!date) return;
   const revenue = /выручк/u.test(q);
   if (!revenue && !/индекс.{0,28}заказ|заказ.{0,28}индекс/u.test(q) && !(sameWeek && previous?.weeklyContext)) return;
-  const weeks = listSales(db);
-  const included = week => (!from || week >= from) && (!through || week <= through);
-  const catalog = [...new Set(weeks.map(r => r.product).filter(Boolean))];
+  const current = listSales(db);
+  const weeks = snapshot ? (snapshot.summary || []).flatMap(series=>
+    (series.rows || []).map(row=>({...row,product:series.product}))) : current;
+  const included = week => observationWithin({date:week,step_days:7},from,through);
+  const catalog = [...new Set([snapshot?.product,...weeks.map(r=>r.product),...current.map(r=>r.product)].filter(Boolean))];
   const products = namedProducts(q,catalog);
   if (!products.length) return;
   const timestamp=Date.parse(date+'T00:00:00Z');
   if (!Number.isFinite(timestamp) || new Date(timestamp).toISOString().slice(0,10)!==date)
     return {mode:'source-value',outcome:'clarification',readSources:[],text:'Проверьте календарную дату начала недели: '+date+'.'};
   if (revenue) {
+    if (snapshot) return {mode:'source-value',steps:['source_value'],outcome:'done',readSources:[],
+      text:'На выбранном экране нет подтверждённого ряда выручки за неделю с '+date+'.'};
     if (facts(db,'dictionary').some(r => /выручк|revenue/iu.test([r.data.metric_id,r.data.metric_name].join(' '))) ||
         facts(db,'metrics').some(r => /выручк|revenue/iu.test(r.data.metric_id))) return;
     return {mode:'source-value', steps:['source_value'], outcome:'done', readSources:[],
@@ -37,12 +42,23 @@ export function weeklySourceAnswer(db, question, previous, { from, through, now 
   const readSources = [], lines = [], measured = [];
   const comparePrior=/(?:предыдущ|прошл)[а-яё]*\s+недел/u.test(q);
   const requestedDates=comparePrior ? [new Date(timestamp-7*86400000).toISOString().slice(0,10),date] : [date];
+  const booked = snapshot && db.prepare('SELECT file FROM documents WHERE version=?');
   for (const product of products) for(const requestedDate of requestedDates) {
-    const rows = included(requestedDate) ? sourceValues(db, {product, metric:'orders_index', date:requestedDate})
-      .filter(r => Number.isFinite(r.value)) : [];
+    const available = weeks.filter(r=>r.product===product && included(r.week) && (!full || !r.partial));
+    let rows = [];
+    if (included(requestedDate)) {
+      rows = snapshot ? available.filter(r=>r.week===requestedDate && r.version && r.source).flatMap(r=>{
+        const file = booked.get(r.version)?.file;
+        const prefix = file + ' · ';
+        if (!file || !r.source.startsWith(prefix)) return [];
+        return [{ version:r.version,file,loc:r.source.slice(prefix.length),product,date:r.week,
+          metric:'orders_index',value:r.value,comment:r.partial ? 'Неполная неделя' : undefined }];
+      }) : sourceValues(db,{product,metric:'orders_index',date:requestedDate});
+      rows = rows.filter(r=>Number.isFinite(r.value));
+    }
     if (!rows.length) {
-      const available = weeks.filter(r => r.product === product && included(r.week));
-      lines.push('В доступных продажах '+product+' нет строки за неделю с '+requestedDate+'.' +
+      const source = snapshot ? 'На выбранном экране' : 'В доступных продажах';
+      lines.push(source+' для '+product+' нет строки за неделю с '+requestedDate+'.' +
         (available.length ? ' Первая неделя в данных — '+available[0].week+', последняя — '+available.at(-1).week+'.' : ''));
     }
     for (const r of rows) {

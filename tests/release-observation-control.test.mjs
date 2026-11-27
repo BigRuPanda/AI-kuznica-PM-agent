@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { initEvidence, importDocs } from '../server/evidence.mjs';
+import { analysisView, initEvidence, importDocs } from '../server/evidence.mjs';
+import { grant } from '../server/chart-ranges.mjs';
+import { createThread, enqueue, initWorkbench, messages, workJobs } from '../server/workbench.mjs';
 import { releaseObservationAnswer } from '../server/release-observation-chat.mjs';
 import { openStore } from '../server/store.mjs';
 import { workspaceOperation } from '../server/workspace-operations.mjs';
@@ -28,6 +30,7 @@ function workspace(t, { extra = false, incomplete = false, empty = false, watch 
   store.db.prepare('INSERT INTO cases VALUES(?,?,?,?,?)').run(caseId,'Astra OS','Релиз Astra','Исследуем',
     JSON.stringify({release:'R-01',watch}));
   return {
+    store,
     ask: (question, body = {}, history = []) => releaseObservationAnswer(store,user,{question,...body},{},false,history),
     preview: () => workspaceOperation(store,user,'effect-preview',{caseId,metric:'orders_index',segment:'all',
       releaseId:'R-01',baselineWeeks:1,observationWeeks:1,asOf:'2026-04-30'}),
@@ -123,4 +126,25 @@ test('an explicit request gets an honest answer when the archive has no control 
   const reply = ask(request + ' Покажи контроль.', {caseId});
   assert.match(reply.text,/В загруженных данных нет другого семейства для контроля/u);
   assert.match(reply.text,/Наблюдаемое изменение · -10/u);
+});
+
+test('release chat keeps the selected screen period and its disabled control', async t => {
+  const {store}=workspace(t);
+  initWorkbench(store.db);
+  const thread=createThread(store.db,user,'Выбранный срез');
+  const ask=async from=>{
+    const view=analysisView(store.db,{caseId,from,through:'2026-04-22',control:false});
+    grant(store.db,view.id,'thread',thread);
+    enqueue(store,user,{thread,caseId,screen:{calc:view.id},question:request});
+    await workJobs(store,{publicUser:()=>user},{},()=>assert.fail('Expected a local archive answer'));
+    return messages(store.db,user,thread).items.at(-1).body;
+  };
+  const startsTooLate=await ask('2026-04-13');
+  assert.match(startsTooLate.text,/Период до релиза начинается раньше выбранного среза/u);
+  assert.deepEqual(startsTooLate.readSources.map(s=>s.label),['release.xlsx · Релизы!A2']);
+  const clipped=await ask('2026-04-06');
+  assert.match(clipped.text,/Срез на 2026-04-22/u);
+  assert.match(clipped.text,/Контроль отключён/u);
+  assert.doesNotMatch(clipped.text,/2026-04-30|Наблюдаемое изменение|Kaspersky Pro/u);
+  assert.deepEqual(cites(clipped,'astra.xlsx').map(r=>r.label),['astra.xlsx · Astra!A2']);
 });

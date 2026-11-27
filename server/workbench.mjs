@@ -621,7 +621,12 @@ export async function answer(store, user, b, env = process.env, send = fetch, jo
   const shared = scope === 'group';
   const activeCase = b.caseId ? visibleCase(db,user,b.caseId) : null;
   if(shared && activeCase?.body.owner) throw Error('Личный разбор недоступен в группе');
-  if (b.screen?.calc) access(db,user,b.screen.calc,shared);
+  const screen = b.screen?.calc && (access(db,user,b.screen.calc,shared),readSnapshot(db,user,b.screen.calc));
+  if (screen) {
+    if (activeCase && screen.product !== activeCase.product) throw Error('Выбранный экран относится к другому продукту');
+    b = {...b,screen:{calc:b.screen.calc,cards:b.screen.cards,full:screen.full,asOf:screen.cut,
+      requested:screen.requested,control:screen.summary?.[1]?.product}};
+  }
   const range=b.rangeId && (access(db,user,b.rangeId,shared),readRange(db,user,b.rangeId));
   const attachments=(b.materialIds || []).map(id=>readMaterial(db,user,id,shared));
   const comparisonContext=[
@@ -652,10 +657,16 @@ export async function answer(store, user, b, env = process.env, send = fetch, jo
   const last = history.at(-1)?.body;
   const previous = last && (!b.caseId || last.caseId === b.caseId) &&
     (!b.decisionReleaseId || last.decisionReleaseId === b.decisionReleaseId) ? last : undefined;
-  const archiveScope = { product:activeCase?.product || b.product, ...b.analysisPeriod,
-    through:b.analysisPeriod?.through || b.screen?.asOf };
+  const selected = focus ? undefined : screen;
+  const from = [b.analysisPeriod?.from,selected?.requested?.from || selected?.base].filter(Boolean).sort().at(-1);
+  const through = [b.analysisPeriod?.through,selected?.cut || selected?.requested?.through].filter(Boolean).sort()[0];
+  const archiveScope = { product:activeCase?.product || selected?.product || b.product,
+    from,through,full:selected?.full,snapshot:selected };
   const sourceQuestion = !focus && !b.rangeId && !b.materialIds?.length && !last?.rangeId;
   if (sourceQuestion) {
+    if (from && through && from > through)
+      return {mode:'archive',outcome:'clarification',readSources:[],
+        text:'Запрошенные даты не пересекаются с выбранным периодом. Выберите даты в пределах этого экрана.'};
     const ids = archiveInquiry(b.question) && archiveIdStatus(db,b.question,archiveScope);
     if (ids?.missing?.length) {
       const absent = 'В доступном архиве не найдены ' + ids.missing.join(', ') + '.';
@@ -669,7 +680,7 @@ export async function answer(store, user, b, env = process.env, send = fetch, jo
         text:absent+' Проверьте идентификатор в календаре релизов или бэклоге.'};
     }
     const { releaseObservationAnswer } = await import('./release-observation-chat.mjs');
-    const release = releaseObservationAnswer(store,user,b,env,shared,previous ? [history.at(-1)] : []);
+    const release = releaseObservationAnswer(store,user,b,env,shared,previous ? [history.at(-1)] : [],archiveScope);
     if (release) return {...release,decisionReleaseId:b.decisionReleaseId};
     const weekly = weeklySourceAnswer(db,b.question,previous,archiveScope);
     if (weekly) return {...weekly,caseId:b.caseId,decisionReleaseId:b.decisionReleaseId};
@@ -687,8 +698,9 @@ export async function answer(store, user, b, env = process.env, send = fetch, jo
       }
     }
   }
-  if (b.analysisPeriod && !b.rangeId && !b.materialIds?.length) {
-    const screen = b.screen?.calc && readSnapshot(db, user, b.screen.calc);
+  if (b.analysisPeriod && selected)
+    b = {...b,analysisPeriod:{from,through}};
+  if (b.analysisPeriod && !selected && !b.rangeId && !b.materialIds?.length) {
     const snap = analysisView(db, { product: b.product || screen?.product, caseId: b.caseId,
       full: b.screen?.full, control: b.screen?.control, ...b.analysisPeriod });
     grant(db, snap.id, 'thread', b.thread);
