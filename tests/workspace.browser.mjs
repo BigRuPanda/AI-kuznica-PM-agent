@@ -766,5 +766,104 @@ test('Softline workspace, upgrade and browser journeys', async t => {
       assert.ok(demo.url().endsWith('#R-002'));
     } finally { await demo.close(); }
   });
+  await journey('scenario drafts stay editable and isolated until explicitly sent', async () => {
+    const labels = ['Найти упущенный спрос', 'Выбрать, что проверить сегодня', 'Найти потери в воронке',
+      'Проверить гипотезу', 'Проверить эффект релиза'];
+    const detail = 'Только Kaspersky, мобильные, октябрь';
+    const menu = p => p.getByRole('menu', { name:'Сценарии' });
+    const trigger = p => role(p, 'Сценарии');
+    const input = p => field(p, 'Вопрос агенту');
+    async function choose(p, index) {
+      await trigger(p).click();
+      await menu(p).getByRole('menuitem', {name:labels[index], exact:true}).click();
+      assert.ok(await input(p).evaluate(el =>
+        el === document.activeElement && el.selectionStart === el.value.length && el.selectionEnd === el.value.length));
+    }
+    const requests = [];
+    const record = r => { if (/\/api\/team\/(ask|say)$/.test(r.url())) requests.push(r.postDataJSON()); };
+    admin.on('request', record);
+    member.on('request', record);
+    try {
+      await go(admin, 'chats/group');
+      await role(admin, 'Новый чат').click();
+      await field(admin, 'Название').fill('Приёмка сценариев');
+      await role(admin, 'Создать').click();
+      await visible(admin.getByRole('heading', {name:'Приёмка сценариев'}));
+      const privateRoute = admin.url().split('#')[1];
+      await input(admin).fill(detail);
+      for (const index of [0, 1, 2]) await choose(admin, index);
+      const draft = await input(admin).inputValue();
+      assert.match(draft, /^Проверь воронку подбора/);
+      assert.equal(draft.split('\n\n').at(-1), detail);
+      assert.equal(draft.split(detail).length, 2);
+      await go(admin, 'chats/group');
+      await go(admin, privateRoute);
+      assert.equal(await input(admin).inputValue(), draft);
+      await choose(admin, 3);
+      const rewrite = (await input(admin).inputValue()).replace('Проверь гипотезу', 'Оцени эту гипотезу');
+      await input(admin).fill(rewrite);
+      await choose(admin, 3);
+      assert.equal(await input(admin).inputValue(), rewrite);
+      await admin.reload();
+      await choose(admin, 4);
+      const final = await input(admin).inputValue();
+      assert.ok(final.startsWith('Сравни целевую метрику') && final.endsWith('\n\n' + rewrite));
+      assert.deepEqual(requests, []);
+      await submit(admin, 'ask', () => input(admin).press('Enter'));
+      assert.deepEqual(requests.map(r => r.question), [final]);
+
+      await go(member, 'chats/group');
+      const attached = 'Источник ' + base + '/#material/' + fixture.report;
+      await input(member).fill(attached);
+      await visible(member.locator('.chat-composer .range-attachment'));
+      await trigger(member).focus();
+      await member.keyboard.press('ArrowDown');
+      const items = menu(member).getByRole('menuitem');
+      assert.deepEqual(await items.allTextContents(), labels);
+      assert.ok(await items.evaluateAll(els => els.every(el => {
+        const r = el.getBoundingClientRect();
+        return r.width > 0 && r.left >= 0 && r.right <= innerWidth && r.top >= 0 && r.bottom <= innerHeight;
+      })));
+      await member.keyboard.press('Escape');
+      assert.ok(await trigger(member).evaluate(el => el === document.activeElement));
+      assert.equal(await input(member).inputValue(), attached);
+      await trigger(member).press('ArrowUp');
+      await member.keyboard.press('Enter');
+      const groupDraft = await input(member).inputValue();
+      assert.ok(groupDraft.startsWith('Сравни целевую метрику') && groupDraft.endsWith(attached));
+      await visible(member.locator('.chat-composer .range-attachment'));
+      // Both users must share the same tab storage for this to test account isolation.
+      async function switchAccount(user) {
+        await role(admin, 'Выйти').click();
+        await field(admin, 'Логин').fill('fixture-' + user);
+        await field(admin, 'Пароль').fill('fixture-password');
+        await role(admin, 'Войти').click();
+        await visible(admin.locator('.session-role'));
+        await go(admin, 'chats/group');
+        await visible(input(admin));
+      }
+      await go(admin, 'chats/group');
+      await input(admin).fill('Уточнение администратора');
+      await choose(admin, 1);
+      const adminDraft = await input(admin).inputValue();
+      await switchAccount('member');
+      assert.equal(await input(admin).inputValue(), '');
+      await input(admin).fill('Уточнение участника');
+      await switchAccount('admin');
+      assert.equal(await input(admin).inputValue(), adminDraft);
+      await choose(admin, 2);
+      assert.deepEqual((await input(admin).inputValue()).split('\n\n').slice(1), ['Уточнение администратора']);
+      await switchAccount('member');
+      assert.equal(await input(admin).inputValue(), 'Уточнение участника');
+      assert.equal(requests.length, 1);
+      await submit(member, 'ask', () => role(member, 'Спросить помощника').click());
+      assert.equal(requests.length, 2);
+      assert.deepEqual(requests[1].materialIds, [fixture.report]);
+      assert.equal(requests[1].question, groupDraft);
+    } finally {
+      admin.off('request', record);
+      member.off('request', record);
+    }
+  });
   assert.deepEqual(errors,[]);
 });

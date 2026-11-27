@@ -21,6 +21,9 @@ import {
 } from './materials';
 import React, { useState, useEffect, useLayoutEffect, useCallback, useRef } from 'react';
 import { createRoot } from 'react-dom/client';
+import { flushSync } from 'react-dom';
+import { ChatScenarioMenu } from './chat-scenario-menu';
+import { loadScenarioDraft, selectScenario, serializeScenarioDraft } from './chat-scenarios';
 import { post, jump, num } from './team-data';
 import type { Home, User, Case, Detail, View, Msg, Thread, InvestigationRun, RatioSelections } from './team-data';
 import { describeMeasurement, MeasurementFields, measurementPayload, metricName, WatchSummary } from './measurement';
@@ -315,15 +318,19 @@ function Chat({
   };
   const [items, setItems] = useState<Msg[]>([]),
     [running, work] = useState(false),
-    [q, setQ] = useState(() => {
-      try { return sessionStorage.getItem(draftKey) || readPending()?.text || ''; }
-      catch { return ''; }
+    [draft, setDraft] = useState(() => {
+      try { return loadScenarioDraft(sessionStorage.getItem(draftKey), readPending()?.text || ''); }
+      catch { return {text: '', scenarioId: null}; }
     }),
     [err, setErr] = useState(''),
     [loaded, setLoaded] = useState(false),
     [away, setAway] = useState(false),
     [copied, setCopied] = useState<number>();
   const activeThread = threads.find((t) => t.id === id);
+  const q = draft.text;
+  function editText(text: string) {
+    setDraft(previous => ({text, scenarioId: text ? previous.scenarioId : null}));
+  }
   const isGroup = activeThread?.scope === 'group';
   // Private thread IDs are unique to the account; group IDs are shared, including "group".
   const storageId = isGroup ? userId + '/' + id : id;
@@ -457,10 +464,10 @@ function Chat({
   }, [q]);
   useEffect(() => {
     try {
-      if (q) sessionStorage.setItem(draftKey, q);
+      if (draft.text) sessionStorage.setItem(draftKey, serializeScenarioDraft(draft));
       else sessionStorage.removeItem(draftKey);
     } catch {}
-  }, [q, draftKey]);
+  }, [draft, draftKey]);
   useLayoutEffect(() => {
     if (follow.current && history.current && !document.querySelector('dialog[open]')) history.current.scrollTop = history.current.scrollHeight;
   }, [items.length, loaded, running]);
@@ -473,8 +480,16 @@ function Chat({
     });
   }
   function suggest(question: string) {
-    setQ(question);
+    setDraft({text: question, scenarioId: null});
     box.current?.focus();
+  }
+  function chooseScenario(scenarioId: string) {
+    flushSync(() => setDraft(previous => selectScenario(previous, scenarioId)));
+    const input = box.current;
+    if (input) {
+      input.focus();
+      input.setSelectionRange(input.value.length, input.value.length);
+    }
   }
   return (
     <section className={!caseId ? 'chat-box standalone-chat' : 'chat-box'} aria-label="Переписка">
@@ -734,7 +749,7 @@ function Chat({
             clearAttachment();
             setMaterial(null);
             sessionStorage.removeItem('pm-material-draft/' + storageId);
-            setQ('');
+            setDraft(current => current === draft ? {text: '', scenarioId: null} : current);
             work(!groupMessage);
             clearContext?.();
           });
@@ -750,7 +765,7 @@ function Chat({
                 setMaterial(null);
                 sessionStorage.removeItem('pm-material-draft/' + storageId);
                 if (pasted)
-                  setQ(
+                  editText(
                     q
                       .split(/\s+/)
                       .filter((w) => pastedMaterial(w) !== pasted)
@@ -798,13 +813,14 @@ function Chat({
           Вопрос агенту
         </label>
         <div className="composer-row">
+          {!caseId && <ChatScenarioMenu onSelect={chooseScenario} />}
           <textarea
             ref={box}
             id={'q' + id}
             placeholder="Спросить помощника…"
             value={q}
             rows={1}
-            onChange={(e) => setQ(e.target.value)}
+            onChange={(e) => editText(e.target.value)}
             onKeyDown={(e) => {
               if (e.key !== 'Enter' || e.shiftKey || e.ctrlKey || e.altKey || e.metaKey || e.nativeEvent.isComposing) return;
               e.preventDefault();
