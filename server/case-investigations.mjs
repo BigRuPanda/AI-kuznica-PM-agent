@@ -1,6 +1,6 @@
 import {readPublicPage} from './public-page.mjs';
 import {webQuestion,yandexSearch} from './web-search.mjs';
-import {noWeb} from './source-chat.mjs';
+import {noWeb} from './web-search.mjs';
 import { randomUUID } from 'node:crypto';
 import { apiConfigured } from './agent.mjs';
 import { grant } from './chart-ranges.mjs';

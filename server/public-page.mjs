@@ -20,6 +20,19 @@ function publicAddress({address}) {
     : type === 6 && /^[23]/i.test(address) && !reserved.check(address,'ipv6');
 }
 
+export function responseFromMessage(message) {
+  const headers = new Headers();
+  for (const [name, value] of Object.entries(message.headers)) {
+    if (value !== undefined) headers.set(name, String(value));
+  }
+  const init = { status: message.statusCode, headers };
+  if ([204, 205, 304].includes(message.statusCode)) {
+    message.resume();
+    return new Response(null, init);
+  }
+  return new Response(Readable.toWeb(message), init);
+}
+
 // Keep HTTP Host and TLS server name tied to the URL, while connecting only to the validated address.
 function pinnedRequest(url, address, signal) {
   const client=url.protocol==='https:'?https:http;
@@ -28,11 +41,10 @@ function pinnedRequest(url, address, signal) {
       headers:{Accept:'text/html,application/xhtml+xml', 'Accept-Encoding':'identity'},
       lookup:(_host,options,done)=>options.all?done(null,[address]):done(null,address.address,address.family),
     },res=>{
-      const headers=new Headers();
-      for (const [name,value] of Object.entries(res.headers)) if (value!==undefined) headers.set(name,String(value));
-      if ([204,304].includes(res.statusCode)) {res.resume();resolve(new Response(null,{status:res.statusCode,headers}));}
-      else resolve(new Response(Readable.toWeb(res),{status:res.statusCode,headers}));
+      try { resolve(responseFromMessage(res)); }
+      catch (error) { res.destroy(); reject(error); }
     });
+    req.on('upgrade',(_response,socket)=>{socket.destroy();reject(Error('Протокол страницы не поддерживается.'));});
     req.on('error',reject);
   });
 }

@@ -25,3 +25,10 @@ test('public reader checks a redirect destination and local mode before sending'
   for(const [response,reason] of [[new Response('',{status:403}),/403/],[new Response('x',{headers:{'content-type':'application/pdf'}}),/HTML/]])
     await assert.rejects(readPublicPage('https://museum.example/',{}, {resolveHost,request:async()=>response}),reason);
 });
+test('the native response adapter handles Reset Content as a bodyless response',async()=>{
+  const {Readable}=await import('node:stream');
+  const {responseFromMessage}=await import('../server/public-page.mjs');
+  const response=responseFromMessage(Object.assign(Readable.from([]),{headers:{},statusCode:205}));
+  assert.equal(response.status,205);
+  assert.equal(response.body,null);
+});

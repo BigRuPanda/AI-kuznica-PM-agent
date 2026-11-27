@@ -1,11 +1,10 @@
 import {readPublicPage} from './public-page.mjs';
 import {cellSource,sourceRows} from './knowledge.mjs';
 import {apiConfigured,providerCall} from './agent.mjs';
-import {webQuestion,webAnswer} from './web-search.mjs';
+import {webQuestion,webAnswer,noWeb} from './web-search.mjs';
 import {competitorQuestion,competitorAnswer} from './competitor-chat.mjs';
 import {localData} from './data-profile.mjs';
 
-export const noWeb=q=>/(?:без\s+(?:веб[- ]?поиска|интернета)|не\s+(?:ищи|гугли|проверяй\s+(?:ссылк|в интернете)|открывай\s+ссылк|используй\s+(?:поиск|интернет)))/iu.test(q);
 const tokens=s=>String(s).toLowerCase().match(/[\p{L}\d]{3,}/gu)||[];
 function excerpts(text,question) {
   const words=new Set(tokens(question));

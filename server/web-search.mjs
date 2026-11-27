@@ -68,9 +68,13 @@ export async function yandexSearch(query, env, send = fetch, onRequest) {
   }).slice(0, 6);
 }
 
+export function noWeb(question) {
+  return /без\s+(?:(?:веб[- ]?|онлайн[- ]?)?поиска|интернета|сети)|не\s+(?:ищи|гугли|открывай|переходи\s+по|заходи\s+на|читай\s+(?:страниц|сайт|ссылк|https?:)|проверяй\s+(?:ссылк|сайт|в интернете)|используй\s+(?:веб|поиск|интернет|сеть))|только\s+(?:по\s+)?(?:архив[уы]|локальн)/iu.test(question);
+}
+
 export function webQuestion(question, enabled) {
   const trimmed = question.trim();
-  if (/(?:без (?:веб.?поиска|интернета)|не (?:ищи|гугли|используй поиск))/iu.test(trimmed)) return null;
+  if (noWeb(trimmed)) return null;
   if (enabled === true) return trimmed;
   const command = /^(?:(?:пожалуйста|можешь|давай)[, ]+)*(?:погугли|загугли|гугли|веб[- ]?поиск|поиск в интернете|web search|search the web)\s*[:,—-]?\s*/iu;
   if (command.test(trimmed)) return trimmed.replace(command, '').trim();

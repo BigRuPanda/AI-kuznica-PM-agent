@@ -144,3 +144,9 @@ test('a past offer check can be read after the active workbook is replaced',asyn
   assert.equal(archived.status,'mismatch');
   assert.equal(await workspaceOperation(store,user,'competitor_check',{version:row.version,loc:row.loc,asOf:'2000-01-01T00:00:00.000Z'}),null);
 });
+test('natural opt-out wins over a pasted URL and the internet toggle',async()=>{
+ const {externalAnswer}=await import('../server/source-chat.mjs');
+ for(const question of ['Не открывай https://museum.example','Без поиска. Проверь по архиву','Не читай страницу https://museum.example']){
+   assert.equal(await externalAnswer({}, {},{question,webSearch:true},{},()=>assert.fail('unexpected request'),'job',false),undefined);
+ }
+});

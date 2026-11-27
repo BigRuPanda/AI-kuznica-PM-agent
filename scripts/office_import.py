@@ -94,12 +94,20 @@ def interview_excerpt(value):
 
 # Index structured research answers. Contact fields, recordings and raw transcripts
 # are outside the research corpus. A sheet row links answers from the same interview.
-PRIVATE_FIELD = re.compile(r"контактн|номер телефона|^телефон$|e-?mail|почтовый адрес|фио|ф\.и\.о|^имя\b|фамили|название компании|инн|ссылка на|транскри|расшифров|запись интервью|реквизит|пароль|логин", re.I)
+PRIVATE_FIELD = re.compile(
+    r"контакт|телефон|мобильн(?:ый|ого)\b|телеграм|telegram|whatsapp|viber|skype|соцсет|никнейм|"
+    r"e[- ]?mail|почт[аовы]|адрес|фамили|отчеств|имя\b|ф[\W_]*и[\W_]*о\b|название компании|"
+    r"\b(?:name|phone|mobile|contact|handle|username|login|address|employer|company name)\b|"
+    r"инн|ссылка на|транскри|расшифров|запись интервью|реквизит|пароль|логин", re.I)
+RESEARCH_FIELD = re.compile(
+    r"роль\b|должност|модел|продукт|покуп|заказ|поставщик|цен[ауы]|лицензи|выбор|закуп|"
+    r"оплат|достав|предпочтен|преимуществ|проблем|потребност|затруднен|возражен|"
+    r"\b(?:product|purchase|buying|role|supplier|price|licen[cs]e|payment|delivery)\b", re.I)
 PRIVATE_VALUE = re.compile(r"https?://\S+|[\w.+-]+@[\w.-]+|(?<!\w)(?:\+7|8)[\s()-]*(?:\d[\s()-]*){10}(?!\d)|\b\d{9,}\b|@[\w.]+|\b(?:ООО|АО|ПАО|ИП)\s+[«\"][^»\"]+[»\"]", re.I)
 PERSON = re.compile(r"\b[А-ЯЁ][а-яё]+\s+[А-ЯЁ][а-яё]+(?:\s+[А-ЯЁ][а-яё]+)?\b|\b[А-ЯЁ][а-яё]+\s+[А-ЯЁ]\.\s*[А-ЯЁ]\.")
 
 def research_detail(field, value, identifiers):
-    if not isinstance(field, str) or PRIVATE_FIELD.search(field) or not isinstance(value, str):
+    if not isinstance(field, str) or PRIVATE_FIELD.search(field) or not RESEARCH_FIELD.search(field) or not isinstance(value, str):
         return None
     if len(field) > 500 or re.search(r"пароль|паспорт|транскрипт|расшифровка интервью|(?:^|\n)\s*(?:интервьюер|респондент)\s*:", value, re.I):
         return None
@@ -290,10 +298,12 @@ def book(z, name):
                     if n<=2:
                         continue
                 identifiers = {word for col,value in cells.items() if isinstance(value,str) and
-                               re.search(r"^имя|фамили|фио|название компании", str(headers.get(col,"")), re.I)
-                               for word in re.findall(r"\b[А-ЯЁA-Z][а-яёa-z]{2,}\b",value)}
+                               PRIVATE_FIELD.search(str(headers.get(col,"")))
+                               for word in re.findall(r"\b[\w.-]{3,}\b",value)}
                 for col,value in cells.items():
                     if not isinstance(value,str):
+                        continue
+                    if survey and PRIVATE_FIELD.search(str(headers.get(col, ""))):
                         continue
                     detail=research_detail(headers.get(col),value,identifiers) if survey else None
                     tags=[label for label,pattern in THEMES if re.search(pattern,value,re.I)] if n>=3 and col not in ("A","B") else []

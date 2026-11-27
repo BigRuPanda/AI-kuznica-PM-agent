@@ -157,3 +157,11 @@ test('general sources workbook preserves a labeled link but interview recordings
   const interview=make('Интервью.xlsx','Опрос',[['Роль','Кто?','Как?','Ссылка на запись интервью'],['ПМ','Тест','Тест','Открыть']],'D2');
   assert.ok(!JSON.stringify(interview).includes('https://museum.example/doc'));
 });
+test('survey contact variants stay outside stored evidence even in ordinary string columns',()=>{
+ const rows=[['Роль','Ф. И. О.','Telegram','Мобильный','Name','Причина покупки'],
+   ['Покупатель','Кодовоеимя','bareusername','Контактноеимя','PrivateName','Нужна гарантия']];
+ const book=python('tests/research-workbooks.py',['--xlsx','Опрос'],JSON.stringify(rows));
+ const [doc]=JSON.parse(python('scripts/office_import.py',['Опрос.xlsx'],book));
+ assert.ok(doc.facts.some(f=>f.detail?.answer==='Нужна гарантия'));
+ assert.doesNotMatch(JSON.stringify(doc),/Кодовоеимя|bareusername|Контактноеимя|PrivateName/);
+});
