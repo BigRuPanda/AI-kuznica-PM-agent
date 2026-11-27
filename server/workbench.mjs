@@ -185,6 +185,13 @@ export function deleteThread(store, user, id) {
     return { id };
   });
 }
+export function addUserMessage(db, user, threadId, body, created = Date.now()) {
+  return Number(db
+    .prepare("INSERT INTO chat_items(thread,author,role,body,created) VALUES(?,?,'user',?,?)")
+    .run(threadId, user.name, JSON.stringify({ ...body, authorId: user.id }), created)
+    .lastInsertRowid);
+}
+
 export function enqueue(store, user, b) {
   const q = String(b.question || '').trim();
   if (!q || q.length > 2400) throw Error('Введите вопрос до 2400 символов');
@@ -251,17 +258,8 @@ export function enqueue(store, user, b) {
     if (range) grant(store.db, range.id, 'thread', t.id);
     const askedAt = Date.now();
     const requestedPeriod = explicitDayWindow(q, askedAt);
-    const questionSeq = Number(
-      store.db
-        .prepare('INSERT INTO chat_items(thread,author,role,body,created) VALUES(?,?,?,?,?)')
-        .run(
-          t.id,
-          user.name,
-          'user',
-          JSON.stringify({ text: q, ...attachment, materials, contextReset: resetsChartTopic(q) }),
-          askedAt,
-        ).lastInsertRowid,
-    );
+    const questionSeq = addUserMessage(store.db, user, t.id,
+      { text: q, ...attachment, materials, contextReset: resetsChartTopic(q) }, askedAt);
     store.db
       .prepare('INSERT INTO jobs VALUES(?,?,?,?,?,?,?)')
       .run(
@@ -278,13 +276,17 @@ export function enqueue(store, user, b) {
   });
 }
 export function messages(db, user, id) {
-  thread(db, user, id);
+  const { scope } = thread(db, user, id);
+  // Older group questions can still be matched to their original job.
+  const ownQuestions = scope === 'group' ? new Set(db
+    .prepare("SELECT json_extract(body,'$.questionSeq') AS seq FROM jobs WHERE thread=? AND user=?")
+    .all(id, user.id).map(row => row.seq)) : null;
   return {
     items: db
       .prepare('SELECT * FROM chat_items WHERE thread=? ORDER BY seq')
       .all(id)
       .map((x) => {
-        const body = JSON.parse(x.body);
+        const { authorId, ...body } = JSON.parse(x.body);
         if (body.mode !== 'daily' && body.jobId && ['partial', 'failed'].includes(body.outcome))
           body.canResume = !!db.prepare('SELECT 1 FROM jobs WHERE id=? AND user=?').get(body.jobId, user.id);
         if (x.role === 'assistant' && !body.materials) {
@@ -305,7 +307,9 @@ export function messages(db, user, id) {
               canConfirm: row?.owner === user.id,
             };
           });
-        return { ...x, body };
+        const own = x.role === 'user' && (scope !== 'group' ||
+          (authorId ? authorId === user.id : ownQuestions.has(x.seq)));
+        return { ...x, own, body };
       }),
     jobs: db
       .prepare(

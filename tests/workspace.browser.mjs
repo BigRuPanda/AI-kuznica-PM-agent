@@ -158,6 +158,14 @@ test('Softline workspace, upgrade and browser journeys', async t => {
   });
 
   await journey('a member can save their name and photo, then restore initials', async () => {
+    const threadResponse = await member.request.post(base+'/api/team/thread',{data:{title:'Проверка аватара'}});
+    assert.ok(threadResponse.ok());
+    const { id: avatarThread } = await threadResponse.json();
+    const avatarMessage = 'Сообщение из старой переписки';
+    app.space('team').db.prepare("INSERT INTO chat_items(thread,author,role,body,created) VALUES(?,?,'user',?,?)")
+      .run(avatarThread,'fixture-member',JSON.stringify({text:avatarMessage}),Date.now());
+    const posted = await member.request.post(base+'/api/team/say',{data:{thread:'group',question:'Проверка аватара в команде'}});
+    assert.ok(posted.ok());
     await go(member,'profile');
     const account = member.getByRole('region',{name:'Учётная запись'});
     const sidebarAvatar = member.getByRole('link',{name:'Профиль',exact:true}).locator('.profile-avatar');
@@ -185,13 +193,28 @@ test('Softline workspace, upgrade and browser journeys', async t => {
       await image.decode();
       return image.naturalWidth;
     }),192);
+    const photo = await sidebarAvatar.locator('img').getAttribute('src');
+    await go(member,'chats/'+avatarThread);
+    const ownBubble = member.locator('.bubble.user').filter({hasText:avatarMessage});
+    const ownAvatar = ownBubble.locator('.message-author .chat-avatar img');
+    await visible(ownAvatar);
+    assert.equal(await ownAvatar.getAttribute('src'),photo);
+    await go(member,'chats/group');
+    const groupAvatar = member.locator('.bubble.user').filter({hasText:'Проверка аватара в команде'})
+      .locator('.message-author .chat-avatar img');
+    await visible(groupAvatar);
+    assert.equal(await groupAvatar.getAttribute('src'),photo);
     assert.ok(await member.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
+    await go(member,'profile');
     await role(member,'Редактировать профиль').click();
     await role(member,'Убрать фото').click();
     await field(member,'Имя').fill('fixture-member');
     await role(member,'Сохранить профиль').click();
     await visible(account.getByRole('heading',{name:'fixture-member'}));
     assert.equal(await sidebarAvatar.textContent(),'FM');
+    await go(member,'chats/'+avatarThread);
+    await visible(ownBubble);
+    assert.equal(await ownAvatar.count(),0);
     await go(member,'material/'+fixture.report);
   });
 

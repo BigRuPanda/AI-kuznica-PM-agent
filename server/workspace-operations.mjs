@@ -21,7 +21,7 @@ import {
   digest,
   fmt,
 } from './evidence.mjs';
-import { visibleCase, dashboard, thread, cardTypes } from './workbench.mjs';
+import { visibleCase, dashboard, thread, cardTypes, addUserMessage } from './workbench.mjs';
 import { access, grant, readSnapshot, readRange, compareRanges, neighboring } from './chart-ranges.mjs';
 import { targetFor } from './tracker-connections.mjs';
 import { trackerClient, prepareTracker, confirmTracker, preview, publicPage, caseLinks } from './tracker-workflow.mjs';
@@ -267,14 +267,10 @@ function commitPublication(store, user, key, data) {
     );
     grant(db, data.calc, 'thread', 'group');
     grant(db, data.rangeId, 'thread', 'group');
-    db.prepare("INSERT INTO chat_items(thread,author,role,body,created) VALUES('group',?,'user',?,?)").run(
-      user.name,
-      JSON.stringify({
-        ...data,
-        text: 'Опубликован разбор: ' + c.title + (data.conclusion ? '\\n' + data.conclusion : ''),
-      }),
-      Date.now(),
-    );
+    addUserMessage(db, user, 'group', {
+      ...data,
+      text: 'Опубликован разбор: ' + c.title + (data.conclusion ? '\\n' + data.conclusion : ''),
+    });
   }
   return { ok: true, id: key, caseId: c.id };
 }

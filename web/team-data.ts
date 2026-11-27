@@ -199,6 +199,7 @@ export type Msg = {
   seq: number;
   author: string;
   role: string;
+  own: boolean;
   body: {
     text: string;
     materials?: import('./materials').MaterialRef[];

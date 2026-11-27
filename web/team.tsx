@@ -272,6 +272,7 @@ function Overview({ home, onAsk }: { home: Home; onAsk: () => void }) {
 function Chat({
   id,
   userId,
+  avatar,
   caseId,
   threads,
   action,
@@ -284,6 +285,7 @@ function Chat({
 }: {
   id: string;
   userId: string;
+  avatar: User['avatar'];
   caseId?: string;
   threads: Thread[];
   action: Action;
@@ -536,7 +538,9 @@ function Chat({
           <article className={'bubble ' + m.role} key={m.seq}>
             <div className="message-author">
               <span className="chat-avatar" aria-hidden="true">
-                {m.role === 'assistant' ? <Icon name="agent" /> : m.author.trim().slice(0, 1).toUpperCase()}
+                {m.role === 'assistant' ? <Icon name="agent" /> : m.own && avatar
+                  ? <img src={avatar} alt="" />
+                  : m.author.trim().slice(0, 1).toUpperCase()}
               </span>
               <b>{m.author}</b>
             </div>
@@ -944,9 +948,10 @@ function DeleteChatDialog({ thread, close, onDelete }: {
   );
 }
 
-function ChatWorkspace({ home, id, action, refresh, onRename, onDelete }: {
+function ChatWorkspace({ home, id, avatar, action, refresh, onRename, onDelete }: {
   home: Home;
   id: string;
+  avatar: User['avatar'];
   action: Action;
   refresh: () => Promise<void>;
   onRename: (renamed: ThreadTitle) => void;
@@ -1030,6 +1035,7 @@ function ChatWorkspace({ home, id, action, refresh, onRename, onDelete }: {
         <Chat
           key={activeId}
           userId={home.user.id}
+          avatar={avatar}
           id={activeId}
           threads={home.threads}
           action={action}
@@ -1084,11 +1090,13 @@ function ChatWorkspace({ home, id, action, refresh, onRename, onDelete }: {
 function Investigation({
   id,
   home,
+  avatar,
   action,
   refresh,
 }: {
   id: string;
   home: Home;
+  avatar: User['avatar'];
   action: Action;
   refresh: () => Promise<void>;
 }) {
@@ -1574,6 +1582,7 @@ function Investigation({
             <Chat
               id={tid}
               userId={home.user.id}
+              avatar={avatar}
               caseId={id}
               threads={home.threads}
               action={action}
@@ -2155,7 +2164,7 @@ function Workspace({ user, onLogout, onUpdate }: { user: User; onLogout: () => v
         ) : ['releases', 'release', 'calc'].includes(route) ? (
           <ReleaseAnalytics route={route} requestedId={id} author={user.name} admin={user.role === 'admin'} />
         ) : route === 'case' ? (
-          <Investigation key={id} id={id} home={home} action={action} refresh={refresh} />
+          <Investigation key={id} id={id} home={home} avatar={user.avatar} action={action} refresh={refresh} />
         ) : route === 'range' ? (
           <RangeResult id={id} />
         ) : route === 'snapshot' ? (
@@ -2171,6 +2180,7 @@ function Workspace({ user, onLogout, onUpdate }: { user: User; onLogout: () => v
           <ChatWorkspace
             home={home}
             id={id}
+            avatar={user.avatar}
             action={action}
             refresh={refresh}
             onRename={(renamed) => updateThreads((threads) => threads.map((thread) =>

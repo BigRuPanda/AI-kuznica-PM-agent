@@ -35,11 +35,30 @@ test('legacy chat history survives upgrade and deleted message numbers are not r
     store.db.prepare('INSERT INTO chat_items VALUES(42,?,?,?,?,?)').run('group', user.name, 'user', '{"text":"Old message"}', 1);
     initWorkbench(store.db);
     assert.equal(messages(store.db, user, 'group').items[0].body.text, 'Old message');
+    assert.equal(messages(store.db, user, 'group').items[0].own, false);
     const id = createThread(store.db, user, 'Delete fixture');
+    store.db.prepare("INSERT INTO chat_items(thread,author,role,body) VALUES(?,?,'user',?)")
+      .run(id, 'Old display name', '{"text":"Older private message"}');
+    assert.equal(messages(store.db, user, id).items[0].own, true);
     const write = store.db.prepare("INSERT INTO chat_items(thread,body) VALUES(?,'{}')");
     const removedSeq = write.run(id).lastInsertRowid;
     deleteThread(store, user, id);
     assert.ok(write.run('group').lastInsertRowid > removedSeq);
+  } finally {
+    store.close();
+  }
+});
+
+test('group chat identifies the sender even if another participant has the same name', () => {
+  const store = openStore(':memory:');
+  const sender = { id: 'sender', name: 'Fixture' };
+  const reader = { id: 'reader', name: 'Fixture' };
+  try {
+    initEvidence(store.db);
+    initWorkbench(store.db);
+    enqueue(store, sender, { thread: 'group', question: 'Отправленное сообщение' });
+    assert.equal(messages(store.db, { ...sender, name: 'New name' }, 'group').items[0].own, true);
+    assert.equal(messages(store.db, reader, 'group').items[0].own, false);
   } finally {
     store.close();
   }

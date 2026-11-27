@@ -29,6 +29,7 @@ import {
   renameThread,
   deleteThread,
   enqueue,
+  addUserMessage,
   messages,
   thread,
   workJobs,
@@ -482,12 +483,7 @@ export function createTeamApp({
               t,
               b.shareMaterials === true,
             );
-            db.prepare("INSERT INTO chat_items(thread,author,role,body,created) VALUES(?,?,'user',?,?)").run(
-              t.id,
-              user.name,
-              JSON.stringify({ text, materials }),
-              Date.now(),
-            );
+            addUserMessage(db, user, t.id, { text, materials });
           });
           return reply(200, { ok: true });
         }
