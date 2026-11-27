@@ -2050,7 +2050,8 @@ test('Softline workspace, upgrade and browser journeys', async t => {
       elements.map(element => [...element.classList].find(name => name.startsWith('card-')).slice(5)));
     const full = field(page,'Только полные недели');
     const peer = field(page,'Контроль');
-    const query = 'Покажи источники о переносе лицензии';
+    const sourceQuestion = 'Покажи источники о переносе лицензии' + ' и соответствующие детали'.repeat(18);
+    const query = sourceQuestion.slice(0,400);
     const fields = response => {
       const { control, sourceQuery, full } = response.request().postDataJSON();
       return {control,sourceQuery,full};
@@ -2062,17 +2063,30 @@ test('Softline workspace, upgrade and browser journeys', async t => {
     assert.equal(await peer.locator('option').nth(1).textContent(),control);
     await Promise.all([viewRequest(caseId,v => v.control === control), peer.selectOption(control)]);
     await role(card('trend'),'Закрепить').click();
-    await field(page,'Вопрос агенту').fill(query);
+    await field(page,'Вопрос агенту').fill(sourceQuestion);
     const [sources] = await submit(page,'ask',()=>role(page,'Отправить').click());
-    const filtered = viewRequest(caseId,v => v.sourceQuery === query);
+    const filtered = page.waitForResponse(r => {
+      if (!r.url().endsWith('/api/team/view')) return false;
+      const args = r.request().postDataJSON();
+      return args?.caseId === caseId && !!args.sourceQuery;
+    });
     await completeAnswer(sources);
-    await filtered;
+    const fromSources = await filtered;
+    assert.ok(fromSources.ok(),await fromSources.text());
+    assert.equal(fields(fromSources).sourceQuery,query);
+    const storedQuery = await page.evaluate(key => JSON.parse(localStorage.getItem(key)).sourceQuery,key);
+    assert.equal(storedQuery,query);
     await visible(card('evidence'));
     await role(card('evidence'),'Закрепить').click();
     await Promise.all([viewRequest(caseId,v => v.full === true),full.check()]);
     assert.deepEqual(await cardOrder(),['trend','evidence']);
     await visible(role(card('evidence'),'Открепить'));
 
+    // Earlier versions may have already stored the unbounded chat filter.
+    await page.evaluate(({key,sourceQuestion}) => {
+      const saved = JSON.parse(localStorage.getItem(key));
+      localStorage.setItem(key,JSON.stringify({...saved,sourceQuery:sourceQuestion}));
+    },{key,sourceQuestion});
     const [reloaded] = await Promise.all([viewRequest(caseId), page.reload()]);
     assert.deepEqual(fields(reloaded),expected);
     const saved = (await reloaded.json()).view;

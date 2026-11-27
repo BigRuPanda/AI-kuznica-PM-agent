@@ -728,7 +728,7 @@ async function answerTurn(store, user, b, env, send, job, history, intent) {
       plan = { product: context.product, full: context.full, cards: ['timeline', 'evidence'], query: b.question };
     if (plan.text) return { text: plan.text, mode: 'local', warning };
   }
-  const sourceQuery = plan.cards.includes('evidence') ? plan.query : undefined;
+  const sourceQuery = plan.cards.includes('evidence') ? plan.query.slice(0, 400) : undefined;
   const view =
     b.screen?.calc && !b.analysisPeriod && plan.product === context.product && plan.full === b.screen.full
       ? { ...readSnapshot(db, user, b.screen.calc), id: b.screen.calc }

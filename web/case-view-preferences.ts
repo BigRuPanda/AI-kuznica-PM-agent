@@ -29,7 +29,7 @@ export function readCaseView(key: string): Partial<CaseViewPreferences> | undefi
     pinned: list(value.pinned),
     full: typeof value.full === 'boolean' ? value.full : undefined,
     control: typeof value.control === 'string' ? value.control : undefined,
-    sourceQuery: typeof value.sourceQuery === 'string' ? value.sourceQuery : undefined,
+    sourceQuery: typeof value.sourceQuery === 'string' ? value.sourceQuery.slice(0, 400) : undefined,
   };
 }
 
