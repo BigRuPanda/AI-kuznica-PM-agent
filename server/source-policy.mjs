@@ -2,8 +2,14 @@ import { digest, identity, importDocs } from './evidence.mjs';
 
 const hex = /^[a-f0-9]{64}$/;
 const office = /^[^/\\\x00-\x1f]{1,230}\.(xlsx|pptx)$/i;
+const reference = /\.(pdf|docx)$/i;
+const archiveIndexFormat = 4;
+const revisionIndexFormat = 3;
+function safeSourcePath(file) {
+  return typeof file==='string' && file.length<=250 && file.split('/').every(part=>part && part!=='.' && part!=='..' && !/[\\:\x00-\x1f]/.test(part));
+}
 function officePath(file) {
-  return typeof file==='string' && file.length<=250 && file.split('/').every(part=>part && part!=='.' && part!=='..' && !/[\\:\x00-\x1f]/.test(part)) && office.test(file.split('/').at(-1));
+  return safeSourcePath(file) && office.test(file.split('/').at(-1));
 }
 const archiveOrigin = 'Исходный ZIP организатора';
 
@@ -47,14 +53,16 @@ export function approveSource(store, { sha, file, origin, previous }, author, ex
 export function sourcePermission(db, expected, raw, file) {
   if (!expected) return null;
   const sha = digest(raw);
-  const indexed = db.prepare('SELECT format FROM archive_indexes WHERE sha=?').get(sha)?.format === 3;
+  const format = db.prepare('SELECT format FROM archive_indexes WHERE sha=?').get(sha)?.format;
   if (sha === expected && /\.zip$/i.test(file)) {
     const exists = !!db.prepare('SELECT 1 FROM source_archive WHERE sha=?').get(sha);
+    const indexed = format === archiveIndexFormat;
     return { archive: true, sha, alreadyImported: exists && indexed, refresh: exists && !indexed };
   }
   const approved = db.prepare('SELECT * FROM source_approvals WHERE sha=? AND file=?').get(sha, file);
   if (!approved) throw Error('Загрузите исходный ZIP организатора или версию, согласованную администратором.');
   const exists = !!db.prepare('SELECT 1 FROM source_revisions WHERE sha=? AND file=?').get(sha, file);
+  const indexed = format === revisionIndexFormat;
   return { ...approved, alreadyImported: exists && indexed, refresh: exists && !indexed };
 }
 
@@ -130,13 +138,20 @@ export function importApproved(store, docs, permission, notify) {
   if (!permission) return importDocs(store, docs, { notify });
   if (permission.alreadyImported)
     return { inserted: 0, documents: store.db.prepare('SELECT count(*) n FROM documents').get().n };
-  const markIndexed = db => db.prepare('INSERT OR REPLACE INTO archive_indexes VALUES(?,3)').run(permission.sha);
+  const format = permission.archive ? archiveIndexFormat : revisionIndexFormat;
+  const markIndexed = db => db.prepare('INSERT OR REPLACE INTO archive_indexes VALUES(?,?)').run(permission.sha, format);
   if (permission.refresh) {
     const candidates = [];
     return importDocs(store, candidates, { notify: false, guard: db => {
-      if (db.prepare('SELECT format FROM archive_indexes WHERE sha=?').get(permission.sha)?.format === 3) return false;
+      if (db.prepare('SELECT format FROM archive_indexes WHERE sha=?').get(permission.sha)?.format === format) return false;
       for (const doc of docs) {
         const prior = db.prepare('SELECT * FROM source_revisions WHERE file=? ORDER BY rowid DESC LIMIT 1').get(doc.file);
+        if (!prior && permission.archive && doc.role === 'reference' && !doc.facts.length &&
+            !db.prepare('SELECT 1 FROM documents WHERE file=?').get(doc.file)) {
+          saveRevision(db, doc, {sha: permission.sha, origin: archiveOrigin});
+          candidates.push(doc);
+          continue;
+        }
         if (!prior || prior.sha !== permission.sha) continue;
         const next = permission.archive ? doc : { ...doc, sourceFileSha256: prior.sha };
         if (prior.version === digest(JSON.stringify(next))) continue;
@@ -169,7 +184,7 @@ export function importApproved(store, docs, permission, notify) {
 }
 
 export function sourceHistory(db, file) {
-  if (!officePath(file)) throw Error('Выберите книгу или презентацию.');
+  if (!officePath(file) && !(safeSourcePath(file) && reference.test(file))) throw Error('Выберите материал из списка источников.');
   const active = head(db,file) || db.prepare('SELECT version FROM research_file_versions WHERE file=?').get(file)?.version || db.prepare('SELECT version FROM documents WHERE file=? ORDER BY rowid DESC LIMIT 1').get(file)?.version;
   return db.prepare(`SELECT d.version,d.created,json_array_length(d.body,'$.facts') total,r.origin,r.author,r.approved
     FROM documents d LEFT JOIN source_revisions r ON r.version=d.version
@@ -181,4 +196,10 @@ export function protectedSources(db) {
       json_extract(d.body,'$.role') role,(SELECT count(*) FROM documents h WHERE h.file=d.file) versions
     FROM source_revisions r JOIN documents d ON d.version=r.version
     WHERE r.rowid=(SELECT max(h.rowid) FROM source_revisions h WHERE h.file=r.file) ORDER BY d.file`).all();
+}
+
+export function protectedProducts(db) {
+  return db.prepare(`SELECT DISTINCT json_extract(f.body,'$.product_family') product
+    FROM facts f JOIN source_revisions r ON r.version=f.version
+    WHERE f.kind='sales' ORDER BY product`).all().map(row => row.product).filter(product => typeof product === 'string' && product.trim());
 }

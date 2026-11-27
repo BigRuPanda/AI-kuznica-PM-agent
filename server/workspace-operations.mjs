@@ -4,6 +4,7 @@ import { marketOffers } from './market-offers.mjs';
 import { checkOffer, savedOfferCheck } from './competitor-check.mjs';
 import { randomUUID } from 'node:crypto';
 import { signalHistory } from './signal-history.mjs';
+import { protectedProducts } from './source-policy.mjs';
 import { readInvestigations, requireActionableRun, syncInvestigations } from './case-investigations.mjs';
 import { z } from 'zod/v4';
 import {
@@ -520,6 +521,10 @@ export function workspaceOperation(
   }
   if (op === 'create-case') {
     const { title, product, release, message, ...plan } = b;
+    if (env.SOURCE_ARCHIVE_SHA256 && (user.space === 'team'
+      ? !protectedProducts(db).includes(product)
+      : !facts(db, 'sales').some(row => row.data.product_family === product)))
+      throw Error('Выберите семейство продукта из загруженной книги.');
     if (plan.from && plan.through && plan.from > plan.through)
       throw Error('Начало исследования должно быть не позже конца периода.');
     if (plan.measurement) plan.measurement = measurementSpec(plan.measurement, product);

@@ -80,7 +80,7 @@ export type Case = {
   effect?: Watch;
 };
 export type Thread = { id: string; title: string; scope: string; caseId: string | null; canRename: boolean; canDelete: boolean };
-export type Source = { file: string; version:string; versions: number; updated: number };
+export type Source = { file: string; version:string; versions: number; updated: number; total?: number; role?: string | null };
 export type Release = {
   release_id: string;
   release_date: string;
@@ -94,6 +94,7 @@ export type Home = {
   threads: Thread[];
   sources: Source[];
   archiveOnly?:boolean;
+  metrikaProbe?: { at: number; status: 'ready' | 'error'; reason?: string } | null;
   metrikaSync?: import('./metrika-status').MetrikaStatus;
   products: string[];
   rules: { threshold: number; recovery: number };

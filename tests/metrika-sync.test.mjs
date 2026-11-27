@@ -19,6 +19,54 @@ const time = (d) => Date.parse(d+'T08:00:00Z');
 const reply = (dates) => Response.json({data:dates.map(date=>({dimensions:[{name:date}],metrics:[12]})),
   total_rows:dates.length,sampled:false,sample_share:1,data_lag:60});
 
+test('the archived Reports API probe respects the local transport and records diagnostics without a sync run', async t => {
+  const dir = await testDirectory(t, 'softline-probe-');
+  const replay = 'http://127.0.0.1:9876';
+  const config = {
+    ...fixtureEnv, ...env, SOURCE_ARCHIVE_SHA256: 'a'.repeat(64), DATA_PROFILE: 'local',
+    METRIKA_REPLAY_ORIGIN: replay, LOCAL_HTTP_ORIGINS: replay,
+    METRIKA_COUNTER_IDS: '405,406',
+  };
+  const app = createTeamApp({base:join(dir,'app.sqlite'), env:config, background:false, send:async (url, init) => {
+    const target = new URL(url);
+    assert.equal(target.origin, replay);
+    assert.equal(target.pathname, '/stat/v1/data');
+    assert.equal(target.searchParams.get('ids'), '405');
+    assert.equal(target.searchParams.get('limit'), '1');
+    assert.equal(init.headers.Authorization, 'OAuth fixture-token');
+    return reply(['2026-11-01']);
+  }});
+  try {
+    await app.accounts.register({login:'fixture-admin',name:'Admin',password:'fixture-password',code:fixtureEnv.ADMIN_INVITE_KEY}, config);
+    const {token} = await app.accounts.login({login:'fixture-admin',password:'fixture-password'});
+    const post = op => new Promise(resolve => {
+      const req = Object.assign(Readable.from([Buffer.from('{}')]), {
+        method:'POST', url:'/api/team/'+op, socket:{remoteAddress:'127.0.0.1'},
+        headers:{host:'127.0.0.1:8090', 'content-type':'application/json', cookie:'pm_session='+token},
+      });
+      let status;
+      app.server.emit('request', req, {
+        writeHead(code) { status = code; },
+        end(data) { resolve({status, result: JSON.parse(data)}); },
+      });
+    });
+    const {status, result} = await post('metrika-probe');
+    assert.equal(status, 200, JSON.stringify(result));
+    assert.equal(result.status, 'ready');
+    assert.ok(result.at > 0);
+    assert.deepEqual((await post('overview')).result.metrikaProbe, result);
+    config.LOCAL_HTTP_ORIGINS = '';
+    const blocked = await post('metrika-probe');
+    assert.equal(blocked.status, 400);
+    assert.match(blocked.result.error, /профил/);
+    assert.equal((await post('overview')).result.metrikaProbe.status, 'error');
+    const {db} = app.space('team');
+    assert.equal(db.prepare('SELECT count(*) AS n FROM documents').get().n, 0);
+    assert.equal(facts(db, 'metrics').length, 0);
+    assert.equal(db.prepare('SELECT count(*) AS n FROM metrika_sync_runs').get().n, 0);
+  } finally { await app.close(); }
+});
+
 async function testDirectory(t, prefix) {
   const parent = join(root, 'var');
   await mkdir(parent, {recursive:true});

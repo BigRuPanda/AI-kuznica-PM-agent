@@ -9,7 +9,7 @@ import { chromium } from 'playwright';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { createTeamApp } from '../server/team-http.mjs';
-import { facts, importDocs } from '../server/evidence.mjs';
+import { digest, facts, importDocs } from '../server/evidence.mjs';
 import { saveMetricRule } from '../server/metric-rules.mjs';
 import { workJobs } from '../server/workbench.mjs';
 import { workspaceOperation } from '../server/workspace-operations.mjs';
@@ -23,6 +23,121 @@ const pinActions = root => root.getByRole('button', {name:/Добавить в �
 const submit = (page, operation, click) => Promise.all([
   page.waitForResponse(r => r.url().endsWith('/api/team/' + operation) && r.ok()), click()
 ]);
+
+test('archive settings diagnose Reports API and sources show the protected ZIP inventory', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'softline-archive-'));
+  const bin = process.env.PYTHON_BIN || (process.platform === 'win32' ? 'py' : 'python3');
+  const runFixture = (input, args = []) => {
+    const result = spawnSync(bin, ['tests/research-workbooks.py', ...args], {input:JSON.stringify(input), windowsHide:true});
+    assert.equal(result.status, 0, result.stderr?.toString() || String(result.error));
+    return result.stdout;
+  };
+  let app, browser;
+  t.after(async () => {
+    try { await browser?.close(); }
+    finally {
+      await app?.close();
+      await rm(dir, {recursive:true, force:true, maxRetries:3});
+    }
+  });
+  const sales = value => [['product_family','week_start','orders_index'], ['Контрольная семья','2026-11-02',value]];
+  const archive = runFixture([
+    {file:'data/orders.xlsx', title:'Продажи', rows:sales(40)},
+    {file:'reference/guide.pdf'},
+  ]);
+  const replay = 'http://127.0.0.1:9876';
+  const env = {
+    ...fixtureEnv, SOURCE_ARCHIVE_SHA256:digest(archive), PYTHON_BIN:bin,
+    DATA_PROFILE:'local', LOCAL_HTTP_ORIGINS:replay, METRIKA_REPLAY_ORIGIN:replay,
+    METRIKA_COUNTER_IDS:'405', METRIKA_TOKEN:'fixture-token',
+  };
+  let probeRequests = 0;
+  app = createTeamApp({base:join(dir, 'releases.sqlite'), env, background:false, send:async url => {
+    assert.equal(new URL(url).origin, replay);
+    if (++probeRequests === 1) return new Response(null, {status:503});
+    return Response.json({data:[{dimensions:[{name:'2026-11-02'}], metrics:[100]}], total_rows:1});
+  }});
+  const register = (login, name, code) => app.accounts.register({login, name, password:'fixture-password', code}, env);
+  await register('fixture-admin', 'Администратор архива', fixtureEnv.ADMIN_INVITE_KEY);
+  await register('fixture-member', 'Участник архива', app.accounts.invite('team'));
+  await new Promise((resolve, reject) => app.server.once('error', reject).listen(0, '127.0.0.1', resolve));
+  const base = 'http://127.0.0.1:' + app.server.address().port;
+  const edge = 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe';
+  browser = await chromium.launch({headless:true, executablePath:process.env.PM_BROWSER_PATH || (existsSync(edge) ? edge : undefined)});
+  async function login(person, route) {
+    const page = await browser.newPage({locale:'ru-RU'});
+    page.setDefaultTimeout(5000);
+    await page.goto(base + '/#' + route);
+    await field(page, 'Логин').fill('fixture-' + person);
+    await field(page, 'Пароль').fill('fixture-password');
+    await role(page, 'Войти').click();
+    await visible(page.locator('.workspace-page[data-route="' + route + '"]'));
+    return page;
+  }
+  const admin = await login('admin', 'sources');
+  const member = await login('member', 'settings');
+  assert.equal(await role(member, 'Проверить Reports API').count(), 0);
+  const api = (page, op, data = {}) => page.request.post(base + '/api/team/' + op, {data});
+  const denied = await api(member, 'metrika-probe');
+  assert.match((await denied.json()).error, /администратор/i);
+  assert.equal(probeRequests, 0);
+  const upload = () => submit(admin, 'upload', () => role(admin, 'Загрузить и пересчитать').click());
+  const files = field(admin, 'Книга, презентация или архив');
+  assert.equal(await role(admin, 'Синхронизировать Метрику').count(), 0);
+  await files.setInputFiles({name:'original.zip',mimeType:'application/zip',buffer:archive});
+  await upload();
+  const book = admin.locator('.event-row').filter({hasText:'data/orders.xlsx'});
+  await visible(book.getByText('Распознано записей: 1', {exact:false}));
+  const reference = admin.locator('.event-row').filter({hasText:'reference/guide.pdf'});
+  await visible(reference.getByText('Справочный файл', {exact:false}));
+  assert.equal(await reference.getByRole('link').count(), 0);
+  await book.getByText('История версий').click();
+  await visible(book.getByText('Исходный ZIP организатора', {exact:false}));
+  const originalLink = await book.locator('details a').getAttribute('href');
+  assert.match(await book.locator('details a').textContent(), /\d{2}\.\d{2}\.\d{4}/);
+  await upload();
+  await visible(admin.getByRole('status').filter({hasText:'Файл уже был загружен'}));
+
+  const revised = runFixture(sales(50), ['--xlsx', 'Продажи']);
+  await files.setInputFiles({name:'orders.xlsx', mimeType:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', buffer:revised});
+  await field(admin, 'Версия книги').selectOption('data/orders.xlsx');
+  await field(admin, 'Происхождение материала').fill('Согласованное уточнение');
+  await submit(admin, 'approve-source', () => role(admin, 'Согласовать версию').click());
+  await upload();
+  await visible(book.getByText('Согласованное уточнение · Администратор архива', {exact:false}));
+  assert.equal(await book.locator('details a').last().getAttribute('href'), originalLink);
+
+  await admin.goto(base + '/#cases');
+  await role(admin, 'Новый разбор').click();
+  await field(admin, 'Вопрос или гипотеза').fill('Архивный разбор');
+  await field(admin, 'Продукт').selectOption('Контрольная семья');
+  const [created] = await submit(admin, 'create-case', () => role(admin, 'Создать личный разбор').click());
+  const {id} = await created.json();
+  await admin.waitForURL(base + '/#case/' + id);
+  const invalid = await api(admin, 'create-case', {title:'Другой продукт', product:'Отсутствующая семья'});
+  assert.equal(invalid.status(), 400);
+  assert.match((await invalid.json()).error, /семейство/);
+
+  const {db} = app.space('team');
+  const totals = () => [
+    db.prepare('SELECT count(*) AS n FROM documents').get().n,
+    db.prepare("SELECT count(*) AS n FROM facts WHERE kind='metrics'").get().n,
+  ];
+  const before = totals();
+  await admin.goto(base + '/#settings');
+  const check = role(admin, 'Проверить Reports API');
+  await check.click();
+  const failed = admin.getByRole('status').filter({hasText:'Ошибка Reports API'});
+  await visible(failed);
+  assert.match(await failed.textContent(), /503/);
+  const failedAt = await failed.locator('time').getAttribute('datetime');
+  await submit(admin, 'metrika-probe', () => check.click());
+  const success = admin.getByRole('status').filter({hasText:'Reports API ответил'});
+  await visible(success);
+  assert.ok(await success.locator('time').getAttribute('datetime') > failedAt);
+  assert.deepEqual(totals(), before);
+  assert.equal(probeRequests, 2);
+});
 
 // Model and remote Redmine responses are simulated. Jobs and local tracking use SQLite.
 function transport(url, options) {
@@ -228,6 +343,15 @@ test('Softline workspace, upgrade and browser journeys', async t => {
     await team.click();
     await visible(admin.getByRole('heading',{name:'Настройки команды',exact:true}));
     await visible(admin.getByRole('heading',{name:'Подключения команды'}));
+    assert.equal(await role(admin,'Проверить Reports API').count(),0);
+    await go(admin,'sources');
+    await visible(role(admin,'Синхронизировать Метрику'));
+    await visible(field(admin,'Книга, презентация или архив'));
+    await go(admin,'cases');
+    await role(admin,'Новый разбор').click();
+    await field(admin,'Продукт').fill('Семейство, введённое вручную');
+    assert.equal(await field(admin,'Продукт').inputValue(),'Семейство, введённое вручную');
+    await role(admin,'Новый разбор').click();
     await go(admin,'material/'+fixture.report);
     await go(member,'material/'+fixture.report);
     await go(judge,'overview');

@@ -1,4 +1,4 @@
-import { initSourcePolicy, approveSource, sourcePermission, importApproved, sourceHistory } from './source-policy.mjs';
+import { initSourcePolicy, approveSource, sourcePermission, importApproved, sourceHistory, protectedSources, protectedProducts } from './source-policy.mjs';
 import { operations as catalog, workspaceOperation } from './workspace-operations.mjs';
 import { createServer } from 'node:http';
 import { dirname, join } from 'node:path';
@@ -36,7 +36,7 @@ import {
   workJobs,
   deliver,
 } from './workbench.mjs';
-import { python, telegram } from './connectors.mjs';
+import { python, probeMetrika, telegram } from './connectors.mjs';
 import { initMetrikaSync, metrikaStatus, syncMetrika } from './metrika-sync.mjs';
 import { preview, revisePage } from './tracker-workflow.mjs';
 import { configure, connectionInfo, personalConnection, finishOAuth } from './tracker-connections.mjs';
@@ -294,7 +294,8 @@ export function createTeamApp({
           const raw = await readBody(req, 32 * 1024 * 1024);
           const store=space(user.space);
           const permission=sourcePermission(store.db,env.SOURCE_ARCHIVE_SHA256,raw,name);
-          const docs = permission?.alreadyImported?[]:JSON.parse(await python('office_import.py', [name], raw, env));
+          const args = permission?.archive ? [name, '--references'] : [name];
+          const docs = permission?.alreadyImported?[]:JSON.parse(await python('office_import.py', args, raw, env));
           return reply(
             200,
             importApproved(store,docs,permission,env.NOTIFICATIONS_ENABLED === 'true' && notificationChannels(env)),
@@ -353,6 +354,8 @@ export function createTeamApp({
         if (op === 'overview')
           return reply(200, {
             ...dashboard(db, user), archiveOnly:!!env.SOURCE_ARCHIVE_SHA256,
+            ...(env.SOURCE_ARCHIVE_SHA256 && user.space === 'team' && {sources: protectedSources(db), products: protectedProducts(db)}),
+            metrikaProbe: env.SOURCE_ARCHIVE_SHA256 && user.role === 'admin' ? setting(db, 'metrika_probe', null) : null,
             metrikaSync: user.space === 'team' ? metrikaStatus(db, env) : { reports: [] },
             notificationsEnabled: user.space === 'team' && env.NOTIFICATIONS_ENABLED === 'true',
             notificationChannels: user.space === 'team' ? notificationChannels(env) : [],
@@ -518,6 +521,19 @@ export function createTeamApp({
           admin(user);
           if(env.SOURCE_ARCHIVE_SHA256) throw Error('В этом пространстве используется архив организатора.');
           return reply(200, await syncMetrika(store, env, send));
+        }
+        if (op === 'metrika-probe') {
+          admin(user);
+          if (!env.SOURCE_ARCHIVE_SHA256) throw Error('Проверка Reports API доступна в архивном режиме.');
+          let result;
+          try {
+            result = await probeMetrika(env, send);
+          } catch (error) {
+            setSetting(db, 'metrika_probe', { at: Date.now(), status: 'error', reason: error.message });
+            throw error;
+          }
+          setSetting(db, 'metrika_probe', result);
+          return reply(200, result);
         }
         if (op === 'status') {
           admin(user);

@@ -57,5 +57,6 @@ else:
     archive = io.BytesIO()
     with zipfile.ZipFile(archive, 'w', zipfile.ZIP_DEFLATED) as z:
         for item in items:
-            z.writestr(item['file'], workbook(item['rows']))
+            data = workbook(item['rows'], item.get('title', 'Исследования')) if 'rows' in item else b''
+            z.writestr(item['file'], data)
     sys.stdout.buffer.write(archive.getvalue())

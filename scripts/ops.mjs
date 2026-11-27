@@ -149,7 +149,8 @@ async function main() {
       const path = resolve(file);
       const bytes=await readFile(path);
       const permission=sourcePermission(store.db,env.SOURCE_ARCHIVE_SHA256,bytes,basename(path));
-      const docs=permission?.alreadyImported?[]:JSON.parse(await python('office_import.py',[basename(path)],bytes));
+      const args = permission?.archive ? [basename(path), '--references'] : [basename(path)];
+      const docs=permission?.alreadyImported?[]:JSON.parse(await python('office_import.py',args,bytes));
       console.log(
         importApproved(store,docs,permission,op==='import' && env.NOTIFICATIONS_ENABLED==='true'),
       );

@@ -55,22 +55,42 @@ async function request(send, url, options = {}) {
   }
   return res.status === 204 ? {} : await res.json();
 }
-export async function metrika(env = process.env, send = fetch) {
-  send = integrationTransport(env, send);
+function metrikaEndpoint(env) {
   const replay = env.METRIKA_REPLAY_ORIGIN;
   if (replay && (!localData(env) || !/^http:\/\/127\.0\.0\.1:\d+$/.test(replay)))
     throw Error('Воспроизведение Метрики доступно в локальном профиле на loopback.');
-  const endpoint = (replay || 'https://api-metrika.yandex.net') + '/stat/v1/data';
-  const ids = required(env, 'METRIKA_COUNTER_IDS'),
-    token = required(env, 'METRIKA_TOKEN');
+  return (replay || 'https://api-metrika.yandex.net') + '/stat/v1/data';
+}
+function metrikaCounters(env) {
+  const ids = required(env, 'METRIKA_COUNTER_IDS');
   if (!/^\d+(,\d+)*$/.test(ids)) throw Error('Проверьте METRIKA_COUNTER_IDS');
+  return ids.split(',');
+}
+export async function probeMetrika(env = process.env, send = fetch) {
+  const [counter] = metrikaCounters(env);
+  const query = new URLSearchParams({
+    ids: counter, dimensions: 'ym:s:date', metrics: 'ym:s:visits',
+    date1: '7daysAgo', date2: 'yesterday', limit: '1',
+  });
+  const report = await request(integrationTransport(env, send), metrikaEndpoint(env) + '?' + query, {
+    headers: { Authorization: 'OAuth ' + required(env, 'METRIKA_TOKEN') },
+  });
+  if (!Array.isArray(report?.data) || !Number.isSafeInteger(report.total_rows) || report.total_rows < report.data.length)
+    throw Error('Метрика вернула неполный ответ');
+  return { at: Date.now(), status: 'ready' };
+}
+export async function metrika(env = process.env, send = fetch) {
+  send = integrationTransport(env, send);
+  const endpoint = metrikaEndpoint(env);
+  const replay = env.METRIKA_REPLAY_ORIGIN;
+  const counters = metrikaCounters(env), token = required(env, 'METRIKA_TOKEN');
   const maps = JSON.parse(
     env.METRIKA_REPORTS_JSON || '[{"id":"visits","metric":"ym:s:visits","unit":"visits"}]',
   );
   if (!Array.isArray(maps) || !maps.length) throw Error('В METRIKA_REPORTS_JSON нужен хотя бы один отчёт');
   const facts = [],
     samples = [];
-  for (const counter of new Set(ids.split(',')))
+  for (const counter of new Set(counters))
     for (const map of maps) {
       if (typeof map?.id !== 'string' || !map.id.trim()) throw Error('Укажите идентификатор отчёта Метрики');
       const ratio = map.numerator !== undefined || map.denominator !== undefined;

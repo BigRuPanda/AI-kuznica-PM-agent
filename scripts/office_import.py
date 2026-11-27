@@ -320,7 +320,7 @@ def book(z, name):
                     facts[-1]["links"] = links
     return facts
 
-def extract(data, name, depth=0):
+def extract(data, name, depth=0, include_references=False):
     if depth>2:
         raise ValueError("Слишком много вложенных архивов")
     with zipfile.ZipFile(io.BytesIO(data)) as z:
@@ -342,15 +342,18 @@ def extract(data, name, depth=0):
             return [{"file":name,"facts":facts}]
         out=[]
         for item in z.infolist():
-            if item.filename.lower().endswith((".xlsx",".pptx",".zip")):
-                child_name = item.filename if depth == 0 else name + "/" + item.filename
-                out.extend(extract(read(z,item.filename),child_name,depth+1))
+            child_name = item.filename if depth == 0 else name + "/" + item.filename
+            suffix = item.filename.lower()
+            if suffix.endswith((".xlsx",".pptx",".zip")):
+                out.extend(extract(read(z,item.filename),child_name,depth+1,include_references))
+            elif include_references and suffix.endswith((".pdf",".docx")):
+                out.append({"file":child_name,"facts":[],"role":"reference"})
         if not out:
             raise ValueError("В файле нет поддерживаемых таблиц или презентаций")
         return out
 
 try:
-    result=extract(sys.stdin.buffer.read(32*1024*1024+1),sys.argv[1])
+    result=extract(sys.stdin.buffer.read(32*1024*1024+1),sys.argv[1],include_references="--references" in sys.argv[2:])
     print(json.dumps(result,ensure_ascii=False,allow_nan=False,separators=(",",":")))
 except (ValueError, KeyError, ET.ParseError, zipfile.BadZipFile) as exc:
     sys.exit("Не удалось прочитать Office-документ: "+str(exc)[:200])

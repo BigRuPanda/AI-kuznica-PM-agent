@@ -11,6 +11,27 @@ const archive = Buffer.from('pinned original archive fixture');
 const sha = digest(archive);
 const first = 'finance.xlsx';
 const second = 'metrics.xlsx';
+test('an already indexed ZIP can add reference inventory without replacing an indexed book', t => {
+  const store = fixture(t);
+  const book = report('Data/metrics.xlsx', ['reach']);
+  const reference = { file: 'Reference/Instructions.pdf', facts: [], role: 'reference' };
+  importApproved(store, [book], { archive: true, sha, alreadyImported: false }, false);
+  const before = protectedSources(store.db).find(row => row.file === book.file);
+  store.db.prepare('UPDATE archive_indexes SET format=3 WHERE sha=?').run(sha);
+  const permission = sourcePermission(store.db, sha, archive, 'original.zip');
+  assert.equal(permission.refresh, true);
+  assert.equal(importApproved(store, [book, reference], permission, false).inserted, 1);
+  const inventory = protectedSources(store.db);
+  const indexed = inventory.find(row => row.file === book.file);
+  const supporting = inventory.find(row => row.file === reference.file);
+  assert.deepEqual(indexed, before);
+  assert.deepEqual([supporting.file, supporting.role, supporting.total, supporting.versions], [reference.file, 'reference', 0, 1]);
+  const [version] = sourceHistory(store.db, reference.file);
+  assert.equal(version.origin, 'Исходный ZIP организатора');
+  assert.equal(version.author, null);
+  assert.equal(version.active, true);
+  assert.equal(sourcePermission(store.db, sha, archive, 'original.zip').alreadyImported, true);
+});
 const report = (file, keys) => ({ file, facts: keys.map((metric_id, i) => ({
   kind: 'metrics', loc: 'Метрики!A' + (i + 2), row: { metric_id, date:'2026-06-01', product:'Astra', segment:'all', value:i },
 })) });

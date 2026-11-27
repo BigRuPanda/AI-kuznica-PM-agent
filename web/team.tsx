@@ -1711,7 +1711,9 @@ function SourceHistory({ file, current }: { file: string; current: string }) {
     {error && <p role="alert">{error}</p>}
     {!history.length && !error && <p role="status">Загружаем версии…</p>}
     {history.length > 0 && <ul>{history.map(version => <li key={version.version}>
-      <a href={'#knowledge-source/' + version.version}>{new Date(version.created).toLocaleString('ru-RU')} · {version.version.slice(0, 8)}</a>
+      {version.total > 0
+        ? <a href={'#knowledge-source/' + version.version}>{new Date(version.created).toLocaleString('ru-RU')} · {version.version.slice(0, 8)}</a>
+        : <time dateTime={new Date(version.created).toISOString()}>{new Date(version.created).toLocaleString('ru-RU')}</time>}
       {' · '}{version.origin || 'Ранее загруженная версия'}
       {version.author && ' · ' + version.author}
       {version.active && ' · Текущая'}
@@ -1747,15 +1749,18 @@ function Sources({ home, action, refresh }: { home: Home; action: Action; refres
                   body: file,
                 });
                 const v = await r.json();
-                if (!r.ok) throw Error(v.error);
-                say('Добавлено версий: ' + v.inserted);
+                if (!r.ok) {
+                  say('');
+                  throw Error(v.error);
+                }
+                say(home.archiveOnly && !v.inserted ? 'Файл уже был загружен.' : 'Добавлено версий: ' + v.inserted);
                 await refresh();
               });
             }}
           >
             <label>
               Книга, презентация или архив
-              <input name="file" type="file" accept=".xlsx,.pptx,.zip" required onChange={e=>{select(e.currentTarget.files?.[0]);setTarget('');setOrigin('');}} />
+              <input name="file" type="file" accept=".xlsx,.pptx,.zip" required onChange={e=>{select(e.currentTarget.files?.[0]);setTarget('');setOrigin('');say('');}} />
             </label>
             {versionFile && <>
               <label>Версия книги<select value={sourceFile} onChange={e=>setTarget(e.target.value)}>
@@ -1772,7 +1777,7 @@ function Sources({ home, action, refresh }: { home: Home; action: Action; refres
             </>}
             <div className="actions source-actions">
               <button className="primary">Загрузить и пересчитать</button>
-              <button
+              {!home.archiveOnly && <button
                 type="button"
                 onClick={() =>
                   action(async () => {
@@ -1786,21 +1791,23 @@ function Sources({ home, action, refresh }: { home: Home; action: Action; refres
                 }
               >
                 Синхронизировать Метрику
-              </button>
+              </button>}
             </div>
           </form>
         </section>
       )}
-      {home.user.space === 'team' && <MetrikaJournal status={home.metrikaSync} />}
+      {!home.archiveOnly && home.user.space === 'team' && <MetrikaJournal status={home.metrikaSync} />}
       <section className="paper">
         <h3>Загруженные материалы</h3>
         {home.sources.map((s) => (
           <div className="event-row" key={s.file}>
-            <b>{/\.(xlsx|pptx)$/i.test(s.file) ? <a href={'#knowledge-source/'+s.version}>{s.file}</a> : s.file}</b>
+            <b>{s.total !== 0 && /\.(xlsx|pptx)$/i.test(s.file) ? <a href={'#knowledge-source/'+s.version}>{s.file}</a> : s.file}</b>
             <small>
+              {s.role === 'reference' ? 'Справочный файл · содержимое не индексируется · ' : s.total !== undefined && `Распознано записей: ${s.total} · `}
               Версий: {s.versions} · {new Date(s.updated).toLocaleDateString('ru-RU')}
             </small>
-            {s.versions>1 && /\.(xlsx|pptx)$/i.test(s.file) && <SourceHistory file={s.file} current={s.version}/>}
+            {(s.role === 'reference' || ((home.archiveOnly || s.versions > 1) && /\.(xlsx|pptx)$/i.test(s.file))) &&
+              <SourceHistory file={s.file} current={s.version} />}
           </div>
         ))}
         {!home.sources.length && <p>Источники пока не загружены.</p>}
@@ -1838,6 +1845,20 @@ function Settings({ home, action, refresh, menu, changeMenu, scope }: {
       </div>
       <InvestigationSettings scope={scope} admin={admin} />
       <Connections home={home} action={action} refresh={refresh} scope={scope} />
+      {scope === 'team' && admin && home.archiveOnly && (
+        <section className="paper">
+          <h3>Яндекс Метрика</h3>
+          <p>Проверка Reports API на тестовом счётчике. Источник чисел разбора — архив организатора.</p>
+          <button type="button" onClick={() => action(async () => {
+            try { await post('metrika-probe'); }
+            finally { await refresh(); }
+          })}>Проверить Reports API</button>
+          {home.metrikaProbe && <p role="status">
+            {home.metrikaProbe.status === 'ready' ? 'Reports API ответил' : 'Ошибка Reports API · ' + home.metrikaProbe.reason}
+            {' · '}<time dateTime={new Date(home.metrikaProbe.at).toISOString()}>{new Date(home.metrikaProbe.at).toLocaleString('ru-RU')}</time>
+          </p>}
+        </section>
+      )}
       {scope === 'team' && <MetricRules admin={admin} refresh={refresh}/>}
       {scope === 'team' && admin && (
         <section className="paper">
@@ -2270,12 +2291,15 @@ function Workspace({ user, onLogout, onUpdate }: { user: User; onLogout: () => v
                 </label>
                 <label>
                   Продукт
-                  <input name="product" required list="products" />
-                  <datalist id="products">
-                    {home.products.map((p) => (
-                      <option key={p}>{p}</option>
-                    ))}
-                  </datalist>
+                  {home.archiveOnly ? <select name="product" required defaultValue="">
+                    <option value="" disabled>{home.products.length ? 'Выберите семейство' : 'Нет семейств в загруженном архиве'}</option>
+                    {home.products.map(product => <option key={product}>{product}</option>)}
+                  </select> : <>
+                    <input name="product" required list="products" />
+                    <datalist id="products">
+                      {home.products.map(product => <option key={product}>{product}</option>)}
+                    </datalist>
+                  </>}
                 </label>
                 <label>
                   Связанный релиз
