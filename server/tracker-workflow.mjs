@@ -464,15 +464,17 @@ export async function confirmTracker(store, user, row, revision, env, send) {
       if (issue.key !== b.receipt.key) throw Error('Redmine не подтвердил номер сохранённой задачи.');
       if (!verified(issue) && hasReceipt) {
         const checkRepair = () => {
-          if (!versionBound) return;
-          requireDraftVersion(db, user, row.case_id, {...b, target}, env);
-          if (!b.investigationId && !sameTarget(db, user, target, env))
+          if (versionBound) requireDraftVersion(db, user, row.case_id, {...b, target}, env);
+          const owner = getCase(db, row.case_id).body.owner;
+          if (owner && owner !== user.id) throw Error('Разбор недоступен');
+          if (!target.local && !sameTarget(db, user, target, env))
             throw Error('Назначение изменилось. Проверьте настройки Redmine.');
         };
         if (target.local) await api.repairOrigin(issue, checkRepair);
         else {
-          checkRepair();
-          await api.repairOrigin(issue, { generated: b.changes?.origin === aiOrigin, required: b.requireGeneratedFlag });
+          await api.repairOrigin(issue, {
+            generated: b.changes?.origin === aiOrigin, required: b.requireGeneratedFlag, beforeRepair: checkRepair,
+          });
         }
         issue = await api.read(b.receipt.key);
       }

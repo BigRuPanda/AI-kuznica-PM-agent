@@ -74,9 +74,9 @@ function remember(db, user, target, env, credential) {
     seal(env, user.id + site, credential),
   );
 }
-function adapter(target, credential, send, env) {
+function adapter(target, credential, send, env, beforeMutation) {
   return target.service === 'redmine'
-    ? redmine(target, credential.token, send, { requireGeneratedFlag: env.REDMINE_REQUIRE_AI_FLAG === 'true' })
+    ? redmine(target, credential.token, send, { requireGeneratedFlag: env.REDMINE_REQUIRE_AI_FLAG === 'true', beforeMutation })
     : confluence(target, credential, send);
 }
 export function connectionInfo(db, user, env = process.env) {
@@ -120,7 +120,8 @@ export async function remoteClient(db, user, target, env, send) {
     throw Error('Назначение изменилось. Создайте новый черновик');
   const site = siteId(target),
     ctx = user.id + site;
-  const row = db.prepare('SELECT secret FROM integration_tokens WHERE user=? AND site=?').get(user.id, site);
+  const connection = db.prepare('SELECT secret FROM integration_tokens WHERE user=? AND site=?');
+  const row = connection.get(user.id, site);
   if (!row) throw Error('Подключите личный доступ к ' + target.service + ' в настройках');
   let cred = open(env, ctx, row.secret);
   if (target.edition === 'cloud' && cred.expires <= Date.now() + 60000) {
@@ -150,7 +151,10 @@ export async function remoteClient(db, user, target, env, send) {
       );
     cred = await pending.get(ctx);
   }
-  return adapter(target, cred, send, env);
+  return adapter(target, cred, send, env, () => {
+    if (connection.get(user.id, site)?.secret !== row.secret)
+      throw Error('Личный доступ к Redmine изменился. Повторите подтверждение.');
+  });
 }
 export async function personalConnection(db, user, b, env, send) {
   send = integrationTransport(env, send);

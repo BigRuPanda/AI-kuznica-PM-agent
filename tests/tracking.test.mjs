@@ -352,6 +352,62 @@ test('a direct Redmine write rechecks the saved project after asynchronous prefl
   }
 });
 
+test('disconnecting a personal Redmine token during create preflight prevents the write', async () => {
+  const store = dbAt(), remote = siteMock(), s = scenario(store, remote);
+  try {
+    await s.connect('redmine');
+    const draft = await s.draft('draft', { title: 'Проверить доступ', description: 'Описание' });
+    const send = remote.send;
+    remote.send = async (url, init) => {
+      const response = await send(url, init);
+      if (new URL(url).pathname === '/pm/projects/store.json') {
+        remote.send = send;
+        await personalConnection(store.db, owner, { service: 'redmine', action: 'disconnect' }, s.env, send);
+      }
+      return response;
+    };
+    await assert.rejects(s.confirm(draft), /Личный доступ.+изменился/);
+    assert.equal(remote.issues.length, 0);
+    assert.equal(connectionInfo(store.db, owner, s.env).redmine.connected, false);
+    await s.connect('redmine', 'new-owner-key');
+    assert.equal((await s.confirm(draft)).key, '1');
+    assert.equal(remote.calls.find(call => call.p === '/pm/issues.json' && call.method === 'POST').auth, 'new-owner-key');
+  } finally {
+    store.close();
+  }
+});
+
+test('replacing a personal Redmine token during origin repair keeps the receipt without using the old token', async () => {
+  const store = dbAt(), remote = siteMock(), s = scenario(store, remote);
+  try {
+    await s.connect('redmine');
+    remote.ignoreOrigin = true;
+    const draft = await workspaceOperation(store, owner, 'draft', {
+      caseId: s.caseId, title: 'Восстановить метку', description: 'Описание',
+    }, s.env, remote.send, false, undefined, true);
+    assert.equal((await s.confirm(draft)).state, 'partial');
+    remote.ignoreOrigin = false;
+    const send = remote.send;
+    let projectReads = 0;
+    remote.send = async (url, init) => {
+      const response = await send(url, init);
+      if (new URL(url).pathname === '/pm/projects/store.json' && ++projectReads === 2)
+        await personalConnection(store.db, owner, { service: 'redmine', action: 'connect', token: 'new-owner-key' }, s.env, send);
+      return response;
+    };
+    const existing = await s.confirm(draft);
+    assert.equal(existing.key, '1');
+    assert.equal(existing.state, 'partial');
+    assert.match(existing.reason, /Личный доступ.+изменился/);
+    assert.equal(remote.calls.some(call => call.method === 'PUT'), false);
+    assert.equal((await s.confirm(draft)).state, 'done');
+    assert.equal(remote.issues.length, 1);
+    assert.equal(remote.calls.find(call => call.method === 'PUT').auth, 'new-owner-key');
+  } finally {
+    store.close();
+  }
+});
+
 test('unverified Redmine origin keeps the created ID and repairs one issue after a restart', async () => {
   const store = dbAt(), m = siteMock(), s = scenario(store, m);
   try {

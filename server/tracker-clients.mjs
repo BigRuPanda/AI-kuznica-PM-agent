@@ -81,7 +81,7 @@ export function withAiNotice(description = '') {
 }
 const generatedFlagName = 'сгенерирована ии-помощником';
 const generatedFlagError = 'Включите в проекте Redmine поле-флаг «сгенерирована ИИ-помощником» для задач.';
-export function redmine(target, token, send, { requireGeneratedFlag = false } = {}) {
+export function redmine(target, token, send, { requireGeneratedFlag = false, beforeMutation } = {}) {
   const call = client(send, 'Redmine', target.url, { 'X-Redmine-API-Key': token });
   const projectPath = '/projects/' + encodeURIComponent(target.scope);
   async function project() {
@@ -228,6 +228,7 @@ export function redmine(target, token, send, { requireGeneratedFlag = false } = 
         if (names[k]) fields[names[k]] = k.endsWith('Id') ? (v ? Number(numeric(v)) : null) : v;
       if (key) {
         fields.notes = [changes.comment, marker].filter(Boolean).join('\n\n');
+        beforeMutation?.();
         beforeWrite?.();
         await call('/issues/' + numeric(key) + '.json', 'PUT', { issue: fields });
         return { key: String(key), url: target.url + '/issues/' + numeric(key) };
@@ -242,17 +243,22 @@ export function redmine(target, token, send, { requireGeneratedFlag = false } = 
       fields.description = [fields.description, marker]
         .filter(Boolean)
         .join('\n\n');
+      beforeMutation?.();
       beforeWrite?.();
       const { issue } = await call('/issues.json', 'POST', { issue: fields });
       return { key: numeric(issue.id), url: target.url + '/issues/' + numeric(issue.id) };
     },
-    async repairOrigin(issue, { generated = true, required = false } = {}) {
+    async repairOrigin(issue, { generated = true, required = false, beforeRepair } = {}) {
       const changes = {};
       if ((generated && issue.origin !== aiOrigin) || (required && !issue.generatedFlag))
         changes.custom_fields = originFields(await project(), generated, required);
       const description = withAiNotice(issue.description);
       if (description !== issue.description) changes.description = description;
-      if (Object.keys(changes).length) await call('/issues/' + numeric(issue.key) + '.json', 'PUT', {issue: changes});
+      if (Object.keys(changes).length) {
+        beforeMutation?.();
+        beforeRepair?.();
+        await call('/issues/' + numeric(issue.key) + '.json', 'PUT', { issue: changes });
+      }
     },
     async recover(key, marker) {
       const matches = key ? [await read(key)] : await search(marker, true);
