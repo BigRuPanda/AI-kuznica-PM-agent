@@ -2336,7 +2336,8 @@ test('Softline workspace, upgrade and browser journeys', async t => {
       await go(admin,'cases');
       await role(admin,'Новый разбор').click();
       const editor = admin.locator('form').filter({has:role(admin,'Создать личный разбор')});
-      await field(editor,'Вопрос или гипотеза').fill('Гипотеза с критерием до выкладки');
+      const title = 'Гипотеза с критерием до выкладки';
+      await field(editor,'Вопрос или гипотеза').fill(title);
       await field(editor,'Продукт').fill(product);
       await editor.getByText('Гипотеза и критерии до разработки',{exact:true}).click();
       await field(editor,'Целевая метрика').selectOption(metric);
@@ -2344,6 +2345,8 @@ test('Softline workspace, upgrade and browser journeys', async t => {
       await field(editor,'Целевое значение, %').fill('5');
       const [created] = await submit(admin,'create-case',()=>role(editor,'Создать личный разбор').click());
       const {id} = await created.json();
+      await admin.waitForURL(base+'/#case/'+id);
+      await visible(admin.getByRole('heading',{name:title,exact:true}));
       const personal = await call('watch',{caseId:id,deployed:rollout});
       assert.equal(personal.state,'Цель достигнута');
       assert.equal(personal.actual,5);
