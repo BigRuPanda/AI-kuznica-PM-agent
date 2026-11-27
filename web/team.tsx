@@ -315,7 +315,7 @@ function Chat({
   context?: string;
   clearContext?: () => void;
   attachment?: Attachment;
-  screen?: { calc: string; full: boolean; control?: string; cards: string[] };
+  screen?: { calc: string; full: boolean; control?: string | false; cards: string[] };
   onAttachFocus?: () => void;
 }) {
   const { open: openMaterial, load: loadMaterial, listen } = useMaterials();
@@ -1229,7 +1229,7 @@ function Investigation({
     const previous = currentView.current;
     const before = previous.preferences || {}, after = next.preferences || {};
     if (previous.period !== next.period || previous.ratioSelections !== next.ratioSelections ||
-      (before.full ?? false) !== (after.full ?? false) || (before.control || '') !== (after.control || '') ||
+      (before.full ?? false) !== (after.full ?? false) || (before.control ?? '') !== (after.control ?? '') ||
       (before.sourceQuery || '') !== (after.sourceQuery || '')) {
       // Ignore earlier results as soon as the inputs change, before the next effect runs.
       requestVersion.current++;
@@ -1255,7 +1255,8 @@ function Investigation({
     fail('');
     try {
       const v = await post<Detail>('view', {
-        caseId: id, full: preferences?.full ?? false, control: preferences?.control || undefined,
+        caseId: id, full: preferences?.full ?? false,
+        control: preferences?.control === '' ? undefined : preferences?.control,
         sourceQuery: preferences?.sourceQuery || '', ratioSelections, from: period.from, through: period.through,
       });
       if (version !== requestVersion.current) return;
@@ -1393,6 +1394,7 @@ function Investigation({
     .includes(signalMetric?.trim().toLowerCase() || '') ? 'orders_index' : undefined;
   const targetMetric = archiveMonitoring?.plan.metric || activeMeasurement?.metric || specified?.metric || signalMetric;
   const needsSalesContext = !targetMetric || targetMetric === 'orders_index' || !!v.summary[0]?.rows.length;
+  const comparison = peer === false ? false : peer || v.summary[1]?.product;
   const caseCards = cards.filter(key => key !== 'watch' && (needsSalesContext || !['summary', 'trend'].includes(key)));
   const shareCards = v.monitoring ? [...caseCards, 'watch'] : caseCards;
   const oldMetric = c.body.plan?.metric?.trim().toLowerCase();
@@ -1504,8 +1506,9 @@ function Investigation({
                 </label>
                 {needsSalesContext && <label className="case-comparison">
                   <span>Сравнить с</span>
-                  <select value={peer || v.summary[1]?.product || ''}
-                    onChange={(e) => updatePreferences({ control: e.target.value })}>
+                  <select value={comparison || ''}
+                    onChange={(e) => updatePreferences({ control: e.target.value || false })}>
+                    <option value="">Без сравнения</option>
                     {home.products.filter((p) => p !== c.product).map((p) => <option key={p}>{p}</option>)}
                   </select>
                 </label>}
@@ -1734,7 +1737,7 @@ function Investigation({
               action={action}
               context={ctx}
               attachment={attachment}
-              screen={{ calc: v.id, full, control: peer || v.summary[1]?.product, cards: caseCards }}
+              screen={{ calc: v.id, full, control: comparison, cards: caseCards }}
               clearContext={() => {
                 ask('');
                 attach(undefined);

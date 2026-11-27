@@ -205,7 +205,7 @@ export type Detail = {
     value: number;
     imported: { file: string; version: string }[];
   }[];
-  personal?: { revision?: string; cards: string[]; full?: boolean; control?: string; pin?: boolean };
+  personal?: { revision?: string; cards: string[]; full?: boolean; control?: string | false; pin?: boolean };
   view: View;
   effect: Watch | Observation | null;
   backlog: Issue[];
@@ -261,7 +261,7 @@ export type Msg = {
       state?: string;
       external?: string;
     }[];
-    personal?: { caseId: string; cards: string[]; full?: boolean; control?: string; pin?: boolean };
+    personal?: { caseId: string; cards: string[]; full?: boolean; control?: string | false; pin?: boolean };
     rounds?: number;
     steps?: string[];
     full?: boolean;
