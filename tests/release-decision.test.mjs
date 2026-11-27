@@ -300,7 +300,9 @@ test('release chat requires a linked case before manual confirmation with the or
   assert.equal(db.prepare('SELECT state FROM draft_actions').get().state, 'done');
   assert.equal(db.prepare('SELECT count(*) n FROM local_issues WHERE key=?').get('T-08').n, 1);
   await page.reload();
-  await page.getByRole('link', { name: 'Настроить проверку эффекта' }).click();
+  await conversation.getByRole('heading', { name: 'Чат разбора · R-09', exact: true }).waitFor();
+  assert.equal(await page.getByRole('link', { name: 'Настроить проверку эффекта', exact: true }).count(), 0);
+  await page.goto(base + '/#case/' + caseId + '/effect');
   assert.equal(new URL(page.url()).hash, '#case/' + caseId + '/effect');
   await page.locator('.effect-panel[open]').waitFor();
   await page.goto(base + '/#release-decision');

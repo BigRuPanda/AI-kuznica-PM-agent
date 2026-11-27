@@ -31,7 +31,6 @@
 .decision-hero h2 { margin: .55rem 0; }
 .decision-next { display: grid; justify-items: start; gap: .6rem; }
 .decision-next :is(h3, p) { margin: 0; }
-.decision-next a { display: inline-flex; align-items: center; gap: .3rem; }
 .decision-values {
   display: flex;
   align-items: center;

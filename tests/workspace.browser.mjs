@@ -393,6 +393,8 @@ test('release decisions preserve the historical cutoff, cited cells and manual i
   assert.equal(await role(page, 'Открыть чат разбора').count(), 0);
   const evidenceCards = page.locator('.decision-evidence > section');
   await visible(evidenceCards.last());
+  const effectLink = page.locator('.decision-hero').getByRole('link', { name: 'Настроить проверку эффекта', exact: true });
+  assert.equal(await effectLink.count(), 0);
   for (const width of [1440, 980, 821, 820, 390]) {
     await page.setViewportSize({ width, height: 900 });
     const heights = await evidenceCards.evaluateAll(cards => cards.map(card => card.getBoundingClientRect().height));

@@ -285,7 +285,6 @@ export function ReleaseDecision({
         <div className="decision-next">
           <h3>{data.recommendation.title}</h3>
           <p>{data.recommendation.next}</p>
-          {release && data.caseId && !data.historical && <a href={'#case/' + data.caseId + '/effect'}>Настроить проверку эффекта <Icon name="arrow" /></a>}
         </div>
       </section>
       {data.historical && <p className="muted">Срез по датам событий в загруженной версии архива. Для части источников дата публикации неизвестна.</p>}
