@@ -355,11 +355,15 @@ test('Softline workspace, upgrade and browser journeys', async t => {
       await visible(ctr.getByRole('group',{name:group}));
     assert.ok(await checkChevron());
     await ruleSummary.click();
-    const shapes = admin.locator('.workspace-backdrop > span');
-    await shapes.first().waitFor({state:'attached'});
-    assert.equal(await shapes.first().evaluate(el => getComputedStyle(el).animationPlayState),'running');
-    const quiet = member.locator('.workspace-backdrop > span').first();
-    assert.equal(await quiet.evaluate(el => getComputedStyle(el).animationName),'none');
+    for (const page of [admin, member]) {
+      const backdrop = await page.locator('.team-app').evaluate(el => {
+        const style = getComputedStyle(el);
+        return { layers: style.backgroundImage.match(/repeating-radial-gradient/g)?.length,
+          attachment: style.backgroundAttachment };
+      });
+      assert.deepEqual(backdrop,{layers:2,attachment:'scroll, fixed'});
+      assert.equal(await page.locator('.workspace-backdrop').count(),0);
+    }
     assert.equal(await role(admin,'Сверху').count(),0);
     assert.equal(await role(admin,'Выпустить ключ MCP').count(),0);
     await submit(admin,'invite',()=>role(admin,'Пригласить участника').click());

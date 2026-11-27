@@ -176,6 +176,19 @@ p {
   min-height: 100dvh;
   transition: --sidebar-width var(--panel-motion) var(--ease-out);
 }
+.team-app, .login-wrap {
+  background-image:
+    repeating-radial-gradient(ellipse at 100% 0, transparent 0 32px, var(--brand-line) 33px 34px, transparent 35px 47px),
+    repeating-radial-gradient(ellipse at 0 100%, transparent 0 32px,
+      color-mix(in srgb, var(--brand-line) 68%, transparent) 33px 34px, transparent 35px 47px);
+  background-size: min(46vw, 690px) 380px, min(39vw, 520px) 300px;
+  background-position: top right, left var(--lower-corner-offset, 0px) bottom 0;
+  background-repeat: no-repeat;
+  background-attachment: scroll, fixed;
+}
+@media (min-width: 821px) {
+  .team-app[data-menu='left'] { --lower-corner-offset: var(--sidebar-width); }
+}
 .side {
   background: var(--surface);
   color: var(--fg);
