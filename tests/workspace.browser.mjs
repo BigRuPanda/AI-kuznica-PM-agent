@@ -421,7 +421,10 @@ test('release decisions preserve the historical cutoff, cited cells and manual i
   const technicalRow = page.locator('.release-row').filter({ hasText: 'DEC-TECH ·' });
   assert.equal(await technicalRow.getByRole('link').count(), 0);
   assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
-  await technicalRow.getByRole('button', { name: /^Запланировать оценку/ }).click();
+  const scheduleButton = technicalRow.getByRole('button', { name: 'Запланировать разбор DEC-TECH', exact: true });
+  assert.equal(await scheduleButton.count(), 1);
+  assert.equal(await scheduleButton.innerText(), 'Запланировать разбор');
+  await scheduleButton.click();
   assert.equal(await field(page, 'Связанный релиз').inputValue(), 'DEC-TECH');
   await role(page, 'Новый разбор').click();
   await page.setViewportSize({ width: 1440, height: 900 });
@@ -860,7 +863,7 @@ test('Softline workspace, upgrade and browser journeys', async t => {
     try {
       await admin.getByRole('navigation',{name:'Основные разделы'}).getByRole('link',{name:'Релизы',exact:true}).click();
       const releaseRow = admin.locator('.release-row').filter({ hasText: 'DEMO-R ·' });
-      await releaseRow.getByRole('button', { name: /^Запланировать оценку/ }).click();
+      await releaseRow.getByRole('button', { name: 'Запланировать разбор DEMO-R', exact: true }).click();
       const releaseSelect = field(admin,'Связанный релиз');
       assert.equal(await releaseSelect.inputValue(), 'DEMO-R');
       await field(admin,'Вопрос или гипотеза').fill('Оценить новый релиз');

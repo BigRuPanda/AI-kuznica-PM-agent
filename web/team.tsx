@@ -2431,13 +2431,13 @@ function Workspace({ user, onLogout, onUpdate }: { user: User; onLogout: () => v
                     )}
                     <button
                       type="button"
-                      aria-label={'Запланировать оценку ' + release.release_id}
+                      aria-label={'Запланировать разбор ' + release.release_id}
                       onClick={() => {
                         showCaseForm(release.release_id);
                         jump('cases');
                       }}
                     >
-                      Запланировать оценку
+                      Запланировать разбор
                     </button>
                   </div>
                 );
