@@ -1,3 +1,5 @@
+import { InvestigationValidationError } from './investigation-validation.mjs';
+
 export const stageOrder = {
   lead: ['lead'],
   review: ['lead', 'reviewer'],
@@ -71,6 +73,7 @@ export function failureReason(error) {
   if (error?.timedOut || error?.name === 'TimeoutError') return 'Модель не успела ответить вовремя.';
   if (error?.status >= 500) return 'На стороне провайдера произошла ошибка.';
   if (error?.retryable) return 'Не удалось связаться с провайдером.';
+  if (error instanceof InvestigationValidationError) return 'Ответ модели не прошёл проверку. ' + error.message;
   if (error?.invalidModelResponse || error instanceof SyntaxError) return 'Ответ модели не прошёл проверку.';
   return 'Не удалось завершить проверку. Этап будет повторён.';
 }

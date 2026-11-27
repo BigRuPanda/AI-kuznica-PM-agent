@@ -4,6 +4,7 @@ import { providerCall } from '../server/agent.mjs';
 import { openStore } from '../server/store.mjs';
 import { initEvidence, importDocs } from '../server/evidence.mjs';
 import { captureInvestigation, runInvestigationStage } from '../server/investigation-engine.mjs';
+import { failureReason } from '../server/investigation-stages.mjs';
 
 const env = { LLM_DATA_MODE:'analysis', LLM_BASE_URL:'https://model.example', LLM_MODEL:'fixture' };
 const day = n => new Date(Date.UTC(2026,5,29+n)).toISOString().slice(0,10);
@@ -121,6 +122,61 @@ test('an alternative inherits frozen periods and operational sources and records
 const call = (name,args) => ({id:'call',type:'function',function:{name,arguments:JSON.stringify(args)}});
 const response = calls => ({ok:true,json:async()=>({choices:[{message:{role:'assistant',tool_calls:calls}}],
   usage:{prompt_tokens:4,completion_tokens:2}})});
+test('lead corrects an invalid decision in the same attempt, using only evidence already returned', async () => {
+  const findings = ['observations','control'].map(id => ({id,kind:'calculation',label:id,text:'Снимок'}));
+  const capture = {context:{findings}, calcId:'test-calc', checks:[]};
+  const decision = {summary:'Объяснение',action:'Проверить',plan:'Проверить процесс',
+    outcomes:['Продолжить проверку'],hypotheses:[{title:'Гипотеза',for:[],against:[],test:'Сверить'}]};
+  const payload = {question:'Почему?',result:'Расчёт',impact:'Вывод',findingIds:['control'],decision};
+  const requests = [];
+  const send = async (_url,init) => {
+    const body = JSON.parse(init.body);
+    requests.push(body);
+    switch (requests.length) {
+      case 1: return response([call('read_findings',{ids:['observations']})]);
+      case 2: return response([call('submit_decision',{...payload,decision:{...decision,summary:'я'.repeat(1001)}})]);
+      case 3: {
+        const feedback=body.messages.at(-1);
+        assert.equal(feedback.role,'tool');
+        assert.match(feedback.content,/decision\.summary/);
+        assert.match(feedback.content,/1000/);
+        // Both calls were generated before the model saw the requested control finding.
+        return response([{...call('read_findings',{ids:['control']}),id:'read-control'},
+          {...call('submit_decision',payload),id:'too-early'}]);
+      }
+      case 4: {
+        const replies=body.messages.slice(-2);
+        assert.deepEqual(replies.map(m=>[m.role,m.tool_call_id]),[['tool','read-control'],['tool','too-early']]);
+        assert.equal(JSON.parse(replies[0].content)[0].id,'control');
+        assert.match(replies[1].content,/источник|свидетельств/i);
+        return response([call('submit_decision',payload)]);
+      }
+      default: assert.fail('unexpected extra model call');
+    }
+  };
+  const out=await runInvestigationStage({env,stage:'lead',send,run:{question:'Почему?'},capture});
+  assert.equal(requests.length,4);
+  assert.deepEqual(out.check.sources.map(s=>s.findingId),['control']);
+  assert.equal(out.usage.calls,4);
+});
+
+test('exhausted corrections preserve a safe field-level failure and the original call limit',async t=>{
+  const {db,run}=setup(t),capture=captureInvestigation(db,run);
+  let calls=0;
+  const secret='PRIVATE-MODEL-TEXT ';
+  const send=async()=> ++calls===1 ? response([call('read_findings',{ids:[capture.context.findings[0].id]})])
+    : response([call('submit_check',{question:'Что?',impact:'Вывод',result:secret.repeat(100),findingIds:[capture.context.findings[0].id]})]);
+  await assert.rejects(runInvestigationStage({env,stage:'analyst',send,run,capture}),error=>{
+    const reason=failureReason(error);
+    assert.match(reason,/result/);
+    assert.match(reason,/1200/);
+    assert.ok(!reason.includes(secret));
+    assert.equal(error.usage.calls,5);
+    return error.invalidModelResponse===true;
+  });
+  assert.equal(calls,5);
+});
+
 test('model must read the scoped tools, then cite inspected findings; reviewer has the draft and can change it',async t=>{
   const {db,run}=setup(t),capture=captureInvestigation(db,run);
   const f=capture.context.findings.find(f=>f.kind==='dictionary'),m=capture.context.findings.find(f=>f.kind==='calculation');
@@ -190,8 +246,11 @@ test('model streaming body failures keep transport and invalid JSON categories',
 
 test('malformed provider tool calls are reported as an invalid model response',async t=>{
   const {db,run}=setup(t), capture=captureInvestigation(db,run);
-  for(const calls of [[null],[{}],{length:1}]) {
-    await assert.rejects(runInvestigationStage({env,stage:'analyst',run,capture,send:async()=>response(calls)}),
+  const read = call('read_findings',{ids:[capture.context.findings[0].id]});
+  for(const calls of [[null],[{}],{length:1},[{function:read.function}],[read,read]]) {
+    let requests=0;
+    await assert.rejects(runInvestigationStage({env,stage:'analyst',run,capture,send:async()=>{requests++;return response(calls);}}),
       error=>error.invalidModelResponse===true);
+    assert.equal(requests,1,'malformed calls cannot be paired with correction messages');
   }
 });
