@@ -156,7 +156,7 @@ function ThresholdObservation({ observation, calcId }: { observation: NonNullabl
   return <div className="threshold-observation">
     <h2>Две недели ниже порога</h2>
     <p>Индекс {product} составил <strong>{num(first.value)}</strong> за {signalEvidenceWeek(first.week)} и{' '}
-      <strong>{num(second.value)}</strong> за {signalEvidenceWeek(second.week)}. Порог — <strong>{num(threshold)}</strong>.{' '}
+      <strong>{num(second.value)}</strong> за {signalEvidenceWeek(second.week).replace(/\.$/u, '')}. Порог — <strong>{num(threshold)}</strong>.{' '}
       {change === 0 ? 'За вторую неделю показатель остался на том же уровне.'
         : `За вторую неделю индекс ${change > 0 ? 'вырос' : 'снизился'} на ${num(Math.abs(change))} п.`}</p>
     <p><strong>Для сравнения с прошлым периодом нужна история.</strong>{' '}

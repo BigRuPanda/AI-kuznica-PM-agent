@@ -42,6 +42,7 @@ test('May threshold card shows the observed weeks and opens their saved source r
   assert.match(text,/42 за 4\s*[–—-]\s*10 мая/);
   assert.match(text,/42 за 11\s*[–—-]\s*17 мая/);
   assert.match(text,/Порог — 90/);
+  assert.ok(!text.includes('..'),'the localized date and sentence share one final period');
   assert.match(text,/остался на том же уровне/);
   assert.match(text,/нет полных недель/);
   assert.match(text,/пересчитается автоматически/);
