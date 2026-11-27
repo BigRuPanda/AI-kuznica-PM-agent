@@ -113,16 +113,25 @@ function canDeleteThread(user, chat) {
   return chat.id !== 'group' && canRenameThread(user, chat);
 }
 
+export function caseThreadId(userId, caseId) {
+  return digest(userId + '/' + caseId);
+}
+
 export function dashboard(db, user) {
+  const visibleCases = cases(db).filter(c => !c.body.owner || c.body.owner === user.id);
+  const caseByThread = new Map(visibleCases.map(c => [caseThreadId(user.id, c.id), c.id]));
   return {
     user,
-    cases: cases(db)
-      .filter((c) => !c.body.owner || c.body.owner === user.id)
-      .map((c) => ({ ...c, effect: effect(db, c) })),
+    cases: visibleCases.map(c => ({ ...c, effect: effect(db, c) })),
     threads: db
       .prepare("SELECT * FROM conversations WHERE scope='group' OR owner=? ORDER BY rowid DESC")
       .all(user.id)
-      .map((chat) => ({ ...chat, canRename: canRenameThread(user, chat), canDelete: canDeleteThread(user, chat) })),
+      .map(chat => ({
+        ...chat,
+        caseId: caseByThread.get(chat.id) ?? null,
+        canRename: canRenameThread(user, chat),
+        canDelete: canDeleteThread(user, chat),
+      })),
     sources: db
       .prepare('SELECT d.file,d.version,d.created updated,(SELECT count(*) FROM documents h WHERE h.file=d.file) versions FROM documents d WHERE d.rowid=COALESCE((SELECT a.rowid FROM documents a JOIN research_file_versions h ON a.version=h.version WHERE h.file=d.file),(SELECT max(a.rowid) FROM documents a WHERE a.file=d.file)) ORDER BY d.file')
       .all(),

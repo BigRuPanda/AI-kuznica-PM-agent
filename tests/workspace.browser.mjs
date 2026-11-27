@@ -19,6 +19,7 @@ import { seedWorkspace, fixtureEnv } from './workspace-fixture.mjs';
 const role = (p, name) => p.getByRole('button', { name, exact: true });
 const field = (p, name) => p.getByLabel(name);
 const visible = locator => locator.waitFor({ state: 'visible' });
+const pinActions = root => root.getByRole('button', {name:/Добавить в разбор|Добавлено ·|Убрать с экрана/});
 const submit = (page, operation, click) => Promise.all([
   page.waitForResponse(r => r.url().endsWith('/api/team/' + operation) && r.ok()), click()
 ]);
@@ -110,6 +111,15 @@ test('Softline workspace, upgrade and browser journeys', async t => {
     await p.locator('.workspace-page[data-route="'+hash.split('/')[0]+'"]').waitFor();
   };
   const caseRoute = 'case/'+fixture.caseId;
+  async function sendMaterialToCase(page, href) {
+    await field(page,'Вопрос агенту').fill(base+'/'+href);
+    await visible(page.locator('.chat-composer .range-attachment'));
+    const [response] = await submit(page,'ask',()=>role(page,'Отправить').click());
+    await workJobs(app.space('team'),app.accounts,env,transport);
+    const card = page.locator('.bubble.user .material-card').filter({has:page.locator('a[href="'+href+'"]')}).last();
+    await visible(card);
+    return {card, thread:response.request().postDataJSON().thread};
+  }
   const journey = (name, run) => t.test(name, async () => {
     try { await run(); }
     catch (error) {
@@ -464,6 +474,46 @@ test('Softline workspace, upgrade and browser journeys', async t => {
     await visible(proof.getByText('Только полные недели.',{exact:false}));
   });
 
+  await journey('chat groups keep team conversations personal and case discussions searchable', async () => {
+    async function api(page, operation, data) {
+      const response = await page.request.post(base+'/api/team/'+operation, {data});
+      assert.ok(response.ok());
+      return response.json();
+    }
+    const {id:caseThread} = await api(admin,'case-thread',{caseId:fixture.caseId});
+    const {id:privateThread} = await api(admin,'thread',{title:'Приёмка переписок · вопрос'});
+    await api(admin,'rename-thread',{thread:caseThread,title:'Приёмка переписок · обсуждение'});
+    await go(admin,'chats/'+caseThread);
+    const nav = admin.getByRole('navigation',{name:'Переписки'});
+    const group = name => nav.getByRole('region',{name,exact:true});
+    const link = (area,id) => area.locator('a[href="#chats/'+id+'"]');
+    const search = field(admin,'Поиск чатов');
+    await visible(link(group('Разборы'),caseThread));
+    assert.deepEqual(await nav.getByRole('heading').allTextContents(),['Личные','Разборы']);
+    await visible(link(group('Личные'),'group'));
+    await visible(link(group('Личные'),privateThread));
+    assert.equal(await link(nav,caseThread).count(),1);
+    assert.equal(await link(nav,caseThread).getAttribute('aria-current'),'page');
+    await search.fill('ПРИЁМКА ПЕРЕПИСОК');
+    assert.equal(await nav.getByRole('link').count(),2);
+    await search.fill('Приёмка переписок · вопрос');
+    assert.equal(await group('Разборы').count(),0);
+    await search.fill('zzz-no-match');
+    await visible(nav.getByText('Чаты не найдены'));
+    await search.fill('');
+    assert.equal(await link(nav,caseThread).getAttribute('aria-current'),'page');
+
+    const {id:memberThread} = await api(member,'case-thread',{caseId:fixture.caseId});
+    await go(member,'chats/group');
+    const toggle = role(member,'Список чатов');
+    await toggle.click();
+    const mobileNav = member.getByRole('navigation',{name:'Переписки'});
+    await visible(link(mobileNav.getByRole('region',{name:'Личные'}),'group'));
+    await link(mobileNav.getByRole('region',{name:'Разборы'}),memberThread).click();
+    await member.waitForURL('**/#chats/'+memberThread);
+    assert.equal(await toggle.getAttribute('aria-expanded'),'false');
+  });
+
   await journey('A/B, resumable research, pin, delete, reopen and explicitly share', async () => {
     await go(admin,'snapshot/'+fixture.calc+'/trend');
     const plot = admin.locator('.range-plot svg').first();
@@ -484,16 +534,37 @@ test('Softline workspace, upgrade and browser journeys', async t => {
     const report=admin.locator('.bubble.assistant .material-card.report').first();
     await visible(report);
     const href=await report.locator('a.material-preview').getAttribute('href');
-    await role(report,'Добавить в разбор').click();
+    const sourceRoute = new URL(admin.url()).hash.slice(1);
+    await report.locator('a.material-preview').click();
     const dialog=admin.getByRole('dialog');
-    await dialog.locator('select').selectOption(fixture.caseId);
-    await submit(admin,'pin-material',()=>role(dialog,'Добавить в разбор').click());
-    await dialog.waitFor({state:'hidden'});
+    await visible(role(dialog,'Приложить к сообщению'));
+    assert.equal(await pinActions(dialog).count(),0);
+    await admin.keyboard.press('Escape');
+    assert.equal(await pinActions(report).count(),0);
+
+    await go(admin,caseRoute);
+    const {card, thread} = await sendMaterialToCase(admin,href);
+    const pinned = admin.locator('.case-main a[href="'+href+'"]');
+    const [added] = await submit(admin,'pin-material',()=>role(card,'Добавить в разбор').click());
+    assert.equal(added.request().postDataJSON().caseId,fixture.caseId);
+    await visible(pinned);
+    await submit(admin,'pin-material',()=>role(card,'Добавлено · убрать с экрана').click());
+    await pinned.waitFor({state:'detached'});
+    await submit(admin,'pin-material',()=>role(card,'Добавить в разбор').click());
+    await visible(pinned);
+    await go(admin,'chats/'+thread);
+    await card.locator('a').click();
+    await visible(role(dialog,'Скопировать ссылку'));
+    assert.equal(await pinActions(dialog).count(),0);
+    await admin.keyboard.press('Escape');
+    assert.equal(await pinActions(card).count(),0);
+
+    await go(admin,sourceRoute);
     await admin.locator('.conversation-heading .thread-menu-trigger').click();
     await admin.getByRole('menuitem',{name:/Удалить/}).click();
     await submit(admin,'delete-thread',()=>role(admin.getByRole('dialog'),'Удалить чат').click());
     await go(admin,caseRoute);
-    await admin.locator('a[href="'+href+'"]').first().click();
+    await pinned.click();
     await visible(admin.getByRole('dialog').locator('.material-detail'));
     await admin.keyboard.press('Escape');
     await go(admin,'chats/'+fixture.thread);
@@ -503,12 +574,19 @@ test('Softline workspace, upgrade and browser journeys', async t => {
     await go(admin,'material/'+fixture.report);
     await admin.locator('a[href="#material/'+fixture.chart+'"]').click();
     await visible(admin.getByRole('dialog').locator('.range-plot svg'));
+    assert.equal(await pinActions(admin.getByRole('dialog')).count(),0);
     await go(member,'material/'+fixture.chart);
     await visible(member.getByText('Снимок недоступен',{exact:false}).first());
     await go(admin,'chats/group');
     await field(admin,'Вопрос агенту').fill('Отчёт '+base+'/#material/'+fixture.report);
     await admin.getByRole('checkbox',{name:/Открыть участникам/}).check();
     await submit(admin,'say',()=>role(admin,'Написать команде').click());
+    await admin.locator('.bubble.user .material-card a[href="#material/'+fixture.report+'"]').last().click();
+    await visible(dialog.locator('.material-card.chart svg'));
+    assert.equal(await pinActions(dialog).count(),0);
+    await dialog.locator('a[href="#material/'+fixture.chart+'"]').click();
+    await visible(dialog.locator('.range-plot svg'));
+    assert.equal(await pinActions(dialog).count(),0);
     await go(member,'material/'+fixture.report);
     await member.locator('a[href="#material/'+fixture.chart+'"]').click();
     await visible(member.getByRole('dialog').locator('.range-plot svg'));
@@ -573,12 +651,14 @@ test('Softline workspace, upgrade and browser journeys', async t => {
     await role(member,'К разбору').click();
     await visible(member.locator('.case-main'));
     await go(member,'material/'+fixture.chart);
-    await role(member,'Добавить в разбор').click();
-    const dlg = member.getByRole('dialog');
-    await dlg.locator('select').selectOption(fixture.caseId);
-    await submit(member,'pin-material',()=>role(dlg,'Добавить в разбор').click());
+    await visible(role(member,'Скопировать ссылку'));
+    assert.equal(await pinActions(member).count(),0);
     await go(member,caseRoute);
-    await member.locator('a[href="#material/'+fixture.chart+'"]').click();
+    await role(member,'Обсудить').click();
+    const {card} = await sendMaterialToCase(member,'#material/'+fixture.chart);
+    await submit(member,'pin-material',()=>role(card,'Добавить в разбор').click());
+    await role(member,'К разбору').click();
+    await member.locator('.case-main a[href="#material/'+fixture.chart+'"]').click();
     const detail = member.getByRole('dialog');
     const intact = await detail.locator('td').evaluateAll(cells => cells
       .filter(cell => /^[-+]?\d+(?:[,.]\d+)?$/.test(cell.textContent.trim()))

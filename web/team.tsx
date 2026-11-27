@@ -962,6 +962,10 @@ function ChatWorkspace({ home, id, action, refresh, onRename, onDelete }: {
   const activeThread = home.threads.find((thread) => thread.id === activeId);
   const term = query.trim().toLocaleLowerCase('ru');
   const threads = home.threads.filter((thread) => thread.title.toLocaleLowerCase('ru').includes(term));
+  const groups = [
+    { id: 'personal', title: 'Личные', threads: threads.filter(thread => !thread.caseId) },
+    { id: 'cases', title: 'Разборы', threads: threads.filter(thread => thread.caseId) },
+  ];
   const openAction = (thread: Thread, action: ChatAction) => edit({ thread, action });
 
   function removeChat(deleted: string) {
@@ -1003,18 +1007,23 @@ function ChatWorkspace({ home, id, action, refresh, onRename, onDelete }: {
               <input type="search" placeholder="Найти чат" value={query} onChange={(e) => search(e.target.value)} />
             </label>
             <nav className="thread-list" aria-label="Переписки">
-              {threads.map((t) => (
-                <div className="thread-row" key={t.id}>
-                  <a
-                    aria-current={activeId === t.id ? 'page' : undefined}
-                    href={'#chats/' + t.id}
-                    onClick={() => toggleList(false)}
-                  >
-                    <span className="thread-icon"><Icon name={t.scope === 'group' ? 'people' : 'chat'} /></span>
-                    <span className="thread-title">{t.title}</span>
-                  </a>
-                  <ChatMenu thread={t} onAction={openAction} />
-                </div>
+              {groups.filter(group => group.threads.length > 0).map(group => (
+                <section className="thread-group" key={group.id} aria-labelledby={'thread-group-' + group.id}>
+                  <h2 id={'thread-group-' + group.id}>{group.title}</h2>
+                  {group.threads.map(t => (
+                    <div className="thread-row" key={t.id}>
+                      <a
+                        aria-current={activeId === t.id ? 'page' : undefined}
+                        href={'#chats/' + t.id}
+                        onClick={() => toggleList(false)}
+                      >
+                        <span className="thread-icon"><Icon name={t.scope === 'group' ? 'people' : 'chat'} /></span>
+                        <span className="thread-title">{t.title}</span>
+                      </a>
+                      <ChatMenu thread={t} onAction={openAction} />
+                    </div>
+                  ))}
+                </section>
               ))}
               {!threads.length && <p className="muted">{query ? 'Чаты не найдены' : 'Пока нет чатов'}</p>}
             </nav>
@@ -2293,7 +2302,7 @@ function Workspace({ user, onLogout }: { user: User; onLogout: () => void }) {
     </div>
   );
   return (
-    <MaterialsProvider home={home} caseId={route === 'case' ? id : undefined} refresh={refresh}>
+    <MaterialsProvider caseId={route === 'case' ? id : undefined}>
       {content}
     </MaterialsProvider>
   );

@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { openStore } from '../server/store.mjs';
-import { initEvidence, importDocs, cases, analysisView, effect, updateCase } from '../server/evidence.mjs';
+import { initEvidence, importDocs, cases, analysisView, effect, updateCase, digest } from '../server/evidence.mjs';
 import { createTeamApp } from '../server/team-http.mjs';
 import { metrika } from '../server/connectors.mjs';
 import { initWorkbench, deliver, createThread, deleteThread, enqueue, messages, workJobs } from '../server/workbench.mjs';
@@ -337,6 +337,22 @@ test('accounts, private and group chat, isolated judges, publish, MCP parity, du
     assert.equal((await call('rename-thread', { thread: customTeam, title: 'Встречи продукта' }, b.cookie)).s, 200);
 
     const v = (await call('view', { caseId: c.id }, a.cookie)).b.view;
+    // The stored title may have changed since this case conversation was first opened.
+    const legacyId = digest(a.b.id + '/' + c.id);
+    const rangeThread = digest(a.b.id + '/chart/' + v.id);
+    const insertThread = team.db.prepare("INSERT INTO conversations VALUES(?,?,'private',?)");
+    insertThread.run(legacyId, a.b.id, renamed.b.title);
+    insertThread.run(rangeThread, a.b.id, c.title);
+    const rows = (await call('overview', {}, a.cookie)).b.threads;
+    assert.equal(rows.find(t => t.id === legacyId).caseId, c.id);
+    for (const id of [privateThread, rangeThread, 'group', customTeam]) {
+      assert.equal(rows.find(t => t.id === id).caseId, null);
+    }
+    assert.equal((await call('case-thread', { caseId: c.id }, a.cookie)).b.id, legacyId);
+    const memberCaseThread = (await call('case-thread', { caseId: c.id }, b.cookie)).b.id;
+    const otherRows = (await call('overview', {}, b.cookie)).b.threads;
+    assert.ok(!otherRows.some(t => t.id === legacyId));
+    assert.equal(otherRows.find(t => t.id === memberCaseThread).caseId, c.id);
     const preview = await call('prepare_publish', { caseId: c.id, calc: v.id, cards: ['trend'] }, a.cookie);
     assert.equal(preview.s, 200);
     assert.equal(preview.b.recipient, 'Команда продукта');

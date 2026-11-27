@@ -43,6 +43,18 @@
   min-height: 0;
   overflow: auto;
 }
+.thread-group {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+.thread-group + .thread-group { margin-top: 8px; }
+.thread-group h2 {
+  margin: 0 6px;
+  color: var(--fg-muted);
+  font-size: 0.875rem;
+  font-weight: 600;
+}
 .thread-row {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
