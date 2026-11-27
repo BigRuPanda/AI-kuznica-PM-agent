@@ -7,6 +7,7 @@ import { openStore } from '../server/store.mjs';
 import { initWorkbench } from '../server/workbench.mjs';
 import { initEvidence, importDocs, getCase, effect, updateCase } from '../server/evidence.mjs';
 import { workspaceOperation } from '../server/workspace-operations.mjs';
+import { casePresentationInput } from '../server/presentation-case.mjs';
 
 const user = { id: 'pm', role: 'admin', name: 'PM' };
 const week = i => new Date(Date.UTC(2026, 0, 5 + i * 7)).toISOString().slice(0, 10);
@@ -51,6 +52,12 @@ test('the measured KPI uses its own source counts, inclusive target and control,
     assert.equal(out.target,5); assert.equal(out.unit,'%'); assert.equal(out.actual,x);
     assert.equal(out.state,'Цель достигнута');
   }
+  const presentation=casePresentationInput(s.db,user,id,Date.now());
+  const kpi=presentation.candidates.find(candidate=>candidate.kind==='kpi');
+  assert.equal(kpi.title,'Показатель после выкладки');
+  assert.equal(kpi.value,'6');
+  assert.equal(kpi.unit,'%');
+  assert.ok(kpi.refs.some(ref=>ref.url.startsWith('#knowledge-source/') && ref.url.endsWith('/desktop7')));
   load(s,[ctr(7,'desktop',0,0),ctr(6,'desktop',1,10)]);
   assert.ok(Math.abs(inspect().actual - 100 * 13 / 210) < 1e-8);
   load(s,[ctr(7,'mobile',0)]);
