@@ -152,8 +152,15 @@ test('organizer archive supplies both families, verifiable evidence, and histori
   assert.equal(astra.trend.current.mean, 89.25);
   assert.equal(astra.competitor.match, 'Частично');
   assert.equal(astra.measurementIssue, false);
-  assert.notEqual(astra.caseId, current.caseId);
-  const early = await call('release_decision', { caseId: current.caseId, through: '2026-09-20' });
+  assert.equal(current.caseId, null);
+  assert.equal(astra.caseId, null);
+  const { cases } = await call('overview');
+  const salesSignal = (family, rule) => cases.find(c => c.product === family &&
+    c.body.signal?.rule === rule && c.body.signal.status === 'confirmed');
+  const kasperskySignal = salesSignal(product, 'relative');
+  assert.ok(kasperskySignal?.id, 'The archive creates a confirmed Kaspersky sales signal');
+  assert.ok(salesSignal(astra.product, 'absolute')?.id, 'The archive creates a confirmed Astra sales signal');
+  const early = await call('release_decision', { caseId: kasperskySignal.id, through: '2026-09-20' });
   assert.equal(early.caseId, null);
   assert.equal(early.release, null);
   assert.equal(early.customer, null);
@@ -193,11 +200,11 @@ test('organizer archive supplies both families, verifiable evidence, and histori
   });
 
   await t.test('the organizer historical snapshot excludes future releases and future signal weeks', async () => {
-    const before = (await call('view', { caseId:current.caseId, through:'2026-09-30', full:true })).view;
+    const before = (await call('view', { caseId:kasperskySignal.id, through:'2026-09-30', full:true })).view;
     assert.equal(before.pivot,'2026-09-21');
     assert.deepEqual(before.timeline.map(row=>row.data.release_id),['R-07','R-08']);
     assert.equal(before.signal,null);
-    const first = (await call('view', { caseId:current.caseId, through:'2026-11-04', full:true })).view;
+    const first = (await call('view', { caseId:kasperskySignal.id, through:'2026-11-04', full:true })).view;
     assert.deepEqual([first.signal.week,first.signal.count],['2026-10-26',1]);
     assert.deepEqual(first.signal.history.map(row=>row.week),['2026-10-26']);
     assert.match(first.signal.source,/Продажи!A27$/);
@@ -212,16 +219,13 @@ test('organizer archive supplies both families, verifiable evidence, and histori
       return r.periods[0].series[0];
     };
     const absent = await compare('tablet', '2026-09-02', '2026-09-03');
-    assert.equal(absent.available, 0);
-    assert.equal(absent.value, null);
-    assert.equal(absent.n, undefined);
-    assert.equal(absent.d, undefined);
+    assert.deepEqual([absent.available, absent.value, absent.n, absent.d], [0, null, null, null]);
     const zero = await compare('mobile', '2026-10-05', '2026-10-12');
     assert.deepEqual([zero.available, zero.value, zero.n, zero.d], [7, 0, 0, 26]);
   });
 
   await t.test('sales effect applies the chosen control to the same complete windows', async () => {
-    const input = { caseId: current.caseId, releaseId: 'R-09', metric: 'orders_index', segment: 'all',
+    const input = { caseId: kasperskySignal.id, releaseId: 'R-09', metric: 'orders_index', segment: 'all',
       asOf: '2026-11-22', control: astra.product, target: 110 };
     const evaluated = await call('effect-preview', input);
     assert.equal(evaluated.plan.control, astra.product);
@@ -246,7 +250,7 @@ test('organizer archive supplies both families, verifiable evidence, and histori
   });
 });
 
-test('decision chat leads to manual confirmation, using the same case and actual workbook', {
+test('release chat requires a linked case before manual confirmation with the organizer workbook', {
   skip: !hasArchive ? 'Organizer ZIP is unavailable' : process.env.SIGNAL_RELEASE_BROWSER !== '1',
 }, async t => {
   const { chromium } = await import('playwright');
@@ -277,11 +281,17 @@ test('decision chat leads to manual confirmation, using the same case and actual
   await page.getByRole('button', { name: 'Найти задачу и проверить дубли' }).click();
   await page.getByRole('link', { name: /^T-08 · Недочеты/ }).waitFor();
   assert.equal(await page.getByRole('button', { name: 'Подготовить черновик задачи' }).count(), 0);
-  await page.locator('.decision-issues li').filter({ hasText: /^T-08/ })
-    .getByRole('button', { name: 'Подготовить комментарий' }).click();
+  const comment = page.locator('.decision-issues li').filter({ hasText: /^T-08/ })
+    .getByRole('button', { name: 'Подготовить комментарий' });
+  assert.equal(await comment.count(), 0);
+  await page.getByRole('button', { name: 'Создать связанный разбор' }).click();
+  await comment.click();
   await page.locator('.tracker-preview').getByText(/Метрики_справочник!/).waitFor();
   const db = app.space('team').db;
   const caseId = (await call('release_decision')).caseId;
+  assert.ok(caseId);
+  const releaseThread = await call('release-thread', { releaseId: 'R-09' });
+  assert.equal((await call('case-thread', { caseId })).id, releaseThread.id);
   const draft = db.prepare('SELECT case_id,state FROM draft_actions').get();
   assert.deepEqual({ ...draft }, { case_id: caseId, state: 'draft' });
   assert.equal(db.prepare('SELECT count(*) n FROM local_issues').get().n, 0);
@@ -289,6 +299,7 @@ test('decision chat leads to manual confirmation, using the same case and actual
   await page.getByRole('link', { name: 'Открыть задачу · T-08' }).waitFor();
   assert.equal(db.prepare('SELECT state FROM draft_actions').get().state, 'done');
   assert.equal(db.prepare('SELECT count(*) n FROM local_issues WHERE key=?').get('T-08').n, 1);
+  await page.reload();
   await page.getByRole('link', { name: 'Настроить проверку эффекта' }).click();
   assert.equal(new URL(page.url()).hash, '#case/' + caseId + '/effect');
   await page.locator('.effect-panel[open]').waitFor();
@@ -299,7 +310,11 @@ test('decision chat leads to manual confirmation, using the same case and actual
   await page.getByRole('button', { name: 'Показать на дату' }).click();
   await page.getByText('Исторический срез · 05.05.2026', { exact: true }).waitFor();
   await page.getByText('В архиве нет датированного интервью для этого среза.').waitFor();
-  assert.equal(await page.getByRole('button', { name: 'Открыть чат разбора' }).count(), 0);
+  assert.equal(await page.getByRole('combobox', { name: /^Релиз/ }).inputValue(), 'R-01');
+  await page.getByRole('button', { name: 'Открыть чат разбора' }).click();
+  await page.getByRole('heading', { name: 'Чат разбора · R-01' }).waitFor();
+  assert.equal(await page.getByRole('button', { name: 'Найти задачу и проверить дубли' }).count(), 0);
+  assert.equal(await page.getByRole('link', { name: 'Настроить проверку эффекта' }).count(), 0);
   await page.setViewportSize({ width: 390, height: 844 });
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
   assert.deepEqual(errors, []);
