@@ -59,3 +59,41 @@ test('manual and detected cases already have a durable investigation at their no
     assert.equal(result.current.id, detail.investigation.current.id);
   }
 });
+
+test('startup, committed imports and manual cases wake investigations without reading the case', async t => {
+  const dir=await mkdtemp(join(tmpdir(),'investigation-wake-'));
+  const base=join(dir,'team.sqlite');
+  const env={LLM_BASE_URL:'https://fixture.invalid',LLM_MODEL:'fixture',LLM_DATA_MODE:'analysis'};
+  const pm={id:'pm',name:'PM'}, calls=[], gates=[];
+  let app=createTeamApp({base,env,background:false});
+  const create=title=>workspaceOperation(app.space('team'),pm,'create-case',{title,product:'Store'}).id;
+  const first=create('Сохранено до запуска');
+  await app.close();
+  app=createTeamApp({base,env,background:true,investigationOptions:{
+    capture:(_db,run)=>({measurable:true,context:{},calcId:'calc-'+run.id,checks:[]}),
+    async execute({run,stage}) {
+      const gate=Promise.withResolvers(); gates.push(gate); calls.push(run.caseId);
+      await gate.promise;
+      return {check:{role:stage},result:{stage}};
+    },
+  }});
+  t.after(async()=>{const closing=app.close(); gates.forEach(g=>g.resolve()); await closing;
+    await rm(dir,{recursive:true,force:true,maxRetries:3});});
+  async function waitForCalls(n) {
+    const deadline=Date.now()+1200;
+    while (calls.length<n && Date.now()<deadline) await new Promise(resolve=>setImmediate(resolve));
+    assert.ok(calls.length>=n,'work should start before the periodic sweep');
+  }
+  await waitForCalls(2);
+  const second=create('После запуска');
+  await waitForCalls(4);
+  assert.throws(()=>app.space('team').tx(()=>{ create('Откат'); throw Error('rollback'); }));
+  importDocs(app.space('team'),[{file:'Сигнал',facts:[
+    {kind:'dictionary',loc:'A2',row:{metric_id:'family_orders_idx',bad_signal:'Индекс ниже 90 две недели подряд'}},
+    ...['2026-11-02','2026-11-09'].map((week_start,i)=>({kind:'sales',loc:'B'+i,row:{product_family:'Store',week_start,orders_index:65}})),
+  ]}],{notify:false});
+  const signal=cases(app.space('team').db).find(c=>c.body.signal);
+  assert.ok(signal);
+  await waitForCalls(6);
+  assert.deepEqual(calls.sort(),[first,first,second,second,signal.id,signal.id].sort());
+});

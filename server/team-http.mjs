@@ -44,11 +44,12 @@ import { retainMaterial, readMaterial, attachedMaterials, materialRef, materialP
 import { access } from './chart-ranges.mjs';
 import { resumeJob } from './workbench.mjs';
 import { metricRuleStatus, saveMetricRule } from './metric-rules.mjs';
-import { researchSettings, saveResearchSettings } from './investigation-settings.mjs';
+import { createInvestigationScheduler } from './investigation-scheduler.mjs';
+import { readInvestigationLimit, researchSettings, saveResearchSettings } from './investigation-settings.mjs';
 import { notificationChannels } from './data-profile.mjs';
 import {
   createAlternative, publishInvestigation, readInvestigations,
-  syncInvestigations, workInvestigation,
+  syncInvestigations, onInvestigationWork,
 } from './case-investigations.mjs';
 import { prepareInvestigationDraft } from './investigation-draft.mjs';
 
@@ -57,16 +58,19 @@ export function createTeamApp({
   env = liveModelEnv,
   send = fetch,
   background = true,
+  investigationOptions,
 } = {}) {
   const accounts = openAccounts(join(dirname(base), 'accounts.sqlite')),
     spaces = new Map(),
     legacy = new Map(),
     busy = new Set(),
-    researching = new Set(),
+    investigationSubscriptions = [],
     reconciledAt = new Map(),
     authAttempts = new Map();
   const urlBase = new URL(env.APP_BASE_URL || 'http://127.0.0.1:8090'),
     secure = urlBase.protocol === 'https:';
+  const investigations = createInvestigationScheduler({spaces,env,send,options:investigationOptions,
+    getLimit:() => readInvestigationLimit(spaces.get('team').db)});
   function space(id) {
     if (!spaces.has(id)) {
       const s = openStore(workspacePath(base, id),{seedDemo:!env.SOURCE_ARCHIVE_SHA256});
@@ -77,6 +81,10 @@ export function createTeamApp({
       reconciledAt.set(id, Date.now());
 
       spaces.set(id, s);
+      if (background) {
+        investigationSubscriptions.push(onInvestigationWork(s.db,investigations.wake));
+        investigations.wake();
+      }
     }
     return spaces.get(id);
   }
@@ -114,6 +122,7 @@ export function createTeamApp({
   }
   async function tick() {
     if (spaces.size === 0) return;
+    investigations.wake();
     for (const [id, s] of spaces) {
       if (Date.now() - (reconciledAt.get(id) || 0) >= 60_000) {
         try {
@@ -122,12 +131,6 @@ export function createTeamApp({
         } catch {
           console.error('Не удалось сверить активные исследования');
         }
-      }
-      if (!researching.has(id)) {
-        researching.add(id);
-        void workInvestigation(s, env, send, { reconcile: false })
-          .catch(() => console.error('Не удалось обработать очередь исследований'))
-          .finally(() => researching.delete(id));
       }
       if (busy.has(id)) continue;
       busy.add(id);
@@ -561,7 +564,9 @@ export function createTeamApp({
   async function close() {
     if (timer) clearInterval(timer);
     if (server.listening) await new Promise((r) => server.close(r));
-    while (busy.size || researching.size) await new Promise((r) => setTimeout(r, 50));
+    investigationSubscriptions.forEach(unsubscribe => unsubscribe());
+    await investigations.close();
+    while (busy.size) await new Promise((r) => setTimeout(r, 50));
     for (const s of spaces.values()) s.close();
     accounts.db.close();
   }

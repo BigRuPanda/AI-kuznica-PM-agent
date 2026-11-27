@@ -122,6 +122,7 @@ test('role stages survive restart and chat deletion; an unfinished review retrie
         result: { stage, prior: prior.map(p => p.check.role) }, usage: { input: 3, output: 2 } };
     } });
   add(store.db, 'case', { signal: { revision: 2, status: 'confirmed' } });
+  syncInvestigations(store.db,'case');
   const id = readInvestigations(store.db, anna, 'case').current.id;
   for (let i = 0; i < 3; i++) await work(store);
   const draft = readInvestigations(store.db, anna, 'case').current;
@@ -275,6 +276,8 @@ test('case-scoped repair guards a worker even when full backfill is scheduled se
     return { check: { role: 'stale' }, result: { stale: true } };
   } });
   assert.equal(await work(store), null);
+  assert.equal(readInvestigations(db,anna,'one').current,null);
+  syncInvestigations(db,'one');
   const original = readInvestigations(db, anna, 'one').current;
   assert.equal(db.prepare('SELECT count(*) n FROM case_investigations').get().n, 1);
   assert.equal(await work(store), null);
@@ -291,6 +294,7 @@ test('alternatives inherit a measurable parent and rejected credentials wait bef
   t.after(() => db.close());
   add(db, 'one');
   saveResearchSettings(db, { ...anna, role: 'admin' }, { scope: 'team', mode: 'lead' });
+  syncInvestigations(db,'one');
   const original = readInvestigations(db, anna, 'one').current;
   const alternative = createAlternative(db, anna, {
     caseId: 'one', parentId: original.id, question: 'Проверить покупку', requestId: 'purchase',

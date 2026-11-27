@@ -17,6 +17,12 @@ const signalActive = "COALESCE(json_extract(c.body,'$.signal.status'), '') <> 'w
 const caseActive = `c.state <> 'Завершено' AND ${signalActive}`;
 const parse = (value) => value == null ? null : JSON.parse(value);
 
+const wakeByDatabase = new WeakMap();
+export function onInvestigationWork(db, wake) {
+  wakeByDatabase.set(db, wake);
+  return () => wakeByDatabase.delete(db);
+}
+
 function transaction(db, fn) {
   db.exec('SAVEPOINT investigation');
   try {
@@ -90,6 +96,7 @@ export function syncInvestigations(db, caseId) {
       WHERE lease IS NOT NULL AND run_id IN (SELECT r.id FROM case_investigations r JOIN cases c ON c.id=r.case_id
         WHERE (r.status='superseded' OR c.state='Завершено')${runScope})`).run(...args);
   });
+  wakeByDatabase.get(db)?.();
 }
 
 function active(c) {
@@ -102,7 +109,6 @@ function canViewCase(c, user, sharedOnly) {
 
 function accessibleCase(db, user, caseId, sharedOnly = false) {
   if (typeof caseId !== 'string' || !caseId) throw Error('Разбор не найден.');
-  syncInvestigations(db, caseId);
   const c = getCase(db, caseId);
   if (!canViewCase(c, user, sharedOnly)) throw Error('Разбор недоступен.');
   return c;
@@ -160,14 +166,15 @@ export function readInvestigations(db, user, caseId, sharedOnly = false) {
     const runs = db.prepare(`SELECT * FROM case_investigations WHERE case_id=? ORDER BY revision DESC, rowid DESC`)
       .all(caseId).filter((row) => canViewRun(row, user, sharedOnly));
     const available = active(c);
-    const live = available ? runs.filter((row) => row.status !== 'superseded') : [];
+    const isCurrent = row => row.status !== 'superseded' && row.revision === (c.body.signal?.revision ?? 0);
+    const live = available ? runs.filter(isCurrent) : [];
     const featured = live.find((row) => row.parent_id === null) || live.find((row) => row.published) || live[0];
-    const history = available ? runs.filter((row) => row.status === 'superseded') : runs;
+    const history = available ? runs.filter(row => !isCurrent(row)) : runs;
     return {
       current: featured ? publicRun(db, featured) : null,
       alternatives: live.filter((row) => row !== featured).map((row) => publicRun(db, row)),
       history: history.map((row) => publicRun(db, row.status === 'superseded' ? row : {
-        ...row, status: 'superseded', reason: 'Разбор завершён.',
+        ...row, status: 'superseded', reason: available ? 'Появилась другая версия сигнала.' : 'Разбор завершён.',
       })),
     };
   });
@@ -187,12 +194,14 @@ export function createAlternative(db, user, { caseId, parentId, question, reques
         throw Error('Идентификатор уже использован для другого поручения.');
       return publicRun(db, prior);
     }
+    syncInvestigations(db, caseId);
     const parent = getRun(db, caseId, parentId);
     if (!parent || !canViewRun(parent, user, false) || parent.status === 'superseded' || !active(c))
       throw Error('Откройте текущую версию разбора.');
     const id = randomUUID();
     db.prepare(`INSERT INTO case_investigations(id,case_id,revision,owner,parent_id,question,request_id,status,created)
       VALUES(?,?,?,?,?,?,?,'queued',?)`).run(id, caseId, parent.revision, user.id, parent.id, question, requestId, Date.now());
+    wakeByDatabase.get(db)?.();
     return publicRun(db, getRun(db, caseId, id));
   });
 }
@@ -204,7 +213,7 @@ export function publishInvestigation(db, user, { caseId, id }) {
     if (!row || row.owner !== user.id) throw Error('Опубликовать исследование может его автор.');
     if (row.published) return publicRun(db, row);
     if (c.body.owner) throw Error('Сначала опубликуйте сам разбор.');
-    if (!active(c) || row.status !== 'ready' || !row.result) throw Error('Можно опубликовать готовое актуальное исследование.');
+    if (!active(c) || row.revision !== (c.body.signal?.revision ?? 0) || row.status !== 'ready' || !row.result) throw Error('Можно опубликовать готовое актуальное исследование.');
     const publishedBy = typeof user.name === 'string' ? user.name.trim() || null : null;
     db.prepare('UPDATE case_investigations SET published=1, published_by=? WHERE id=?').run(publishedBy, id);
     grant(db, parse(row.capture)?.calcId, 'case', caseId);
@@ -216,7 +225,7 @@ export function requireActionableRun(db, user, caseId, id) {
   return transaction(db, () => {
     const c = accessibleCase(db, user, caseId);
     const row = getRun(db, caseId, id);
-    if (!active(c) || !row || !canViewRun(row, user, false) || row.status !== 'ready' || !row.result)
+    if (!active(c) || !row || row.revision !== (c.body.signal?.revision ?? 0) || !canViewRun(row, user, false) || row.status !== 'ready' || !row.result)
       throw Error('Откройте готовое исследование для текущей версии разбора.');
     return publicRun(db, row);
   });

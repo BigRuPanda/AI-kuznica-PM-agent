@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { createAlternative, publishInvestigation, readInvestigations } from '../server/case-investigations.mjs';
+import { createAlternative, publishInvestigation, readInvestigations, syncInvestigations } from '../server/case-investigations.mjs';
 import { getCase, initEvidence, setSetting } from '../server/evidence.mjs';
 import { openStore } from '../server/store.mjs';
 import { initWorkbench } from '../server/workbench.mjs';
@@ -25,6 +25,7 @@ function scenario(t, body = {}, product = 'Kaspersky') {
   const signal = { revision: 1, status: 'confirmed', start: week(3), week: week(4), rule: 'relative', ...body.signal };
   db.prepare('INSERT INTO cases VALUES(?,?,?,?,?)')
     .run(caseId, product, 'Снижение показателя', 'Исследуем', JSON.stringify({ ...body, signal }));
+  syncInvestigations(db,caseId);
   const current = () => readInvestigations(db, pm, caseId).current;
   const ready = (runId = current().id) => {
     const capture = { context: { calculation: { metric: measurement.metric,
@@ -44,8 +45,11 @@ function scenario(t, body = {}, product = 'Kaspersky') {
   const agree = (input, user) => op('investigation-measurement', { expectedAgreementId: null, measurement, ...input }, user);
   const watch = (input, user) => op('watch', { deployed, ...input }, user);
   const get = () => getCase(db, caseId);
-  const revise = (revision, status = 'confirmed') => db.prepare("UPDATE cases SET body=json_set(body,'$.signal.revision',?,'$.signal.status',?) WHERE id=?")
-    .run(revision, status, caseId);
+  const revise = (revision, status = 'confirmed') => {
+    db.prepare("UPDATE cases SET body=json_set(body,'$.signal.revision',?,'$.signal.status',?) WHERE id=?")
+      .run(revision, status, caseId);
+    syncInvestigations(db,caseId);
+  };
   return { agree, watch, current, ready, revise, get, sales, db };
 }
 
