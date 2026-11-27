@@ -1,3 +1,6 @@
+import { externalAnswer } from './source-chat.mjs';
+import { sourceValues } from './knowledge.mjs';
+import { archiveEvidence, archiveInquiry, archiveAnswer, asksArchiveTask } from './archive-search.mjs';
 import { initRanges, access, grant, compareRanges, readRange, readSnapshot } from './chart-ranges.mjs';
 import { randomUUID } from 'node:crypto';
 import {
@@ -68,6 +71,9 @@ export function initWorkbench(db) {
       'CREATE TABLE IF NOT EXISTS local_issues(key TEXT PRIMARY KEY,title TEXT,description TEXT,priority TEXT,case_id TEXT,updated INTEGER);' +
       'CREATE TABLE IF NOT EXISTS published(id TEXT PRIMARY KEY,case_id TEXT,user TEXT,body TEXT,created INTEGER);' +
       'CREATE TABLE IF NOT EXISTS costs(id INTEGER PRIMARY KEY,job TEXT,model TEXT,elapsed INTEGER,input INTEGER,output INTEGER);' +
+      'CREATE TABLE IF NOT EXISTS competitor_checks(version TEXT,loc TEXT,body TEXT NOT NULL,PRIMARY KEY(version,loc));' +
+      'CREATE TABLE IF NOT EXISTS competitor_check_history(id INTEGER PRIMARY KEY,version TEXT,loc TEXT,body TEXT NOT NULL);' +
+      'CREATE TABLE IF NOT EXISTS web_requests(id INTEGER PRIMARY KEY,job TEXT,created INTEGER);' +
       'CREATE TABLE IF NOT EXISTS known_updates(id INTEGER PRIMARY KEY);',
   );
   initTracking(db);
@@ -118,7 +124,7 @@ export function dashboard(db, user) {
       .all(user.id)
       .map((chat) => ({ ...chat, canRename: canRenameThread(user, chat), canDelete: canDeleteThread(user, chat) })),
     sources: db
-      .prepare('SELECT file,count(*) versions,max(created) updated FROM documents GROUP BY file')
+      .prepare('SELECT d.file,d.version,d.created updated,(SELECT count(*) FROM documents h WHERE h.file=d.file) versions FROM documents d WHERE d.rowid=COALESCE((SELECT a.rowid FROM documents a JOIN research_file_versions h ON a.version=h.version WHERE h.file=d.file),(SELECT max(a.rowid) FROM documents a WHERE a.file=d.file)) ORDER BY d.file')
       .all(),
     products: [...new Set(listSales(db).map((r) => r.product))],
     rules: setting(db, 'rules', defaultRules),
@@ -473,10 +479,44 @@ function factsForCards(view, cards, backlog) {
     lines.push(...view.corrections.map((x) => 'Поправка PM к ' + x.source + ': ' + x.comment));
   return lines;
 }
-export async function answer(store, user, b, env = process.env, send = fetch, job = randomUUID()) {
+function weeklySourceAnswer(db, question) {
+  const [request, ...followups] = question.toLowerCase().trim().split(/[?!.]+/u).map(s => s.trim()).filter(Boolean);
+  const lookup = request?.match(/^(?:какой|каков|чему равен|покажи|назови|скажи)\s+(?:был\s+)?индекс\s+(?:самостоятельных\s+)?заказов\s+(.+?)\s+за неделю с\s+(\d{4}-\d{2}-\d{2})$/u);
+  const citation = /^(?:укажи|покажи|назови|дай) (?:значение и )?(?:ссылку на )?(?:источник|строку|ячейку)(?: данных| в источнике| исходной книги| в книге)?$/u;
+  const checkRow = /^проверь,? есть ли (?:в (?:источнике|книге) )?строка(?: (?:за эту|на эту) дату)?$/u;
+  if (!lookup || followups.some(s => !citation.test(s) && !checkRow.test(s))) return;
+  const [, requestedProduct, date] = lookup;
+  const weeks = listSales(db).filter(r => r.product.toLowerCase() === requestedProduct);
+  if (!weeks.length) return;
+  const product = weeks[0].product;
+  const rows = sourceValues(db, { product, metric: 'orders_index', date });
+  const readSources = rows.map(r => ({
+    label: r.file + ' · ' + r.loc, url: '#knowledge-source/' + r.version + '/' + encodeURIComponent(r.loc),
+    detail: r.metric + ' = ' + r.value + ' · ' + date,
+  }));
+  const text = rows.length
+    ? rows.map(r => 'Индекс самостоятельных заказов ' + product + ' за неделю с ' + date + ' — ' + fmt(r.value) + '. ' + r.file + ' · ' + r.loc + (r.comment ? '. ' + r.comment : '')).join('\n')
+    : 'В загруженных продажах ' + product + ' нет строки за неделю с ' + date + '. Первая неделя в данных — ' + weeks[0].week + ', последняя — ' + weeks.at(-1).week + '.';
+  return { text, product, readSources, steps: ['source_value'], mode: 'source-value', outcome: 'done' };
+}
+export async function answer(store, user, b, env = process.env, send = fetch, job = randomUUID(), pageOptions) {
   const db = store.db;
   const { scope } = thread(db, user, b.thread);
   const shared = scope === 'group';
+  const activeCase = b.caseId ? visibleCase(db,user,b.caseId) : null;
+  if(shared && activeCase?.body.owner) throw Error('Личный разбор недоступен в группе');
+  const range=b.rangeId && (access(db,user,b.rangeId,shared),readRange(db,user,b.rangeId));
+  const attachments=(b.materialIds || []).map(id=>readMaterial(db,user,id,shared));
+  const comparisonContext=[
+    ...(range?[{label:'Выделенный период',url:'#range/'+range.id,text:rangeComparisonText(range)}]:[]),
+    ...attachments.map(m=>({label:m.title,url:'#material/'+m.id,text:(m.summary||m.title).slice(0,1400)})),
+  ];
+  const external=await externalAnswer(store,user,{...b,comparisonContext},env,send,job,shared,pageOptions);
+  if(external) {
+    const readSources=[...(external.readSources||[]),...comparisonContext.map(({label,url})=>({label,url}))];
+    return {...external,readSources,text:[external.text,...comparisonContext.map(r=>r.label+' · '+r.text)].join('\n\n'),
+      ...(range && {rangeId:range.id}),...(activeCase && {caseId:activeCase.id})};
+  }
   let focus;
   if (!b.rangeId && b.materialIds?.length === 1) {
     if (readMaterial(db, user, b.materialIds[0], shared).plot) focus = { id: b.materialIds[0] };
@@ -493,6 +533,10 @@ export async function answer(store, user, b, env = process.env, send = fetch, jo
   if (focus?.id) b = { ...b, materialIds: [focus.id], screen: undefined };
   const history = recentDialogue(db, b.thread, b.questionSeq);
   if (b.caseId) visibleCase(db, user, b.caseId);
+  if (!b.rangeId && !b.materialIds?.length && !focus) {
+    const weekly=weeklySourceAnswer(db,b.question);
+    if(weekly) return {...weekly,caseId:b.caseId};
+  }
   if (b.analysisPeriod && !b.rangeId && !b.materialIds?.length) {
     const screen = b.screen?.calc && readSnapshot(db, user, b.screen.calc);
     const snap = analysisView(db, { product: b.product || screen?.product, caseId: b.caseId,
@@ -504,6 +548,28 @@ export async function answer(store, user, b, env = process.env, send = fetch, jo
   const daily = !b.analysisPeriod && store.tx(() => dayComparison(db, user, b, history, shared));
   if (daily) return daily;
   const intent = researchIntent(b.question);
+  const taskQuery = asksArchiveTask(b.question);
+  const contextualTask = taskQuery && /(?:эт[а-яё]*|текущ[а-яё]*|выбранн[а-яё]*)\s+(?:релиз|выкладк)|(?:за ним|за ней|у него|к нему)|^(?:а\s+)?(?:какая задача|(?:назови|укажи) номер задачи)[?!.\s]*$/iu.test(b.question);
+  if (!focus && !b.rangeId && !b.materialIds?.length && !b.screen?.calc &&
+      ((!b.decisionReleaseId && !b.caseId) || (taskQuery && !(shared && activeCase?.body.owner))) &&
+      !intent.chart && !intent.funnel && !intent.report && !b.analysisPeriod && archiveInquiry(b.question) && !history.at(-1)?.body.rangeId) {
+    const previous = history.at(-1)?.body;
+    const query = previous?.archiveQuestion && (contextualTask || /^(?:а |тогда |уточни|а если|и что)/iu.test(b.question))
+      ? previous.archiveQuestion + '\n' + b.question : b.question;
+    const releaseId = b.decisionReleaseId || (contextualTask ? activeCase?.body.release : undefined);
+    const evidence = archiveEvidence(db, query, {releaseId,product:activeCase?.product});
+    if (evidence.length && (!activeCase && !b.decisionReleaseId || evidence.some(row=>row.kind==='task-link'))) {
+      return { ...await archiveAnswer(store, query, evidence, env, send, job), archiveQuestion: b.question,
+        ...(activeCase ? {caseId:activeCase.id,product:activeCase.product} : {}) };
+    }
+    if (taskQuery && !activeCase && !b.decisionReleaseId &&
+        (contextualTask || /номер|идентификатор|б[еэ]клог|релиз|связан/iu.test(b.question)))
+      return {mode:'archive',outcome:'clarification',steps:['search'],readSources:[],
+        text:'Укажите название функции или идентификатор релиза, чтобы найти связанную задачу в архиве.'};
+    if (/в архиве|по архиву|в загруженн[а-яё]* (?:книг|таблиц|источник)/iu.test(b.question))
+      return { mode:'archive', outcome:'clarification', steps:['search'], readSources:[],
+        text:'В загруженном архиве не нашлось совпадений. Уточните название продукта, показателя или исследования.' };
+  }
   if (focus?.id && !asksToDraw(b.question)) {
     intent.chart = false;
     if (!/проверь.*воронк|разбери.*воронк/i.test(b.question)) intent.funnel = false;
@@ -675,7 +741,7 @@ function briefConclusion(text, findings) {
 }
 
 function completeMaterials(store, user, job, b, result) {
-  if (result.mode === 'daily') return result;
+  if (['daily','source-value','archive','web','public-page','competitor-check'].includes(result.mode)) return result;
   if (result.chartChoices) return { ...result, materials: [] };
   const db = store.db;
   const r = JSON.parse(db.prepare('SELECT body FROM job_research WHERE job=?').get(job)?.body || 'null');
@@ -805,7 +871,7 @@ export function resumeJob(db, user, id) {
   return { id };
 }
 
-export async function workJobs(store, accounts, env, send) {
+export async function workJobs(store, accounts, env, send, pageOptions) {
   const db = store.db,
     job = db.prepare("SELECT * FROM jobs WHERE status='queued' ORDER BY created,rowid LIMIT 1").get();
   if (
@@ -818,7 +884,7 @@ export async function workJobs(store, accounts, env, send) {
   let result,
     status = 'done';
   try {
-    result = await answer(store, user, b, env, send, job.id);
+    result = await answer(store, user, b, env, send, job.id, pageOptions);
     result = store.tx(() => completeMaterials(store, user, job.id, b, result));
     status = result.outcome || (result.warning ? 'partial' : 'done');
   } catch (e) {

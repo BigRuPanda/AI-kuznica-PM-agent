@@ -139,3 +139,21 @@ test('same worksheet names across folders, active excerpt update, provenance and
     assert.equal(find(store.db,'синхронизация').length,1);
   } finally {store.close();}
 });
+
+test('external Excel hyperlink retains its target and its cell next to the archived row', () => {
+  const headers=['Сопоставимый продукт у конкурента','Продукт','Конкурент','Карточка'];
+  const rows=[headers,['Да','Книга','allsoft.ru','Открыть']];
+  const xlsx=python('tests/research-workbooks.py',['--linked','Цена','D2','https://allsoft.ru/card'],JSON.stringify(rows));
+  const [doc]=JSON.parse(python('scripts/office_import.py',['Конкуренты.xlsx'],xlsx));
+  assert.deepEqual(doc.facts.at(-1).links,[{loc:'Цена!D2',url:'https://allsoft.ru/card'}]);
+});
+test('general sources workbook preserves a labeled link but interview recordings stay private', () => {
+  const make=(name,title,rows,cell)=>{
+    const b=python('tests/research-workbooks.py',['--linked',title,cell,'https://museum.example/doc'],JSON.stringify(rows));
+    return JSON.parse(python('scripts/office_import.py',[name],b))[0];
+  };
+  const source=make('Ссылки.xlsx','Источники',[['Описание','Источник'],['Расписание','Открыть']],'B2');
+  assert.deepEqual(source.facts[0]?.links,[{loc:'Источники!B2',url:'https://museum.example/doc'}]);
+  const interview=make('Интервью.xlsx','Опрос',[['Роль','Кто?','Как?','Ссылка на запись интервью'],['ПМ','Тест','Тест','Открыть']],'D2');
+  assert.ok(!JSON.stringify(interview).includes('https://museum.example/doc'));
+});

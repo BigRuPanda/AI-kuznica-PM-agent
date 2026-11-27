@@ -1,8 +1,11 @@
+import {readPublicPage} from './public-page.mjs';
+import {webQuestion,yandexSearch} from './web-search.mjs';
+import {noWeb} from './source-chat.mjs';
 import { randomUUID } from 'node:crypto';
 import { apiConfigured } from './agent.mjs';
 import { grant } from './chart-ranges.mjs';
 import { localData } from './data-profile.mjs';
-import { getCase } from './evidence.mjs';
+import { getCase, digest } from './evidence.mjs';
 import { captureInvestigation, runInvestigationStage } from './investigation-engine.mjs';
 import { effectiveResearchMode } from './investigation-settings.mjs';
 
@@ -260,6 +263,46 @@ function saveStage(db, row, stage, ordinal, result, usage, elapsed, env, now) {
   }
 }
 
+
+// Only a PM's own follow-up question can authorize an external read for a background version.
+// Store the excerpt with the calculation so all later stages inspect the same evidence.
+async function attachRequestedWeb(store,job,env,send,pageOptions) {
+  const {row,capture,lease}=job;
+  if (!row.parent_id || !row.owner || capture.externalRead || noWeb(row.question || '')) return true;
+  const question=row.question || '';
+  const url=/(?:прочитай|проверь|открой|сверь|посмотри)/iu.test(question) && question.match(/https?:\/\/[^\s<>«»]+/iu)?.[0];
+  const query=webQuestion(question,false);
+  if (!url && !query) return true;
+  const findings=[];
+  let reason;
+  try {
+    if(url) {
+      const page=await readPublicPage(url,env,pageOptions);
+      findings.push({url:page.url,label:page.title,text:page.text.slice(0,2000),date:page.checkedAt.slice(0,10)});
+    } else {
+      if (query.length>400) throw Error('Сократите поисковый запрос до 400 символов.');
+      const hits=await yandexSearch(query,env,send,()=>store.db.prepare('INSERT INTO web_requests(job,created) VALUES(?,?)').run(row.id,Date.now()));
+      for(const hit of hits) findings.push({url:hit.url,label:hit.title,text:hit.snippet||hit.title,date:new Date().toISOString().slice(0,10)});
+      if(!hits.length) reason='Поиск не вернул результатов.';
+    }
+  } catch(error) { reason=error.message; }
+  return store.tx(()=>{
+    if(getRun(store.db,row.case_id,row.id)?.lease!==lease) return false;
+    const records=findings.map((f,i)=>({...f,id:'public-'+(i+1),kind:'lookup',source:f.url}));
+    const context={...capture.context,findings:[...(capture.context.findings||[]),...records]};
+    const raw=JSON.stringify(context), calcId=digest(raw);
+    store.db.prepare('INSERT OR IGNORE INTO evidence_calcs VALUES(?,?)').run(calcId,raw);
+    grant(store.db,calcId,'user',row.owner);
+    Object.assign(capture,{context,calcId,externalRead:true,checks:[...capture.checks,{
+      role:'researcher',status:reason?'unavailable':'done',question,
+      result:reason || (url?'Прочитана публичная страница.':'Получены фрагменты выдачи Яндекса.'),
+      sources:records.map(f=>({label:f.label,url:f.url})),
+    }]});
+    store.db.prepare('UPDATE case_investigations SET capture=? WHERE id=? AND lease=?').run(JSON.stringify(capture),row.id,lease);
+    return true;
+  });
+}
+
 export async function workInvestigation(store, env = process.env, send = fetch, options = {}) {
   const { db } = store;
   const { now = Date.now, leaseMs = leaseDuration, capture: captureInputs = captureInvestigation,
@@ -327,6 +370,7 @@ export async function workInvestigation(store, env = process.env, send = fetch, 
   const final = ordinal === stages[mode].length - 1;
   let output, usage, providerStatus;
   try {
+    if (!await attachRequestedWeb(store,job,env,send,options.pageOptions)) return null;
     const candidate = await execute({ env, send, stage, run, capture, prior });
     usage = candidate?.usage;
     if (candidate?.check && (!final || candidate.result)) output = candidate;

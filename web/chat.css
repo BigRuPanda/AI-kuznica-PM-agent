@@ -352,3 +352,6 @@ body :is(.composer-row textarea, .thread-search input[type='search']):focus-visi
   .chat-send .ui-icon { transition: none; }
   .chat-send:not(:disabled):is(:hover, :focus-visible) .ui-icon { transform: none; }
 }
+
+.chat-web-search { display: inline-flex; align-items: center; gap: .4rem; width: fit-content; font-size: .85rem; }
+.chat-web-search input { width: auto; }

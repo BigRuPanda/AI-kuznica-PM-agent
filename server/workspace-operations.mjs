@@ -1,3 +1,7 @@
+import { excelSources, sourceRows, sourceValues, cellSource } from './knowledge.mjs';
+import { readPublicPage } from './public-page.mjs';
+import { marketOffers } from './market-offers.mjs';
+import { checkOffer, savedOfferCheck } from './competitor-check.mjs';
 import { randomUUID } from 'node:crypto';
 import { signalHistory } from './signal-history.mjs';
 import { readInvestigations, requireActionableRun, syncInvestigations } from './case-investigations.mjs';
@@ -121,6 +125,11 @@ const agreementInput = z.strictObject({
   measurement,
 });
 export const operations = {
+  'knowledge-sources':['Список версий Excel рабочего пространства',{}],
+  'knowledge-source':['Строки книги по версии и ячейке',{version:id,loc:optional,offset:z.number().int().nonnegative().optional()}],
+  source_value:['Исходные значения метрики с точными координатами и идентификаторами ряда',{product:text,metric:id,date:z.iso.date(),segment:optional,sourceId:optional,definitionId:optional,stepDays:z.number().int().positive().optional()}],
+  read_public_page:['Читать публичную HTML-страницу по URL или выбранной ячейке',{url:z.url().max(2048).optional(),version:id.optional(),loc:optional}],
+  competitor_check:['Проверить предложение продавца из конкретной строки исследования',{version:id,loc:id,savedOnly:z.boolean().optional(),asOf:z.iso.datetime().optional()}],
   funnel: [
     'Рассчитать по счётчикам этапы подбора, завершение и корзину, проверить сегменты и покрытие. Используй для вопросов о пути покупки. В чате thread и rangeId подставит сервер.',
     {
@@ -410,6 +419,26 @@ export function workspaceOperation(
   const db = store.db;
   const meta = operations[op];
   const b = meta ? z.object(meta[1]).parse(input) : input;
+  if (op === 'knowledge-sources') return excelSources(db);
+  if (op === 'knowledge-source') return sourceRows(db,b.version,b.offset,b.loc);
+  if (op === 'source_value') return sourceValues(db,b);
+  if (op === 'read_public_page') {
+    if (Boolean(b.version)!==Boolean(b.loc) || Boolean(b.url)===Boolean(b.version)) throw Error('Укажите URL или версию книги и адрес ячейки.');
+    const cell = b.version && cellSource(db,b.version,b.loc);
+    return readPublicPage(cell ? cell.url : b.url,env).then(page=>({...page,...(cell && {source:cell})}));
+  }
+  if (op === 'competitor_check') {
+    if(b.asOf || b.savedOnly) {
+      const archived=sourceRows(db,b.version,0,b.loc);
+      if(!archived.rows[0]?.offer)return null;
+      if(!b.asOf) return savedOfferCheck(db,b);
+      const row=db.prepare("SELECT body FROM competitor_check_history WHERE version=? AND loc=? AND json_extract(body,'$.checkedAt')<=? ORDER BY json_extract(body,'$.checkedAt') DESC,id DESC LIMIT 1").get(b.version,b.loc,new Date(b.asOf).toISOString());
+      return row?JSON.parse(row.body):null;
+    }
+    const offer=marketOffers(db,null,new Date().toISOString().slice(0,10)).find(o=>o.version===b.version && o.loc===b.loc);
+    if(!offer) throw Error('Позиция отсутствует в действующей версии исследования.');
+    return checkOffer(db,offer,env,send,requestId);
+  }
   const current = () => visibleCase(db, user, b.caseId);
   if (op === 'signal-issue-draft') return prepareSignalIssue(store, user, b, env, send);
   if (op === 'investigation-measurement') {

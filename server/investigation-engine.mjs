@@ -361,6 +361,7 @@ function qualitativeFindings(db, product, question, asOf, datedOnly) {
 }
 
 function link(calcId, finding) {
+  if(finding.url) return {label:finding.label,url:finding.url};
   return {label: finding.source ? finding.label + ' · ' + finding.source : finding.label, calcId, findingId:finding.id};
 }
 

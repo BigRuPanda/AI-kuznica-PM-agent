@@ -265,3 +265,20 @@ test('alternatives inherit a measurable parent and rejected credentials wait bef
   assert.equal(readInvestigations(db, anna, 'one').alternatives[0].status, 'ready');
   assert.equal(calls, 4);
 });
+
+test('only an explicitly requested alternative reads a public page and keeps it across stages', async t=>{
+  const store=open(), {db}=store;
+  t.after(()=>store.close());
+  add(db,'case',{owner:anna.id,signal:{revision:1},plan:{question:'https://museum.example/ в исходных материалах'}});
+  const work=fixture();
+  await drain(store,work);
+  const root=readInvestigations(db,anna,'case').current;
+  let fetched=0;
+  const run=createAlternative(db,anna,{caseId:'case',parentId:root.id,requestId:'page',question:'Прочитай страницу https://museum.example/ и сверь даты'});
+  const worker=fixture({pageOptions:{resolveHost:async()=>[{address:'93.184.216.34',family:4}],
+    request:async()=>{fetched++;return new Response('<title>Музей</title><p>Открыто 7 декабря.</p>',{headers:{'content-type':'text/html'}});}}});
+  await drain(store,worker);
+  assert.equal(fetched,1);
+  const capture=JSON.parse(db.prepare('SELECT capture FROM case_investigations WHERE id=?').get(run.id).capture);
+  assert.ok(capture.context.findings.some(f=>f.url==='https://museum.example/' && f.text.includes('7 декабря')));
+});

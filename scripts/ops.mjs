@@ -1,3 +1,4 @@
+import { initSourcePolicy, sourcePermission, importApproved } from '../server/source-policy.mjs';
 import { readFile, mkdir, copyFile, access, writeFile, readdir, unlink } from 'node:fs/promises';
 import { basename, dirname, join, resolve } from 'node:path';
 import { DatabaseSync, backup } from 'node:sqlite';
@@ -139,21 +140,24 @@ async function main() {
     }
     return;
   }
-  const store = openStore(base);
+  const store = openStore(base,{seedDemo:!env.SOURCE_ARCHIVE_SHA256});
   try {
     initEvidence(store.db);
+    initSourcePolicy(store.db);
     if (op === 'import' || op === 'prepare-demo') {
       if (!file) throw Error('Укажите путь к XLSX, PPTX или ZIP');
       const path = resolve(file);
-      const docs = JSON.parse(await python('office_import.py', [basename(path)], await readFile(path)));
+      const bytes=await readFile(path);
+      const permission=sourcePermission(store.db,env.SOURCE_ARCHIVE_SHA256,bytes,basename(path));
+      const docs=permission?.alreadyImported?[]:JSON.parse(await python('office_import.py',[basename(path)],bytes));
       console.log(
-        importDocs(store, docs, { notify: op === 'import' && env.NOTIFICATIONS_ENABLED === 'true' }),
+        importApproved(store,docs,permission,op==='import' && env.NOTIFICATIONS_ENABLED==='true'),
       );
       if (op === 'prepare-demo') {
         setSetting(
           store.db,
           'demo_versions',
-          docs.map((d) => digest(JSON.stringify(d))),
+          permission?.archive ? store.db.prepare("SELECT version FROM source_revisions WHERE rowid IN (SELECT max(rowid) FROM source_revisions WHERE sha=? GROUP BY file)").all(permission.sha).map(r=>r.version) : docs.map((d) => digest(JSON.stringify(d))),
         );
         console.log('Демо-набор для новых аккаунтов жюри сохранён.');
       }
@@ -177,20 +181,28 @@ async function main() {
           'SELECT job,model,count(*) calls,sum(elapsed) ms,sum(input) input,sum(output) output,count(input) recorded FROM costs GROUP BY job,model',
         )
         .all();
+      const hasWeb=store.db.prepare("SELECT 1 FROM sqlite_master WHERE name='web_requests'").get();
+      const web=new Map(hasWeb?store.db.prepare('SELECT job,count(*) n FROM web_requests GROUP BY job').all().map(r=>[r.job,r.n]):[]);
+      for(const job of web.keys()) if(!rows.some(r=>r.job===job)) rows.push({job,model:'',calls:0,input:0,output:0,recorded:0,ms:0});
+      const billed=new Set();
       const price = (k) => (env[k] && Number.isFinite(Number(env[k])) ? Number(env[k]) : null);
       const pin = price('PRICE_INPUT_MILLION'),
         pout = price('PRICE_OUTPUT_MILLION'),
         infra = price('MONTHLY_INFRA_COST'),
         volume = price('MONTHLY_REQUESTS');
       const lines = [
-        'request,model,calls,elapsed_ms,input_tokens,output_tokens,model_cost,infra_cost,total_cost',
+        'request,model,calls,elapsed_ms,input_tokens,output_tokens,model_cost,infra_cost,web_requests,web_cost,total_cost',
       ];
       for (const r of rows) {
-        const cost =
+        const first=!billed.has(r.job); billed.add(r.job);
+        const count=first?(web.get(r.job)||0):0;
+        const unit=price("PRICE_WEB_REQUEST");
+        const webCost=count===0?0:unit===null?null:unit*count;
+        const cost = r.calls===0?0:
             r.recorded === r.calls && pin !== null && pout !== null
               ? (r.input * pin + r.output * pout) / 1e6
               : null,
-          share = infra !== null && volume > 0 ? infra / volume : null;
+          share = !first?0:infra !== null && volume > 0 ? infra / volume : null;
         lines.push(
           [
             r.job,
@@ -201,7 +213,8 @@ async function main() {
             r.output,
             cost,
             share,
-            cost !== null && share !== null ? cost + share : null,
+            count, webCost,
+            cost !== null && share !== null && webCost !== null ? cost + share + webCost : null,
           ].join(','),
         );
       }

@@ -67,26 +67,27 @@ export function setSetting(db, k, v) {
   db.prepare('INSERT OR REPLACE INTO settings VALUES(?,?)').run(k, JSON.stringify(v));
 }
 export const defaultRules = { threshold: 25, controlTolerance: 10, recovery: 90 };
-function identity(f, file) {
+export function identity(f, file) {
   const r = f.row ?? {};
   if (f.kind === 'sales') return JSON.stringify([r.product_family, r.week_start]);
-  if (f.kind === 'metrics') return observationKey(r);
+  if (f.kind === 'metrics') return observationKey(normalizeObservation(r, file));
   if (f.kind === 'dictionary') return r.metric_id;
   if (f.kind === 'backlog') return r.task_id;
   if (f.kind === 'releases') return r.release_id;
   return file + '/' + f.loc;
 }
-export function importDocs(store, docs, { notify = true, onImported } = {}) {
+export function importDocs(store, docs, { notify = true, onImported, guard } = {}) {
   const { db } = store;
   const save = db.prepare(
     'INSERT INTO facts VALUES(?,?,?,?,?,?) ON CONFLICT(kind,key) DO UPDATE SET version=excluded.version,file=excluded.file,loc=excluded.loc,body=excluded.body',
   );
   return store.tx(() => {
     const imported = [];
+    if (guard?.(db) === false) return {inserted:0, documents:db.prepare("SELECT count(*) n FROM documents").get().n};
     for (const doc of docs) {
       if (!Array.isArray(doc.facts) || typeof doc.file !== 'string') throw Error('Некорректный документ');
       const version = digest(JSON.stringify(doc));
-      const researchOnly = doc.facts.every(f => f.kind === 'interview' || f.kind === 'competitor');
+      const researchOnly = doc.facts.every(f => ['interview','competitor','reference'].includes(f.kind));
       const archived = db.prepare('SELECT 1 FROM documents WHERE version=?').get(version);
       if (archived) {
         if (!researchOnly || db.prepare('SELECT version FROM research_file_versions WHERE file=?').get(doc.file)?.version === version) continue;
@@ -98,12 +99,12 @@ export function importDocs(store, docs, { notify = true, onImported } = {}) {
       const oldFiles = doc.legacyInterviewFile ? [doc.file, doc.legacyInterviewFile] : [doc.file];
       for (const file of oldFiles) {
         removeResearchIndex(db, file);
-        db.prepare("DELETE FROM facts WHERE file=? AND kind IN ('competitor','interview')").run(file);
+        db.prepare("DELETE FROM facts WHERE file=? AND kind IN ('competitor','interview','reference')").run(file);
         if (file !== doc.file) db.prepare('DELETE FROM research_file_versions WHERE file=?').run(file);
       }
       for (const f of doc.facts) {
         if (
-          !['sales', 'metrics', 'dictionary', 'backlog', 'releases', 'interview', 'competitor'].includes(
+          !['sales', 'metrics', 'dictionary', 'backlog', 'releases', 'interview', 'competitor', 'reference'].includes(
             f.kind,
           )
         )
@@ -244,7 +245,7 @@ export function search(db, query, kinds = ['interview', 'competitor', 'backlog',
           kind,
           key: r.key,
           score,
-          source,
+          source, file:r.file, loc:r.loc,
           version: r.version,
           data: r.data,
         });

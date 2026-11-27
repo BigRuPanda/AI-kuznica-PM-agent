@@ -1,3 +1,4 @@
+import {archiveInquiry,archiveEvidence} from './archive-search.mjs';
 import { z } from 'zod/v4';
 import { providerCall } from './agent.mjs';
 import { operations, writes, workspaceOperation } from './workspace-operations.mjs';
@@ -24,7 +25,7 @@ const system = [
 ].join(' ');
 const greeting =
   /^(?:привет(?:ик|ствую)?|здравствуй(?:те)?|доброе утро|добрый (?:день|вечер)|hello|hi)(?:[, ]+агент)?[!.? …]*$/iu;
-const tools = Object.entries(operations).map(([name, [description, shape]]) => {
+const tools = Object.entries(operations).filter(([name])=>!['read_public_page','competitor_check'].includes(name)).map(([name, [description, shape]]) => {
   const parameters = z.toJSONSchema(z.object(shape));
   delete parameters.$schema;
   return { type: 'function', function: { name: name.replaceAll('-', '_'), description, parameters } };
@@ -101,6 +102,14 @@ function authorizedWrite(op, question) {
 }
 function note(state, op, r) {
   if (r.error) return;
+  const refs=op==='source_value' || op==='search' ? r : op==='knowledge-source' ?
+    r.rows.slice(0,1).map(row=>({version:r.version,file:r.file,loc:row.loc})) : [];
+  for(const row of refs || []) {
+    if(!row.file || !row.loc || !row.version) continue;
+    const url='#knowledge-source/'+row.version+'/'+encodeURIComponent(row.loc);
+    const citations=state.readSources??=[];
+    if(!citations.some(s=>s.url===url)) citations.push({url,label:row.file+' · '+row.loc,...(row.metadata?.sourceFile && {detail:'Исходная ячейка: '+row.metadata.sourceFile+' · '+row.metadata.sourceLoc})});
+  }
   if (op === 'funnel') {
     state.funnelChecked = r.available;
     state.funnelChart = r.chart;
@@ -165,7 +174,7 @@ function artifactResult(state, text, warning) {
     actions: state.actions,
     personal: state.personal,
     rounds: state.round,
-    steps: state.completed,
+    steps: state.completed, readSources:state.readSources,
   };
 }
 export async function runAssistant(
@@ -235,7 +244,10 @@ export async function runAssistant(
         })),
       };
     }
+    const archive = c && archiveInquiry(b.question) && !smallTalk && !b.screen?.calc && !range && !b.analysisPeriod
+      ? archiveEvidence(db,b.question+' '+c.product,{product:c.product}).slice(0,4) : [];
     const context = {
+      archive:archive.length?archive.map(r=>r.text):undefined,
       requestedPeriod:b.requestedPeriod || undefined,
       caseId,
       product: range?.product || research?.product || c?.product || last?.product,
@@ -303,6 +315,7 @@ export async function runAssistant(
       pending: [],
       failures: {},
     };
+    if(archive.length){note(state,'search',archive.flatMap(r=>r.refs));state.completed.push('search');}
     save(state);
   }
   const stop = (message, warning, outcome = 'done') => {
@@ -325,12 +338,14 @@ export async function runAssistant(
     save(state);
     return result;
   };
+  const deadline = Date.now()+90000;
   while (state.round < 6 || state.pending.length) {
     if (!state.pending.length) {
       const start = Date.now();
       let response;
       try {
-        response = await providerCall(env, state.messages, tools, 'auto', send);
+        if (start >= deadline) return stop('Время разбора истекло. Уже выполненные шаги сохранены.',undefined,'partial');
+        response = await providerCall(env, state.messages, tools, 'auto', send,{timeout:deadline-start});
         if (state.issues) delete state.issues.provider;
       } catch (e) {
         state.round++;

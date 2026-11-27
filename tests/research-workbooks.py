@@ -39,7 +39,19 @@ def workbook(rows, title='Исследования'):
 
 
 items = json.loads(sys.stdin.buffer.read().decode('utf-8'))
-if sys.argv[1:2] == ['--xlsx']:
+if sys.argv[1:2] == ['--linked']:
+    title, cell, url = sys.argv[2:]
+    source = zipfile.ZipFile(io.BytesIO(workbook(items, title)))
+    out = io.BytesIO()
+    with zipfile.ZipFile(out, 'w') as result:
+        for name in source.namelist():
+            data = source.read(name)
+            if name == 'xl/' + SHEET:
+                data = data.replace(b'</worksheet>', f'<hyperlinks xmlns:r="{OFFICE_REL}"><hyperlink ref="{cell}" r:id="link"/></hyperlinks></worksheet>'.encode())
+            result.writestr(name, data)
+        result.writestr('xl/worksheets/_rels/sheet1.xml.rels', f'<Relationships xmlns="{PACKAGE_REL}"><Relationship Id="link" Type="{OFFICE_REL}/hyperlink" Target="{escape(url)}" TargetMode="External"/></Relationships>')
+    sys.stdout.buffer.write(out.getvalue())
+elif sys.argv[1:2] == ['--xlsx']:
     sys.stdout.buffer.write(workbook(items, *sys.argv[2:]))
 else:
     archive = io.BytesIO()

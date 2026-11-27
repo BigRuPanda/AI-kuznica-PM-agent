@@ -119,6 +119,27 @@ test('Softline workspace, upgrade and browser journeys', async t => {
     }
   });
 
+  await journey('a cited spreadsheet cell opens a public page in a private chat', async () => {
+    const store=app.space('team');
+    const doc={file:'Public.xlsx',facts:[{kind:'competitor',loc:'Цена!A2',text:'Цена 1200 рублей',
+      links:[{loc:'Цена!D2',url:'https://catalog.example/item'}]}]};
+    importDocs(store,[doc],{notify:false});
+    await go(admin,'sources');
+    await admin.getByRole('link',{name:'Public.xlsx'}).click();
+    await role(admin,'Проверить ссылку из Цена!D2').click();
+    await field(admin,'Что проверить по ссылке').fill('Сверь цену 1200 рублей');
+    await submit(admin,'ask',()=>role(admin,'Проверить в чате').click());
+    await workJobs(store,app.accounts,{...env,LLM_DATA_MODE:'selection'},transport,{
+      resolveHost:async()=>[{address:'93.184.216.34',family:4}],
+      request:async()=>new Response('<title>Каталог</title><p>Цена 1200 рублей.</p>',{headers:{'Content-Type':'text/html'}}),
+    });
+    await admin.reload();
+    await visible(admin.getByRole('link',{name:'Каталог',exact:true}));
+    const cell=admin.getByRole('link',{name:'Public.xlsx · Цена!D2'});
+    await cell.click();
+    await visible(role(admin,'Проверить ссылку из Цена!D2'));
+    await go(admin,'material/'+fixture.report);
+  });
   await journey('old links, personal access, navigation and themes', async () => {
     await visible(admin.getByRole('heading',{name:'Исходный отчёт'}));
     await visible(member.getByText('Снимок недоступен', {exact:false}).first());
