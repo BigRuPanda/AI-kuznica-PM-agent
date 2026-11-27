@@ -6,7 +6,6 @@ import {
   updateCase,
   analysisView,
   search,
-  rankBacklog,
   effect,
   fmt,
   facts,
@@ -18,6 +17,7 @@ import {
 import { apiConfigured, providerCall } from './agent.mjs';
 import { initTracking } from './tracker-workflow.mjs';
 import { mail, telegram } from './connectors.mjs';
+import { notificationChannels } from './data-profile.mjs';
 import {
   initMaterials,
   attachedMaterials,
@@ -30,12 +30,13 @@ import {
 import {
   newTopic,
   prepareResearch,
+  rangeComparisonText,
   researchIntent,
   resetsChartTopic,
   screenRequest,
 } from './agent-research.mjs';
 import { asksToDraw, chartFindings, chartObservations, resolveChartFocus } from './chart-focus.mjs';
-import { dayComparison, explicitDayWindow } from './day-comparison.mjs';
+import { dayComparison, explicitDayWindow, investigationPeriod } from './day-comparison.mjs';
 
 const chatItemColumns = '(seq INTEGER PRIMARY KEY AUTOINCREMENT,thread TEXT,author TEXT,role TEXT,body TEXT,created INTEGER);';
 
@@ -77,6 +78,8 @@ export function initWorkbench(db) {
   db.prepare("UPDATE jobs SET status='queued' WHERE status='running'").run();
   db.prepare("UPDATE draft_actions SET state='uncertain' WHERE state='sending'").run();
   db.prepare("UPDATE deliveries SET state='uncertain' WHERE state='sending'").run();
+  db.exec(`UPDATE deliveries SET state='review' WHERE state='queued' AND json_extract(body,'$.signalId') IS NOT NULL
+    AND json_extract(body,'$.after') IN (SELECT id FROM deliveries WHERE state='uncertain')`);
 }
 export const cardTypes = [
   'summary',
@@ -204,6 +207,7 @@ export function enqueue(store, user, b) {
         full: snap.full,
         control: snap.summary?.[1]?.product,
         asOf: snap.cut,
+        requested: snap.requested,
         cards: Array.isArray(b.screen.cards) ? b.screen.cards.filter((k) => cardTypes.includes(k)) : [],
       };
     }
@@ -258,7 +262,8 @@ export function enqueue(store, user, b) {
         id,
         t.id,
         user.id,
-        JSON.stringify({ ...b, screen, ...attachment, question: q, questionSeq, requestedPeriod }),
+        JSON.stringify({ ...b, screen, ...attachment, question: q, questionSeq, requestedPeriod,
+          analysisPeriod: investigationPeriod(q, askedAt) }),
         'queued',
         null,
         Date.now(),
@@ -439,10 +444,12 @@ function factsForCards(view, cards, backlog) {
             ' = ' +
             fmt((100 * view.ctr.n) / view.ctr.d) +
             '%.'
-        : 'Для расчёта CTR рекомендаций ЛК нужны данные о визитах, в которых блок увидели.',
+        : view.ctr.reason || 'Для расчёта CTR рекомендаций ЛК нужны данные о визитах, в которых блок увидели.',
     );
   if (cards.includes('reach'))
-    lines.push('Выбор опции: ' + view.reach.n + ' из ' + view.reach.d + ' визитов в сопоставимых строках.');
+    lines.push(view.reach.d > 0 && view.reach.n != null
+      ? 'Выбор опции: ' + view.reach.n + ' из ' + view.reach.d + ' визитов в сопоставимых строках.'
+      : view.reach.reason || 'Для расчёта охвата нет измеренного знаменателя.');
   if (cards.includes('timeline'))
     lines.push(
       ...view.timeline.map(
@@ -486,7 +493,15 @@ export async function answer(store, user, b, env = process.env, send = fetch, jo
   if (focus?.id) b = { ...b, materialIds: [focus.id], screen: undefined };
   const history = recentDialogue(db, b.thread, b.questionSeq);
   if (b.caseId) visibleCase(db, user, b.caseId);
-  const daily = store.tx(() => dayComparison(db, user, b, history, shared));
+  if (b.analysisPeriod && !b.rangeId && !b.materialIds?.length) {
+    const screen = b.screen?.calc && readSnapshot(db, user, b.screen.calc);
+    const snap = analysisView(db, { product: b.product || screen?.product, caseId: b.caseId,
+      full: b.screen?.full, control: b.screen?.control, ...b.analysisPeriod });
+    grant(db, snap.id, 'thread', b.thread);
+    b = { ...b, screen: { calc: snap.id, cards: b.screen?.cards, requested: snap.requested,
+      full: snap.full, control: snap.summary?.[1]?.product, asOf: snap.cut } };
+  }
+  const daily = !b.analysisPeriod && store.tx(() => dayComparison(db, user, b, history, shared));
   if (daily) return daily;
   const intent = researchIntent(b.question);
   if (focus?.id && !asksToDraw(b.question)) {
@@ -507,7 +522,7 @@ async function answerTurn(store, user, b, env, send, job, history, intent) {
       ? store.tx(() => prepareResearch(store, user, b, history, job, intent))
       : null;
   if (
-    b.screen?.calc &&
+    b.screen?.calc && !b.analysisPeriod &&
     screenRequest(b.question) &&
     !intent.chart &&
     !intent.report &&
@@ -553,32 +568,15 @@ async function answerTurn(store, user, b, env, send, job, history, intent) {
     (!newTopic(b.question) && history.findLast((m) => m.body.rangeId || m.body.contextReset)?.body.rangeId);
   if (rangeId && (b.rangeId || /здесь|почему|участ|период|гипотез|вывод|опроверг/i.test(b.question))) {
     const range = readRange(db, user, rangeId);
-    const lines = range.periods.flatMap((p, i) =>
-      p.series.map(
-        (r) =>
-          (i ? 'B' : 'A') +
-          ' · ' +
-          r.key +
-          ': ' +
-          fmt(r.value) +
-          ' ' +
-          range.unit +
-          ' (' +
-          r.available +
-          ' из ' +
-          p.expected +
-          ')',
-      ),
-    );
     return {
-      text: lines.join('\n') + '\nПричину изменения нужно отдельно сверить с релизами и исследованиями.',
+      text: rangeComparisonText(range),
       rangeId,
       mode: 'calculation',
     };
   }
   const previous = history.findLast((m) => m.role === 'assistant' && m.body.calc)?.body;
   const products = [...new Set(listSales(db).map((r) => r.product))],
-    context = { product: c?.product || b.product || previous?.product, full: b.full ?? previous?.full };
+    context = { product: c?.product || b.product || previous?.product, full: b.full ?? b.screen?.full ?? previous?.full };
   let plan,
     model = false,
     warning = '';
@@ -637,21 +635,23 @@ async function answerTurn(store, user, b, env, send, job, history, intent) {
   }
   if (!plan) {
     plan = fallbackPlan(b.question, products, context);
+    if (plan.text && b.analysisPeriod?.through && /срез|известно/u.test(b.question.toLowerCase()))
+      plan = { product: context.product, full: context.full, cards: ['timeline', 'evidence'], query: b.question };
     if (plan.text) return { text: plan.text, mode: 'local', warning };
   }
   const view =
-    b.screen?.calc && plan.product === context.product && plan.full === b.screen.full
+    b.screen?.calc && !b.analysisPeriod && plan.product === context.product && plan.full === b.screen.full
       ? { ...readSnapshot(db, user, b.screen.calc), id: b.screen.calc }
       : analysisView(db, {
           caseId: b.caseId,
           product: plan.product,
           full: plan.full,
+          ...(b.analysisPeriod || b.screen?.requested),
           control: b.control ?? b.screen?.control,
           sourceQuery: plan.cards.includes('evidence') ? plan.query : '',
         });
   grant(db, view.id, 'thread', b.thread);
-  const backlog = rankBacklog(db, view.product),
-    lines = factsForCards(view, plan.cards, backlog);
+  const lines = factsForCards(view, plan.cards, view.backlog || []);
   const text =
     lines.join('\n') || 'Для такого вопроса пока недостаточно данных. Добавьте источник в настройках.';
   return {
@@ -756,12 +756,13 @@ function completeMaterials(store, user, job, b, result) {
     if (successful) text = briefConclusion(text, r?.findings || []);
   }
   if (intent.report && (children.size || r?.sections.length) && !result.actions?.length) {
-    if (successful) text = briefConclusion(text, r?.findings || []);
+    const summary = successful ? briefConclusion(text, r?.findings || []) : text;
+    if (!result.rangeId) text = summary;
     const report = saveMaterial(db, b.thread, {
       kind: 'report',
       title: 'Разбор · ' + (r?.product || result.product || b.question).slice(0, 120),
       product: r?.product || result.product,
-      summary: text,
+      summary,
       analysis: result.mode === 'analysis' ? result.text : undefined,
       question: b.question,
       ranges: r?.periods,
@@ -863,60 +864,86 @@ export async function workJobs(store, accounts, env, send) {
     }
   });
 }
-export async function deliver(store, env, send, mailSend = mail) {
+function claimDelivery(store, env) {
   const db = store.db;
   const d = db
     .prepare(
-      `SELECT * FROM deliveries d WHERE state='queued' AND next<=? AND (?=1 OR json_extract(body,'$.chat') IS NOT NULL)
+      `SELECT * FROM deliveries d WHERE state='queued' AND next<=? AND
+       ((?=1 AND channel IN (SELECT value FROM json_each(?))) OR
+        (json_extract(body,'$.chat') IS NOT NULL AND COALESCE(json_extract(body,'$.proactive'),0)=0))
        AND (json_extract(body,'$.after') IS NULL OR EXISTS(SELECT 1 FROM deliveries prev WHERE prev.id=json_extract(d.body,'$.after') AND prev.state='delivered'))
        ORDER BY rowid LIMIT 1`,
     )
-    .get(Date.now(), env.NOTIFICATIONS_ENABLED === 'true' ? 1 : 0);
+    .get(Date.now(), env.NOTIFICATIONS_ENABLED === 'true' ? 1 : 0, JSON.stringify(notificationChannels(env)));
   if (!d) return;
   const b = JSON.parse(d.body);
-  const destinations = [
-    ...new Set(
-      [...String(env.TELEGRAM_CHAT_IDS || '').split(','), env.TELEGRAM_CHANNEL_ID]
-        .filter(Boolean)
-        .map((x) => x.trim())
-        .filter(Boolean),
-    ),
-  ];
-  if (d.channel === 'telegram' && !b.chat && destinations.length > 1) {
-    store.tx(() => {
-      for (const chat of destinations)
-        db.prepare(
-          "INSERT OR IGNORE INTO deliveries(id,channel,state,body) VALUES(?,'telegram','queued',?)",
-        ).run(d.id + '/' + chat, JSON.stringify({ ...b, chat, proactive: true }));
-      db.prepare("UPDATE deliveries SET state='distributed' WHERE id=?").run(d.id);
-    });
-    return;
-  }
-  const addr = b.chat || destinations[0];
-  if (
-    (d.channel === 'telegram' && (!env.TELEGRAM_BOT_TOKEN || !addr)) ||
-    (d.channel === 'smtp' && (!env.SMTP_HOST || !env.SMTP_TO))
-  ) {
+  const isTelegram = d.channel === 'telegram';
+  const recipientKey = isTelegram ? 'chat' : 'emailTo';
+  const targets = isTelegram
+    ? [...String(env.TELEGRAM_CHAT_IDS || '').split(','), env.TELEGRAM_CHANNEL_ID]
+    : [env.SMTP_TO];
+  const destinations = b[recipientKey] ? [b[recipientKey]]
+    : [...new Set(targets.filter(Boolean).map(x => x.trim()).filter(Boolean))];
+  if (!destinations.length || !(isTelegram ? env.TELEGRAM_BOT_TOKEN : env.SMTP_HOST)) {
     db.prepare('UPDATE deliveries SET next=? WHERE id=?').run(Date.now() + 60000, d.id);
     return;
   }
-  if (
-    !db
-      .prepare("UPDATE deliveries SET state='sending',attempts=attempts+1 WHERE id=? AND state='queued'")
-      .run(d.id).changes
-  )
+  // A correction can have both a new broadcast and an addressed follow-up in the queue.
+  const addressed = db.prepare(`SELECT 1 FROM deliveries WHERE json_extract(body,'$.signalId')=?
+    AND json_extract(body,'$.revision')=? AND channel=? AND json_extract(body,?)=?
+    AND state IN ('queued','sending','delivered','uncertain','review') LIMIT 1`);
+  const unmatched = b.signalId && !b[recipientKey] ? destinations.filter(dest =>
+    !addressed.get(b.signalId,b.revision,d.channel,'$.' + recipientKey,dest)) : destinations;
+  if (!unmatched.length) {
+    db.prepare("UPDATE deliveries SET state='cancelled' WHERE id=?").run(d.id);
     return;
+  }
+  if (unmatched.length > 1) {
+    const insert = db.prepare("INSERT OR IGNORE INTO deliveries(id,channel,state,body) VALUES(?,?,'queued',?)");
+    for (const dest of unmatched)
+      insert.run(d.id + '/' + dest,d.channel,JSON.stringify({...b,[recipientKey]:dest,proactive:true}));
+    db.prepare("UPDATE deliveries SET state='distributed' WHERE id=?").run(d.id);
+    return;
+  }
+  const [recipient] = unmatched;
+  db.prepare("UPDATE deliveries SET state='sending',body=?,attempts=attempts+1 WHERE id=?")
+    .run(JSON.stringify({...b,[recipientKey]:recipient}),d.id);
+  return {d,b,recipient,recipientKey};
+}
+
+export async function deliver(store, env, send, mailSend = mail) {
+  const db = store.db;
+  const claim = store.tx(() => claimDelivery(store, env));
+  if (!claim) return;
+  const {d,b,recipient,recipientKey} = claim;
   const text =
     b.text + (b.caseId ? '\n' + (env.APP_BASE_URL || 'http://127.0.0.1:8090') + '/#case/' + b.caseId : '');
   try {
-    if (d.channel === 'telegram') await telegram('sendMessage', { chat_id: addr, text }, env, send);
-    else await mailSend(text, env);
+    if (d.channel === 'telegram') await telegram('sendMessage', { chat_id: recipient, text }, env, send);
+    else await mailSend(text, Object.assign(Object.create(env), {SMTP_TO:recipient}));
     db.prepare("UPDATE deliveries SET state='delivered' WHERE id=?").run(d.id);
   } catch (e) {
-    db.prepare('UPDATE deliveries SET state=?,next=? WHERE id=?').run(
-      e.status === 429 ? 'queued' : 'uncertain',
-      Date.now() + 60000,
-      d.id,
-    );
+    store.tx(() => {
+      const retry = e.status === 429;
+      const waiting = db.prepare("SELECT id,body FROM deliveries WHERE state='queued' AND json_extract(body,'$.after')=? AND json_extract(body,'$.signalId') IS NOT NULL").all(d.id);
+      const superseded = retry && b.signalId && db.prepare(`SELECT 1 FROM signal_revisions
+        WHERE case_id=? AND revision>? AND json_extract(body,'$.event') IS NOT NULL LIMIT 1`)
+        .get(b.signalId,b.revision ?? 0);
+      db.prepare('UPDATE deliveries SET state=?,next=? WHERE id=?').run(
+        retry ? (superseded || waiting.length ? 'cancelled' : 'queued') : 'uncertain',Date.now()+60000,d.id);
+      for (const row of waiting) {
+        const child = JSON.parse(row.body);
+        if (retry) delete child.after;
+        let state = retry ? 'queued' : 'review';
+        if (retry && child.event === 'withdrawn') {
+          const receipt = db.prepare(`SELECT json_extract(body,'$.event') event FROM deliveries
+            WHERE json_extract(body,'$.signalId')=? AND channel=? AND json_extract(body,?)=?
+            AND state='delivered' ORDER BY rowid DESC LIMIT 1`).get(child.signalId,d.channel,'$.' + recipientKey,recipient);
+          if (!receipt || receipt.event === 'withdrawn') state = 'cancelled';
+        }
+        db.prepare('UPDATE deliveries SET state=?,body=? WHERE id=?').run(
+          state,JSON.stringify(child),row.id);
+      }
+    });
   }
 }

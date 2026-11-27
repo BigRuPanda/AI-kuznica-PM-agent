@@ -435,8 +435,8 @@ test('Metrika paginates with sampling metadata', async () => {
     assert.equal(init.headers.Authorization, 'OAuth fixture');
     n++;
     return Response.json({
-      data: [{ dimensions: [{ name: '2026-01-01' }], metrics: [3] }],
-      total_rows: n === 1 ? 10001 : 1,
+      data: [{ dimensions: [{ name: n === 1 ? '2026-01-01' : '2026-01-02' }], metrics: [3] }],
+      total_rows: 2,
       sampled: true,
       sample_share: 0.8,
     });

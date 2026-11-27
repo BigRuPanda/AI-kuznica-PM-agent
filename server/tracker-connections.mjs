@@ -1,5 +1,6 @@
 import { createCipheriv, createDecipheriv, randomBytes, randomUUID, createHash } from 'node:crypto';
-import { confluence, redmine, exchange } from './tracker-clients.mjs';
+import { checkDestination, integrationTransport } from './data-profile.mjs';
+import { confluence, redmine, exchange, numeric } from './tracker-clients.mjs';
 
 export function initConnections(db) {
   db.exec(`CREATE TABLE IF NOT EXISTS integration_sites(service TEXT PRIMARY KEY,config TEXT NOT NULL);
@@ -8,7 +9,8 @@ export function initConnections(db) {
 }
 const services = ['redmine', 'confluence'];
 function siteId(target) {
-  return createHash('sha256').update(JSON.stringify(target)).digest('hex');
+  const { originFieldId, ...site } = target;
+  return createHash('sha256').update(JSON.stringify(site)).digest('hex');
 }
 export function targetFor(db, user, service) {
   if (!services.includes(service)) throw Error('Неизвестный сервис');
@@ -31,6 +33,7 @@ export function configure(db, user, b) {
   if (!/^[\p{L}\d_.~-]{1,128}$/u.test(scope))
     throw Error('Проверьте идентификатор проекта или ключ пространства');
   const config = { service: b.service, url: url.href.replace(/\/+$/, ''), scope };
+  if (b.service === 'redmine' && b.originFieldId) config.originFieldId = numeric(b.originFieldId);
   if (b.service === 'confluence') {
     if (!['cloud', 'dc'].includes(b.edition)) throw Error('Выберите редакцию Confluence');
     config.edition = b.edition;
@@ -104,6 +107,7 @@ async function oauthToken(env, send, data) {
 }
 const refreshing = new WeakMap();
 export async function remoteClient(db, user, target, env, send) {
+  send = integrationTransport(env, send);
   if (target.local || siteId(targetFor(db, user, target.service)) !== siteId(target))
     throw Error('Назначение изменилось. Создайте новый черновик');
   const site = siteId(target),
@@ -141,6 +145,7 @@ export async function remoteClient(db, user, target, env, send) {
   return adapter(target, cred, send);
 }
 export async function personalConnection(db, user, b, env, send) {
+  send = integrationTransport(env, send);
   const target = targetFor(db, user, b.service);
   if (target.local) throw Error('Сначала настройте адрес сервиса для команды');
   const site = siteId(target);
@@ -152,6 +157,7 @@ export async function personalConnection(db, user, b, env, send) {
   } else if (b.action === 'connect') {
     encryptionKey(env);
     if (target.edition === 'cloud') {
+      checkDestination(env, 'https://auth.atlassian.com');
       if (!env.CONFLUENCE_CLIENT_ID || !env.CONFLUENCE_CLIENT_SECRET)
         throw Error('Настройте OAuth-приложение Confluence Cloud');
       const state = randomUUID();
@@ -187,6 +193,7 @@ export async function personalConnection(db, user, b, env, send) {
   return connectionInfo(db, user);
 }
 export async function finishOAuth(db, user, params, env, send) {
+  send = integrationTransport(env, send);
   const target = targetFor(db, user, 'confluence'),
     site = siteId(target);
   const taken = db

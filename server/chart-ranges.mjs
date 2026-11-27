@@ -1,6 +1,7 @@
 import { analysis, derive } from './analytics.mjs';
 import { DAY } from './import.mjs';
 import { digest } from './evidence.mjs';
+import { aggregateMetric } from './metric-observations.mjs';
 
 export function initRanges(db) {
   db.exec(`CREATE TABLE IF NOT EXISTS range_results(id TEXT PRIMARY KEY,body TEXT NOT NULL);
@@ -148,26 +149,26 @@ function aggregateChart(db, user, ref, sharedOnly) {
   const step = v.step,
     rows = v.points.map((p) => ({ ...p, at: Date.parse(p.date + 'T00:00:00Z') }));
   const { series, ranges } = normalize(ref, rows[0].at, rows.at(-1).at + step, step, [v.segment]);
-  const pairs = {
-    lk_reco_ctr: ['click_visits', 'viewed_visits'],
-    cfg_reach_rate: ['configurator_visits', 'family_visits'],
-    cfg_completion_rate: ['complete', 'open'],
-    cfg_back_reset_rate: ['back', 'open'],
-    cfg_add_to_cart_rate: ['add_to_cart', 'open'],
-  };
   const ratio = v.unit === 'ratio',
     unit = ratio ? '%' : v.unit;
   const periods = ranges.map(({ from, to }) => {
-    const group = rows.filter((r) => r.at >= from && r.at < to && Number.isFinite(r.value));
+    const selected = rows.filter((r) => r.at >= from && r.at < to);
+    const group = selected.filter(r => Number.isFinite(r.value));
+    const unavailableReason = selected.find(r => r.reason && r.numerator == null)?.reason;
+    const groupConfigs = new Set(selected.filter(r => r.combineMembers).map(r => JSON.stringify(r.combineMembers)));
     let n,
       d,
       value = null,
       reason;
-    const pair = pairs[v.metric];
-    if (ratio && pair && group.every((r) => pair.every((k) => Number.isFinite(r.details?.[k])))) {
-      n = group.reduce((s, r) => s + r.details[pair[0]], 0);
-      d = group.reduce((s, r) => s + r.details[pair[1]], 0);
-      value = d ? (100 * n) / d : null;
+    if (unavailableReason) reason = unavailableReason;
+    else if (groupConfigs.size > 1) reason = 'В выбранном периоде изменился состав группы счётчиков.';
+    else if (ratio) {
+      const observations = selected.filter(r => Number.isFinite(r.value) ||
+        Number.isFinite(r.numerator) || Number.isFinite(r.denominator)).map(r => ({...r, metric_id: v.metric, segment: v.segment,
+        unit: v.unit, source_id: v.sourceId, step_days: step / DAY}));
+      const result = aggregateMetric(observations, v.metric, {segment: v.segment});
+      ({ n, d, value, reason } = result);
+      if (!v.sourceId && group.length === 1 && n === null) value = group[0].value * 100;
     } else if (!ratio && ['views', 'visits', 'count', 'events'].includes(v.unit)) {
       value = group.length ? group.reduce((s, r) => s + r.value, 0) : null;
     } else if (group.length === 1) value = group[0].value * (ratio ? 100 : 1);
@@ -185,7 +186,8 @@ function aggregateChart(db, user, ref, sharedOnly) {
           reason,
           available: group.length,
           partial: group.filter((r) => r.partial).length,
-          sources: group.map((r) => ({ date: r.date, location: r.source, version: r.version })),
+          sources: selected.filter(r => r.version).flatMap(r => (r.sources || [{source:r.source, version:r.version}])
+            .map(({source, version}) => ({date:r.date, location:source, version}))),
         },
       ],
     };
@@ -200,7 +202,7 @@ function aggregateChart(db, user, ref, sharedOnly) {
     title: v.title,
     unit,
     asOf: rows.at(-1).date,
-    filters: { segment: v.segment },
+    filters: { segment: v.segment, sourceId: v.sourceId, definitionId: v.definitionId },
     series,
     ranges,
     periods,

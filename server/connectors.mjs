@@ -1,6 +1,8 @@
 import { spawn } from 'node:child_process';
 import { join } from 'node:path';
 import { root } from './config.mjs';
+import { integrationTransport, checkSmtp, localData } from './data-profile.mjs';
+import { ratioFields, reportDefinition } from './metric-observations.mjs';
 export async function python(script, args, input, env = process.env) {
   return new Promise((resolve, reject) => {
     const child = spawn(
@@ -54,21 +56,49 @@ async function request(send, url, options = {}) {
   return res.status === 204 ? {} : await res.json();
 }
 export async function metrika(env = process.env, send = fetch) {
+  send = integrationTransport(env, send);
+  const replay = env.METRIKA_REPLAY_ORIGIN;
+  if (replay && (!localData(env) || !/^http:\/\/127\.0\.0\.1:\d+$/.test(replay)))
+    throw Error('Воспроизведение Метрики доступно в локальном профиле на loopback.');
+  const endpoint = (replay || 'https://api-metrika.yandex.net') + '/stat/v1/data';
   const ids = required(env, 'METRIKA_COUNTER_IDS'),
     token = required(env, 'METRIKA_TOKEN');
   if (!/^\d+(,\d+)*$/.test(ids)) throw Error('Проверьте METRIKA_COUNTER_IDS');
   const maps = JSON.parse(
     env.METRIKA_REPORTS_JSON || '[{"id":"visits","metric":"ym:s:visits","unit":"visits"}]',
   );
+  if (!Array.isArray(maps) || !maps.length) throw Error('В METRIKA_REPORTS_JSON нужен хотя бы один отчёт');
   const facts = [],
     samples = [];
-  for (const counter of ids.split(','))
+  for (const counter of new Set(ids.split(',')))
     for (const map of maps) {
-      for (let offset = 1; ; offset += 10000) {
+      if (typeof map?.id !== 'string' || !map.id.trim()) throw Error('Укажите идентификатор отчёта Метрики');
+      const ratio = map.numerator !== undefined || map.denominator !== undefined;
+      if (ratio && [map.numerator, map.denominator].some(field => typeof field !== 'string' || !field.trim() || field.includes(',')))
+        throw Error('Для доли укажите метрики numerator и denominator');
+      if (!ratio && (typeof map.metric !== 'string' || !map.metric || map.metric.includes(',')))
+        throw Error('Для отчёта нужна одна metric или пара numerator, denominator');
+      const metric = ratio ? [map.numerator, map.denominator].join(',') : map.metric;
+      const dimensions = map.dimensions || 'ym:s:date';
+      if (typeof dimensions !== 'string') throw Error('Укажите группировки отчёта Метрики через запятую');
+      const fields = dimensions.split(',');
+      const firstDimension = fields[0];
+      const step = firstDimension === 'ym:s:date' ? 1 : firstDimension === 'ym:s:startOfWeek' ? 7 : 0;
+      if (!step) throw Error('Первая группировка Метрики должна задавать день или начало недели');
+      const unit = ratio ? 'ratio' : map.unit || 'count';
+      const definition = reportDefinition(metric, dimensions, map.filters || '', unit);
+      const combine = map.disjointCounters;
+      if (combine !== undefined && (!Array.isArray(combine) || combine.length < 2 || combine.some(id => !/^\d+$/.test(String(id))) ||
+          new Set(combine.map(String)).size !== combine.length || !map.product))
+        throw Error('Для группы непересекающихся счётчиков укажите продукт и разные ID счётчиков');
+      const combineMembers = combine?.map(String).sort();
+      const seen = new Set();
+      let offset = 1, total;
+      for (;;) {
         const q = new URLSearchParams({
           ids: counter,
-          metrics: map.metric,
-          dimensions: map.dimensions || 'ym:s:date',
+          metrics: metric,
+          dimensions,
           date1: map.date1 || '30daysAgo',
           date2: map.date2 || 'yesterday',
           limit: '10000',
@@ -76,7 +106,7 @@ export async function metrika(env = process.env, send = fetch) {
           accuracy: 'full',
           ...(map.filters ? { filters: map.filters } : {}),
         });
-        const r = await request(send, 'https://api-metrika.yandex.net/stat/v1/data?' + q, {
+        const r = await request(send, endpoint + '?' + q, {
           headers: { Authorization: 'OAuth ' + token },
         });
         samples.push({
@@ -87,32 +117,64 @@ export async function metrika(env = process.env, send = fetch) {
           share: r.sample_share,
           lag: r.data_lag,
         });
-        for (const [index, p] of r.data.entries())
+        if (!Array.isArray(r.data) || r.total_rows_rounded === true || !Number.isSafeInteger(r.total_rows) || r.total_rows < 0 ||
+            (total !== undefined && r.total_rows !== total))
+          throw Error('Метрика вернула неполный или изменившийся отчёт. Повторите синхронизацию.');
+        total = r.total_rows;
+        if (offset - 1 + r.data.length > total || (!r.data.length && offset <= total))
+          throw Error('Метрика вернула неполную страницу отчёта. Повторите синхронизацию.');
+        for (const [index, p] of r.data.entries()) {
+          if (!Array.isArray(p?.dimensions) || p.dimensions.length !== fields.length ||
+              p.dimensions.some(x => typeof x?.name !== 'string'))
+            throw Error('Метрика вернула неполные группировки отчёта. Повторите синхронизацию.');
+          const date = p.dimensions[0].name;
+          if (!/^\d{4}-\d\d-\d\d$/.test(date) || !Number.isFinite(Date.parse(date)) ||
+              new Date(date).toISOString().slice(0, 10) !== date || !Array.isArray(p.metrics) ||
+              p.metrics.length !== (ratio ? 2 : 1) || p.metrics.some(x => x !== null && !Number.isFinite(x)))
+            throw Error('Некорректная дата или значение в отчёте Метрики');
+          const labels = p.dimensions.map(x => x.name);
+          const key = JSON.stringify(labels);
+          if (seen.has(key)) throw Error('Метрика вернула повторяющееся наблюдение. Повторите синхронизацию.');
+          seen.add(key);
+          const [n, d] = p.metrics;
+          if (ratio && ((n !== null && n < 0) || (d !== null && d < 0) || (n !== null && d !== null && n > d)))
+            throw Error('Некорректные основания доли в отчёте Метрики');
+          const pair = ratioFields[map.id];
+          const parts = labels.slice(1);
+          const detail = { counter, sample_share: r.sample_share, query: q.toString() };
+          if (ratio && pair) { detail[pair[0]] = n; detail[pair[1]] = d; }
           facts.push({
             kind: 'metrics',
             loc: 'Счётчик ' + counter + ' · ' + map.id + ' · ' + (offset + index),
             row: {
-              date: p.dimensions[0].name,
+              date,
+              source_id: 'metrika:' + counter + ':' + map.id,
+              counter_id: counter,
+              definition_id: definition,
+              ...(combineMembers?.includes(counter) && {combine_group:'group:' + map.id, combine_members:combineMembers}),
+              step_days: step,
+              dimensions: parts,
               metric_id: map.id,
               product: map.product || counter,
-              segment:
-                p.dimensions
-                  .slice(1)
-                  .map((x) => x.name)
-                  .join('/') || 'all',
-              value: p.metrics[0],
-              unit: map.unit || 'count',
+              segment: parts.join('/') || 'all',
+              value: ratio ? (d && n !== null ? n / d : null) : n,
+              numerator: ratio ? n : null,
+              denominator: ratio ? d : null,
+              unit,
               sample_size: null,
-              detail_json: JSON.stringify({ counter, sample_share: r.sample_share, query: q.toString() }),
-              comment: 'API Яндекс Метрики',
+              detail_json: JSON.stringify(detail),
+              comment: replay ? 'Тестовый счётчик, воспроизведение' : 'API Яндекс Метрики',
             },
           });
-        if (!r.data.length || offset + r.data.length > r.total_rows) break;
+        }
+        offset += r.data.length;
+        if (offset > total) break;
       }
     }
-  return { docs: [{ file: 'Яндекс Метрика API', facts }], samples };
+  return { docs: [{ file: replay ? 'Яндекс Метрика API · воспроизведение' : 'Яндекс Метрика API', facts }], samples };
 }
 export async function telegram(method, data, env = process.env, send = fetch) {
+  send = integrationTransport(env, send);
   const r = await request(
     send,
     'https://api.telegram.org/bot' + required(env, 'TELEGRAM_BOT_TOKEN') + '/' + method,
@@ -121,6 +183,7 @@ export async function telegram(method, data, env = process.env, send = fetch) {
   return r.result;
 }
 export async function mail(text, env = process.env) {
+  checkSmtp(env);
   const config = Object.fromEntries(
     ['SMTP_HOST', 'SMTP_PORT', 'SMTP_USER', 'SMTP_PASSWORD', 'SMTP_FROM', 'SMTP_TO', 'SMTP_TLS'].map((k) => [
       k,
@@ -129,5 +192,6 @@ export async function mail(text, env = process.env) {
   );
   required(config, 'SMTP_HOST');
   required(config, 'SMTP_TO');
-  await python('mail_delivery.py', [], JSON.stringify({ ...config, text }), env);
+  await python('mail_delivery.py', [], JSON.stringify({ ...config, text, DATA_PROFILE:env.DATA_PROFILE,
+    LOCAL_SMTP_TARGET:env.LOCAL_SMTP_TARGET }), env);
 }

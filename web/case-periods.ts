@@ -22,21 +22,29 @@ export function signalPeriod(signal: Signal) {
   return period(latest - 3 * week, latest + 6 * day);
 }
 
+export function signalEvidenceWeek(start: string) {
+  const first = dateValue(start);
+  return period(first, first + 6 * day);
+}
+
 export function signalBaseline(signal: Signal) {
+  if (signal.baselineFrom && signal.baselineThrough) return period(dateValue(signal.baselineFrom),dateValue(signal.baselineThrough));
   const latest = dateValue(signal.week);
   return period(latest - 15 * week, latest - 3 * week - day);
 }
 
 export function analysisPeriods(view: View) {
   const pivot = dateValue(view.pivot);
+  const start = dateValue(view.base);
+  const end = dateValue(view.cut) + (view.calendarPeriod ? 0 : 6 * day);
   return {
-    before: period(dateValue(view.base), pivot - day),
-    after: period(pivot + week, dateValue(view.cut) + 6 * day),
+    before: period(start, Math.min(pivot - day, end)),
+    after: period(Math.max(start, pivot + week), end),
   };
 }
 
-export function changeLabel(change: number | null) {
-  return change == null ? '—' : (change > 0 ? '+' : '') + num(change) + '%';
+export function changeLabel(change: number | null, unit = '%') {
+  return change == null ? '—' : (change > 0 ? '+' : '') + num(change) + (unit === '%' ? unit : ' ' + unit);
 }
 
 export function caseHeading(item: Case) {

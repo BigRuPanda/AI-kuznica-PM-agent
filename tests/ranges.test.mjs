@@ -253,11 +253,13 @@ test('conversation, selection investigation, follow-up, a single persisted draft
     });
     assert.equal(follow.reply.rangeId, investigation.reply.rangeId);
     let n = 0;
-    const draft = await turn('Подготовь задачу для QA, пока никому не отправляй', () =>
+    const draft = await turn('Подготовь задачу для QA с планом проверки причины снижения, пока никому не отправляй', () =>
       ++n <= 2
         ? call('draft', { title: 'Проверить', description: 'Сверить события.' }, String(n))
         : say('Черновик сохранён.'),
     );
+    assert.equal(draft.reply.outcome, 'done');
+    assert.equal(n, 3);
     assert.equal(s.one('select count(*) n from draft_actions').n, 1);
     assert.ok(draft.reply.actions[0].description.includes('#range/'));
     assert.equal(s.one('select count(*) n from local_issues').n, 0);

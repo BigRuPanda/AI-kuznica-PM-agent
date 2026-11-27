@@ -3,6 +3,7 @@ import { analysisView, digest, fmt, listSales, productFamily as family } from '.
 import { materialForResult, readMaterial, sourceSection } from './materials.mjs';
 import { DAY } from './import.mjs';
 import { chartFindings, chartObservations } from './chart-focus.mjs';
+import { aggregateMetric, normalizeObservation, observationKey } from './metric-observations.mjs';
 
 const date = (ms) => new Date(ms).toISOString().slice(0, 10);
 const metrics = [
@@ -18,6 +19,20 @@ export const newTopic = (q) =>
 export const resetsChartTopic = (q) => newTopic(q) && !/^(?:привет|спасибо)[!.? ]*$/iu.test(q.trim());
 export const screenRequest = (q) =>
   /с экран[а-я]*|на экран[еа]|открыт[а-я]* (?:расч[её]т|срез)|повтори показател/i.test(q);
+export function rangeComparisonText(range) {
+  const lines = range.periods.flatMap((period, index) => period.series.map((row) => {
+    const label = (index ? 'B' : 'A') + ' · ' + row.key + ': ';
+    const measured = row.value == null ? row.reason || 'Нет наблюдений' : fmt(row.value) + ' ' + range.unit;
+    return label + measured + ' (' + row.available + ' из ' + period.expected + ')';
+  }));
+  for (const change of range.differences || []) {
+    if (Number.isFinite(change.absolute))
+      lines.push('Изменение B относительно A · ' + change.key + ': ' + fmt(change.absolute) +
+        (range.unit === '%' ? ' п.п.' : ' ' + range.unit));
+  }
+  return [...lines, 'Причину изменения нужно отдельно сверить с релизами и исследованиями.'].join('\n');
+}
+
 export function researchIntent(q) {
   if (/^(?:что (?:такое|означает|значит)|как (?:посчитать|рассчитать))\s/iu.test(q.trim())) return {};
   const chart =
@@ -61,17 +76,22 @@ function frozenSources(db, view) {
   ];
   const rows = new Map(),
     releases = new Map();
-  for (const version of versions) {
-    const doc = db.prepare('SELECT body FROM documents WHERE version=?').get(version);
-    if (!doc) continue;
-    const { file, facts } = JSON.parse(doc.body);
+  const releaseVersions = new Set(view.releaseVersions || versions);
+  const metricVersions = new Set(versions);
+  const docs = db.prepare(`SELECT version,body FROM documents
+    WHERE version IN (SELECT value FROM json_each(?)) ORDER BY rowid`);
+  for (const {version, body} of docs.iterate(JSON.stringify([...new Set([...versions, ...releaseVersions])]))) {
+    const { file, facts } = JSON.parse(body);
     for (const f of facts) {
-      if (f.kind === 'releases' && f.row)
+      if (f.kind === 'releases' && f.row && releaseVersions.has(version))
         releases.set(f.row.release_id, { ...f.row, source: file + ' · ' + f.loc });
-      if (f.kind === 'metrics' && f.row) {
-        const r = f.row;
-        rows.set(JSON.stringify([r.date, r.product, r.segment, r.metric_id]), {
+      if (f.kind === 'metrics' && f.row && metricVersions.has(version)) {
+        const r = normalizeObservation(f.row, file);
+        if ((view.sourceId && view.sourceId !== r.source_id && view.sourceId !== r.combine_group) ||
+            (view.definitionId && view.definitionId !== r.definition_id)) continue;
+        rows.set(observationKey(r), {
           ...r,
+          selectedSource: view.sourceId,
           version,
           source: file + ' · ' + f.loc,
         });
@@ -81,40 +101,39 @@ function frozenSources(db, view) {
   return { rows: [...rows.values()], releases: [...releases.values()] };
 }
 
-function perDeviceRows(rows, metric, segment) {
-  const matching = rows.filter((r) => r.metric_id === metric[0]);
-  if (segment) return matching.filter((r) => r.segment === segment);
-  const totals = new Set(matching.filter((r) => r.segment === 'all').map((r) => r.date));
-  return matching.filter((r) => (totals.has(r.date) ? r.segment === 'all' : r.segment in devices));
-}
-
 function measure(rows, period, metric, segment) {
-  let n = 0,
-    d = 0;
-  const dates = new Set(),
-    sources = [];
-  for (const r of perDeviceRows(rows, metric, segment)) {
-    if (r.date < date(period.from) || r.date >= date(period.to)) continue;
-    const detail = r.details;
-    if (!Number.isFinite(detail[metric[2]]) || !Number.isFinite(detail[metric[3]])) continue;
-    n += detail[metric[2]];
-    d += detail[metric[3]];
-    dates.add(r.date);
-    sources.push(r.source);
-  }
+  const agg = aggregateMetric(rows, metric[0], { segment, from: date(period.from),
+    through: date(period.to - 1), sourceId: rows[0]?.selectedSource });
   return {
-    n,
-    d,
-    days: dates.size,
+    n: agg.n,
+    d: agg.d,
+    days: agg.d == null ? 0 : agg.dates.length * agg.stepDays,
     expected: (period.to - period.from) / DAY,
-    percent: d ? (100 * n) / d : null,
-    sources,
+    percent: agg.value,
+    reason: agg.reason,
+    sources: agg.selectedRows.map(r => r.source),
   };
+}
+function intervalRows(rows, metric, periods) {
+  return rows.filter(r => {
+    if (r.metric_id !== metric) return false;
+    const start = Date.parse(r.date), end = start + r.step_days * DAY;
+    return periods.some(p => start >= p.from && end <= p.to);
+  });
+}
+function measurePeriods(rows, periods, metric, segment) {
+  const scoped = intervalRows(rows, metric[0], periods);
+  const comparison = aggregateMetric(scoped, metric[0], {segment, sourceId: rows[0]?.selectedSource});
+  if (comparison.choices.length) {
+    return periods.map(p => ({days:0, expected:(p.to - p.from) / DAY, percent:null,
+      reason:comparison.reason, sources:[]}));
+  }
+  return periods.map(p => measure(rows, p, metric, segment));
 }
 const measured = (v) =>
   v.days
     ? (v.percent == null ? 'Нет знаменателя' : fmt(v.percent) + '%') + ' (' + v.n + '/' + v.d + ')'
-    : 'Нет наблюдений';
+    : v.reason || 'Нет наблюдений';
 const coverage = (v) => v.days + ' из ' + v.expected + ' дн.';
 
 function funnelSections(rows, periods, product) {
@@ -125,7 +144,7 @@ function funnelSections(rows, periods, product) {
     const table = [],
       sources = new Set();
     for (const key of [null, ...segmentKeys]) {
-      const values = periods.map((p) => measure(rows, p, metric, key));
+      const values = measurePeriods(rows, periods, metric, key);
       table.push([
         key ? devices[key] : 'Все устройства',
         ...values.map((v) => measured(v) + ' · ' + coverage(v)),
@@ -207,7 +226,7 @@ function funnelSections(rows, periods, product) {
     );
   const changes = segmentKeys
     .map((key) => {
-      const values = periods.map((p) => measure(rows, p, metrics[1], key));
+      const values = measurePeriods(rows, periods, metrics[1], key);
       return { key, values };
     })
     .filter((x) => x.values.length === 2 && x.values.every((v) => v.percent != null));
@@ -229,39 +248,26 @@ function funnelSections(rows, periods, product) {
 
 function funnelChart(db, user, b, rows, metric, periods, product, segment) {
   const byDate = new Map();
-  for (const r of perDeviceRows(rows, metric, segment)) {
-    if (!periods.some((p) => r.date >= date(p.from) && r.date < date(p.to))) continue;
-    const n = r.details[metric[2]],
-      d = r.details[metric[3]];
-    if (!Number.isFinite(n) || !Number.isFinite(d)) continue;
-    const p = byDate.get(r.date) || {
-      date: r.date,
-      n: 0,
-      d: 0,
-      sources: [],
-      versions: new Set(),
-      partial: false,
-    };
-    p.n += n;
-    p.d += d;
-    p.sources.push(r.source);
-    p.versions.add(r.version);
-    p.partial ||= /неполн/i.test(r.comment || '');
-    byDate.set(r.date, p);
+  const scoped = intervalRows(rows, metric[0], periods);
+  const limits = {segment, sourceId: rows[0]?.selectedSource};
+  const selected = aggregateMetric(scoped, metric[0], limits);
+  for (const r of selected.selectedRows) {
+    if (!byDate.has(r.date)) byDate.set(r.date, []);
+    byDate.get(r.date).push(r);
   }
   if (!byDate.size) return null;
-  const points = [...byDate.values()]
-    .sort((a, b) => a.date.localeCompare(b.date))
-    .map((p) => ({
-      date: p.date,
-      value: p.d ? p.n / p.d : null,
-      details: { [metric[2]]: p.n, [metric[3]]: p.d },
-      source: p.sources.join(', '),
-      version: [...p.versions][0],
-      partial: p.partial,
-    }));
+  const points = [...byDate.entries()].map(([date, group]) => {
+    const result = aggregateMetric(group, metric[0], limits);
+    const sources = group.map(({source, version}) => ({source, version}));
+    return {date, value:result.value == null ? null : result.value / 100,
+      numerator:result.n, denominator:result.d, reason:result.reason, combineMembers:result.combineMembers,
+      details:{[metric[2]]:result.n,[metric[3]]:result.d}, sources,
+      source:sources.map(r => r.source).join(', '), version:sources[0].version,
+      partial:group.some(r => r.partial || /неполн/i.test(r.comment || ''))};
+  });
+  if (!points.some(p => Number.isFinite(p.value))) return null;
   for (const p of periods)
-    for (const at of [p.from, p.to - DAY]) {
+    for (const at of selected.stepDays === 1 ? [p.from, p.to - DAY] : []) {
       if (!points.some((row) => row.date === date(at)))
         points.push({ date: date(at), value: null, details: {}, source: 'Нет наблюдений' });
     }
@@ -272,7 +278,9 @@ function funnelChart(db, user, b, rows, metric, periods, product, segment) {
     title: metric[1] + ' · ' + product + (segment ? ' · ' + devices[segment] : ''),
     product,
     segment: segment || 'Все устройства',
-    step: DAY,
+    step: DAY * selected.stepDays,
+    sourceId: selected.sourceId,
+    definitionId: selected.definitionId,
     unit: 'ratio',
     points,
     metricVersions: [...new Set(rows.map((r) => r.version))],
@@ -281,7 +289,7 @@ function funnelChart(db, user, b, rows, metric, periods, product, segment) {
     id = digest(raw);
   db.prepare('INSERT OR IGNORE INTO evidence_calcs VALUES(?,?)').run(id, raw);
   grant(db, id, 'thread', b.thread);
-  const values = periods.map((p) => measure(rows, p, metric));
+  const values = measurePeriods(rows, periods, metric, segment);
   return materialForResult(
     db,
     user,
@@ -302,7 +310,7 @@ export function prepareResearch(store, user, b, history, job, intent = researchI
   const shared = db.prepare('SELECT scope FROM conversations WHERE id=?').get(b.thread)?.scope === 'group';
   if (rangeId) access(db, user, rangeId, shared);
   const range = rangeId ? readRange(db, user, rangeId) : null;
-  const sourceId = range?.calcId || attached?.plot?.base?.calcId || attached?.contextCalc || b.screen?.calc;
+  let sourceId = range?.calcId || attached?.plot?.base?.calcId || attached?.contextCalc || b.screen?.calc;
   let view;
   if (sourceId) {
     if (range?.source === 'release' || attached?.plot?.base?.source === 'release') return null;
@@ -327,17 +335,19 @@ export function prepareResearch(store, user, b, history, job, intent = researchI
     priorProduct ||
     (sales.length === 1 && sales[0]);
   if (!product) return null;
-  if (!view) {
-    view = analysisView(db, { product, caseId: b.caseId });
+  if (!view || (b.analysisPeriod && !range && !attached && !b.screen?.requested)) {
+    view = analysisView(db, { product, caseId: b.caseId, full: b.screen?.full, ...b.analysisPeriod });
     grant(db, view.id, 'thread', b.thread);
+    sourceId = view.id;
   }
   const periods =
     range?.ranges ||
     attached?.ranges ||
     (view.base && view.pivot && view.cut
       ? [
-          { from: Date.parse(view.base), to: Date.parse(view.pivot) },
-          { from: Date.parse(view.pivot) + 7 * DAY, to: Date.parse(view.cut) + 7 * DAY },
+          { from: Date.parse(view.base), to: Math.min(Date.parse(view.pivot), Date.parse(view.cut) + DAY) },
+          { from: Math.max(Date.parse(view.base), Date.parse(view.pivot) + 7 * DAY),
+            to: Date.parse(view.cut) + (view.calendarPeriod ? DAY : 7 * DAY) },
         ].filter((p) => p.to > p.from)
       : view.points?.length
         ? [
@@ -367,7 +377,7 @@ export function prepareResearch(store, user, b, history, job, intent = researchI
     const frozen = frozenSources(db, view);
     const rows = frozen.rows
       .filter((r) => metrics.some((m) => m[0] === r.metric_id) || r.metric_id === 'cfg_step_dropoff')
-      .filter((r) => !view.full || !/неполн/i.test(r.comment || ''))
+      .filter((r) => !view.full || !r.partial && !/неполн/i.test(r.comment || ''))
       .map((r) => ({ ...r, details: JSON.parse(r.detail_json || '{}') }));
     const selectedSegment = /мобильн|телефон/i.test(b.question)
       ? 'mobile'
@@ -386,7 +396,7 @@ export function prepareResearch(store, user, b, history, job, intent = researchI
     findings.push(...f.findings);
     const earliest = periods.reduce((a, b) => (a.from < b.from ? a : b));
     const prior = { from: earliest.from - (earliest.to - earliest.from), to: earliest.from };
-    const preceding = measure(primary, prior, chartMetric, selectedSegment);
+    const [preceding] = measurePeriods(primary, [prior, ...periods], chartMetric, selectedSegment);
     sections.push({
       title: 'Предшествующий период · ' + chartMetric[1],
       text:
@@ -422,7 +432,7 @@ export function prepareResearch(store, user, b, history, job, intent = researchI
       sections.push({
         title: 'Сопоставимость с контролем · ' + peer,
         columns: ['Этап', 'Покрытие по периодам'],
-        rows: metrics.map((m) => [m[1], periods.map((p) => coverage(measure(other, p, m))).join(' / ')]),
+        rows: metrics.map((m) => [m[1], measurePeriods(other, periods, m).map(coverage).join(' / ')]),
       });
     }
   }

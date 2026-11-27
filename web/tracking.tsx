@@ -5,7 +5,7 @@ import { hiddenDemoPage, showConfluence, visibleTrackers } from './tracking-visi
 
 type Action = (fn: () => Promise<void>) => void;
 type Link = { key: string; url: string };
-type Hit = Link & { title: string };
+type Hit = Link & { title: string; origin?: 'ai-generated' | null };
 type Option = { id: string; name: string };
 type Options = { priorities: Option[]; assignees: Option[]; trackers: Option[] };
 type Task = Hit & {
@@ -25,11 +25,13 @@ export type Integration = {
   local?: boolean;
   url?: string;
   scope?: string;
+  originFieldId?: string;
   edition?: string;
   connected: boolean;
 };
 export type TrackerPreview = {
   id: string;
+  investigationId?: string;
   kind: 'issue' | 'page';
   caseId: string;
   state: string;
@@ -67,6 +69,7 @@ function TaskContents({ task }: { task: Task }) {
   return (
     <>
       <p>{[task.status, task.priority, task.assignee].filter(Boolean).join(' · ')}</p>
+      {task.origin && <p>Происхождение задачи · {task.origin}</p>}
       <p className="tracker-text">
         <Value text={task.description} />
       </p>
@@ -123,10 +126,12 @@ export function DemoObject({ id, service }: { id: string; service: string }) {
   );
 }
 export function PreviewCard({
+  anchor,
   item,
   action,
   reload,
 }: {
+  anchor?: string;
   item: TrackerPreview;
   action: Action;
   reload: () => Promise<void>;
@@ -136,7 +141,7 @@ export function PreviewCard({
   useEffect(() => setCurrent(item), [item]);
   const p = current;
   return (
-    <article className="excerpt tracker-preview">
+    <article className="excerpt tracker-preview" id={anchor} tabIndex={anchor ? -1 : undefined}>
       <small>
         {p.destination} · {p.kind === 'page' ? 'Страница' : 'Задача'} {p.key}
       </small>
@@ -151,7 +156,7 @@ export function PreviewCard({
               <PageContents page={p.latestPage} />
             </details>
           )}
-          {p.state === 'obsolete' && (
+          {p.state === 'obsolete' && p.kind === 'page' && (
             <form
               onSubmit={(e) => {
                 e.preventDefault();
@@ -191,7 +196,7 @@ export function PreviewCard({
       )}
       {p.state !== 'done' && p.reason && (
         <p role="status">
-          {p.receipt ? 'Страница сохранена. Обратная ссылка: ' : ''}
+          {p.receipt ? (p.kind === 'page' ? 'Страница сохранена. Обратная ссылка: ' : 'Задача сохранена. ') : ''}
           {p.reason}
         </p>
       )}
@@ -218,7 +223,7 @@ export function PreviewCard({
           {p.state === 'uncertain'
             ? 'Сверить результат'
             : p.receipt
-              ? 'Завершить связь'
+              ? p.kind === 'page' ? 'Завершить связь' : 'Сверить метку'
               : 'Подтвердить запись'}
         </button>
       )}
@@ -292,6 +297,7 @@ function Search({
   action: Action;
 }) {
   const [q, setQuery] = useState(query),
+    [generated, setGenerated] = useState(false),
     [hits, setHits] = useState<Hit[]>();
   return (
     <>
@@ -299,7 +305,7 @@ function Search({
         onSubmit={(e) => {
           e.preventDefault();
           action(async () =>
-            setHits((await post<{ items: Hit[] }>(service + '_search', { query: q })).items),
+            setHits((await post<{ items: Hit[] }>(service + '_search', { query: q, origin: service === 'issue' && generated ? 'ai-generated' : undefined })).items),
           );
         }}
       >
@@ -307,12 +313,13 @@ function Search({
           {service === 'issue' ? 'Поиск задач' : 'Поиск страниц'}
           <input value={q} onChange={(e) => setQuery(e.target.value)} />
         </label>
+        {service === 'issue' && <label><input type="checkbox" checked={generated} onChange={e => setGenerated(e.target.checked)} /> Только с меткой ai-generated</label>}
         <button>{service === 'issue' ? 'Найти похожие задачи' : 'Найти страницы'}</button>
       </form>
       {hits?.length === 0 && <p>Совпадений нет</p>}
       {hits?.map((h) => (
         <button key={h.key} onClick={() => action(() => onPick(h.key))}>
-          {h.key} · {h.title}
+          {h.key} · {h.title}{h.origin ? ' · ' + h.origin : ''}
         </button>
       ))}
     </>
@@ -564,7 +571,7 @@ export function Tracking({
       </div>}
       <p className="muted">{site.local ? 'Локальное демо' : site.scope + ' · ' + site.url}</p>
       {!site.local && !site.connected ? (
-        <a href="#settings">Подключить личный доступ</a>
+        <a href="#settings/personal">Подключить личный доступ</a>
       ) : tab === 'redmine' ? (
         <IssueForm
           caseId={caseId}
@@ -597,7 +604,7 @@ export function Tracking({
         </>
       )}
       {visibleDrafts.map((d) => (
-        <PreviewCard key={d.id} item={d} action={action} reload={reload} />
+        <PreviewCard key={d.id} anchor={'case-draft-' + d.id} item={d} action={action} reload={reload} />
       ))}
     </section>
   );
@@ -606,10 +613,12 @@ export function Connections({
   home,
   action,
   refresh,
+  scope,
 }: {
   home: Home;
   action: Action;
   refresh: () => Promise<void>;
+  scope: 'team' | 'personal';
 }) {
   const [notice, say] = useState('');
   if (home.user.role === 'judge')
@@ -621,7 +630,7 @@ export function Connections({
     );
   return (
     <section className="paper">
-      <h3>Подключения</h3>
+      <h3>{scope === 'team' ? 'Подключения команды' : 'Личные подключения'}</h3>
       {visibleTrackers.map((service) => {
         const site = home.integrations[service],
           name = service === 'redmine' ? 'Redmine' : 'Confluence';
@@ -647,7 +656,7 @@ export function Connections({
         return (
           <section key={service}>
             <h4>{name}</h4>
-            {home.user.role === 'admin' && (
+            {scope === 'team' && home.user.role === 'admin' && (
               <details>
                 <summary>Адрес и назначение команды</summary>
                 <form
@@ -669,6 +678,13 @@ export function Connections({
                     {service === 'redmine' ? 'Идентификатор проекта' : 'Ключ пространства'}
                     <input name="scope" defaultValue={site.scope} />
                   </label>
+                  {service === 'redmine' && (
+                    <label>
+                      ID поля «Происхождение задачи»
+                      <input name="originFieldId" inputMode="numeric" pattern="[1-9][0-9]*" defaultValue={site.originFieldId} />
+                      <small>Для задач ИИ включите поле-список со значением ai-generated в проекте и разрешите его использовать как фильтр.</small>
+                    </label>
+                  )}
                   {service === 'confluence' && (
                     <label>
                       Редакция
@@ -685,11 +701,11 @@ export function Connections({
             <p>
               {site.local
                 ? 'Локальное демо'
-                : site.scope +
-                  ' · ' +
-                  (site.connected ? 'Личный доступ подключён' : 'Требуется личный доступ')}
+                : scope === 'team'
+                  ? [site.url, site.scope].join(' · ')
+                  : site.scope + ' · ' + (site.connected ? 'Личный доступ подключён' : 'Требуется личный доступ')}
             </p>
-            {!site.local && (
+            {scope === 'personal' && !site.local && (
               <>
                 <form
                   onSubmit={(e) => {

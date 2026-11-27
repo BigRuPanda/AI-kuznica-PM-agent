@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { plain } from './tracker-clients.mjs';
+import { aiOrigin, plain, withAiNotice } from './tracker-clients.mjs';
 import { facts } from './evidence.mjs';
 
 export function initTrackerDemo(db) {
@@ -97,6 +97,7 @@ export function demoClient(db, user, service, caseId, sharedOnly = false) {
       description: i.description,
       priority: i.priority,
       priorityId: i.priority,
+      origin: null,
       comments: [],
       statusId: 'Новая',
       status: 'Новая',
@@ -110,20 +111,25 @@ export function demoClient(db, user, service, caseId, sharedOnly = false) {
   return {
     read,
     options: () => ({ priorities, assignees, trackers: [{ id: 'task', name: 'Задача' }] }),
-    search(q) {
+    search(q, _all = false, origin) {
+      const metadata = db.prepare('SELECT data FROM demo_issue_details WHERE key=?');
       return [...tasks().values()]
         .filter((i) => (i.title + ' ' + i.description + ' ' + i.key).toLowerCase().includes(q.toLowerCase()))
+        .map(i => ({...i, origin: JSON.parse(metadata.get(i.key)?.data || '{}').origin || null}))
+        .filter(i => !origin || i.origin === origin)
         .slice(0, 25)
-        .map((i) => ({ key: i.key, title: i.title, url: localHref(service, i.key) }));
+        .map((i) => ({ key: i.key, title: i.title, origin: i.origin, url: localHref(service, i.key) }));
     },
     save(key, changes, marker) {
       const old = key ? read(key) : { comments: [], priorityId: 'Normal', statusId: 'Новая', assigneeId: '' };
       key ||= 'DEMO-' + randomUUID();
       const next = { ...old, ...changes },
         comments = [...old.comments];
+      if (next.origin === aiOrigin) next.description = withAiNotice(next.description);
       if (changes.comment) comments.push({ author: user.name || 'Участник', text: changes.comment });
       const metadata = {
         comments,
+        origin: next.origin || null,
         markers: [...(old.markers || []), marker],
         status: next.statusId,
         statusId: next.statusId,
@@ -135,6 +141,12 @@ export function demoClient(db, user, service, caseId, sharedOnly = false) {
       ).run(key, next.title, next.description || '', next.priorityId, caseId || '', Date.now());
       db.prepare('INSERT OR REPLACE INTO demo_issue_details VALUES(?,?)').run(key, JSON.stringify(metadata));
       return { key, url: localHref(service, key) };
+    },
+    repairOrigin(issue) {
+      const details = JSON.parse(db.prepare('SELECT data FROM demo_issue_details WHERE key=?').get(issue.key).data);
+      details.origin = aiOrigin;
+      db.prepare('UPDATE local_issues SET description=? WHERE key=?').run(withAiNotice(issue.description), issue.key);
+      db.prepare('UPDATE demo_issue_details SET data=? WHERE key=?').run(JSON.stringify(details), issue.key);
     },
     recover(key, marker) {
       for (const i of tasks().values())

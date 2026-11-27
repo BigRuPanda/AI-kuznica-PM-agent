@@ -143,7 +143,7 @@ export function sourceSection(evidence = []) {
     rows: evidence.map((e) => [
       e.source,
       typeof e.data === 'string'
-        ? e.data
+        ? [e.data, e.metadata?.hypothesis && ('Гипотеза «' + e.metadata.hypothesis + '» · ' + e.metadata.relation)].filter(Boolean).join('\n')
         : e.data?.description || e.data?.title || e.data?.description_short || '',
     ]),
   };

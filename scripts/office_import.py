@@ -9,10 +9,20 @@ from datetime import datetime, timedelta
 from xml.etree import ElementTree as ET
 
 sys.stdout.reconfigure(encoding="utf-8")
+sys.stderr.reconfigure(encoding="utf-8")
 LIMIT = 100 * 1024 * 1024
 TABLES = {"Продажи": "sales", "Метрики_данные": "metrics", "Метрики_справочник": "dictionary",
           "Релизы": "releases", "Бэклог_задачи": "backlog"}
-EXCLUDE = {"README", "Эталонный_кейс", "Исследования", "Конкурентный_анализ"}
+EXCLUDE = {"README", "Эталонный_кейс", "Конкурентный_анализ"}
+OFFICIAL_INTERVIEWS = {"E-com ответы нап впоросы по когортам.xlsx", "Отток клиентов.xlsx", "Сервисные преимущества.xlsx"}
+EXCERPT_COLUMNS = {
+    "обезличенная выдержка": "excerpt", "anonymized_excerpt": "excerpt",
+    "вопрос": "question", "question": "question", "продукт": "product", "product": "product",
+    "дата": "date", "date": "date", "исходная книга": "sourceFile", "source_file":"sourceFile",
+    "ячейка источника": "sourceLoc", "source_location":"sourceLoc",
+    "проверяемая гипотеза":"hypothesis", "hypothesis":"hypothesis",
+    "связь с гипотезой":"relation", "relation":"relation",
+}
 THEMES = [
     ("Kaspersky", r"kaspersky|каспер"), ("Astra Linux", r"астра|astra linux"),
     ("покупка через менеджера", r"через менеджер|только менеджер"),
@@ -22,6 +32,40 @@ THEMES = [
     ("закрывающие документы", r"закрывающ.{0,10}документ"), ("повторная покупка", r"повторн.{0,15}(?:покуп|заказ)"),
     ("рекомендации", r"рекомендац"), ("лицензии", r"лицензи")]
 CONTACT = re.compile(r"[\w.+-]+@[\w.-]+|\+7[\s()\d-]{9,}|\bИНН\b", re.I)
+PRIVATE = re.compile(r"[\w.+-]+@[\w.-]+|(?:\+7|8)[\s()\d-]{9,}|\bИНН\s*[:№\d]|\b(?:\d{10}|\d{12})\b|https?://", re.I)
+
+def excerpt_row(cells, columns, title, n, epoch):
+    location = f"{title}!{columns['excerpt']}{n}"
+    row = {key: cells[col] for key, col in columns.items() if col in cells}
+    if not row.get("excerpt"):
+        return None
+    if not isinstance(row["excerpt"], str) or len(row["excerpt"]) > 3000:
+        raise ValueError("Укажите текст обезличенной выдержки до 3000 символов: " + location)
+    for key in ("excerpt","question","product","sourceFile","sourceLoc","hypothesis"):
+        if key in row:
+            row[key] = str(row[key]).strip()
+            if PRIVATE.search(row[key]):
+                raise ValueError("Обезличьте выдержку и её описание: " + location)
+    if not row["excerpt"]:
+        return None
+    relation = str(row.get("relation", "")).strip().lower() or "упоминание"
+    if relation not in ("упоминание", "подтверждает", "опровергает"):
+        raise ValueError("Укажите связь: упоминание, подтверждает или опровергает: " + location)
+    if relation != "упоминание" and not row.get("hypothesis"):
+        raise ValueError("Укажите проверяемую гипотезу для оценки свидетельства: " + location)
+    row["relation"] = relation
+    if bool(row.get("sourceFile")) != bool(row.get("sourceLoc")):
+        raise ValueError("Укажите исходную книгу и ячейку вместе: " + location)
+    if row.get("sourceLoc") and not re.fullmatch(r".{1,100}!\$?[A-Z]{1,3}\$?[1-9]\d{0,6}", row["sourceLoc"]):
+        raise ValueError("Ожидается адрес вида Лист!C3: " + location)
+    if row.get("date") is not None:
+        try:
+            value = str(normalize(row, epoch)["date"]).strip()
+            stamp = datetime.strptime(value, "%d.%m.%Y") if re.fullmatch(r"\d{1,2}\.\d{1,2}\.\d{4}", value) else datetime.fromisoformat(value)
+            row["date"] = stamp.date().isoformat()
+        except (ValueError, OverflowError):
+            raise ValueError("Проверьте дату исследования: " + location)
+    return {"kind":"interview","loc":location,"row":row}
 
 def read(z, key):
     if z.getinfo(key).file_size > LIMIT:
@@ -67,36 +111,49 @@ def sheet_rows(z, path, strings):
         if cells:
             yield int(re.search(rb'\br="(\d+)"',match[0].split(b">",1)[0])[1]), cells
 
-def normalize(row):
+def normalize(row, epoch):
     for k in ["date","week_start","created_date","closed_date","release_date"]:
         if isinstance(row.get(k), (int,float)):
-            row[k] = (datetime(1899,12,30)+timedelta(days=row[k])).date().isoformat()
+            row[k] = (epoch + timedelta(days=row[k])).date().isoformat()
     return row
 
 def book(z, name):
     strings = [text_nodes(item) for item in xml(z,"xl/sharedStrings.xml")] if "xl/sharedStrings.xml" in z.namelist() else []
-    sheets = xml(z,"xl/workbook.xml").findall(".//{*}sheet")
+    workbook = xml(z,"xl/workbook.xml")
+    props = workbook.find("{*}workbookPr")
+    epoch = datetime(1904, 1, 1) if props is not None and props.get("date1904") in ("1", "true") else datetime(1899, 12, 30)
+    sheets = workbook.findall(".//{*}sheet")
     relations = {r.get("Id"):r.get("Target") for r in xml(z,"xl/_rels/workbook.xml.rels")}
     official = any(s.get("name") in TABLES for s in sheets)
     competitor = any(s.get("name")=="0_Конкуренты_Продукты" for s in sheets) or "конкурент" in name.lower()
     facts = []
     for sheet in sheets:
         title=sheet.get("name")
-        if title in EXCLUDE or (official and title not in TABLES):
+        if title in EXCLUDE or (official and title not in TABLES and title != "Исследования"):
             continue
         rel=next(v for k,v in sheet.attrib.items() if k.endswith("}id"))
         target=relations[rel]
         path=target.lstrip("/") if target.startswith("/") else posixpath.normpath(posixpath.join("xl",target))
         headers={}
+        excerpt_cols = None
         for n,cells in sheet_rows(z,path,strings):
             if title in TABLES:
                 if not headers:
                     headers=cells
                     continue
-                row=normalize({key:cells.get(col) for col,key in headers.items()})
+                row=normalize({key:cells.get(col) for col,key in headers.items()}, epoch)
                 if not cells.get("A"):
                     continue
                 facts.append({"kind":TABLES[title],"loc":f"{title}!A{n}","row":row})
+            elif excerpt_cols is not None:
+                item = excerpt_row(cells, excerpt_cols, title, n, epoch)
+                if item:
+                    facts.append(item)
+            elif n <= 8 and "excerpt" in [EXCERPT_COLUMNS.get(str(v).strip().lower()) for v in cells.values()]:
+                excerpt_cols = {EXCERPT_COLUMNS[str(v).strip().lower()]:col for col,v in cells.items()
+                                if str(v).strip().lower() in EXCERPT_COLUMNS}
+            elif title == "Исследования":
+                continue
             elif competitor:
                 line=" · ".join(str(v)[:320] for v in cells.values())[:1600]
                 if not CONTACT.search(line):
@@ -117,7 +174,11 @@ def extract(data, name, depth=0):
         if len(z.infolist())>10000 or sum(f.file_size for f in z.infolist())>520*1024*1024:
             raise ValueError("Превышен лимит распаковки")
         if "xl/workbook.xml" in z.namelist():
-            return [{"file":name,"facts":book(z,name)}]
+            doc = {"file":name,"facts":book(z,name)}
+            leaf = posixpath.basename(name)
+            if leaf in OFFICIAL_INTERVIEWS and name != leaf:
+                doc["legacyInterviewFile"] = leaf
+            return [doc]
         if "ppt/presentation.xml" in z.namelist():
             facts=[]
             for p in z.namelist():
@@ -129,7 +190,8 @@ def extract(data, name, depth=0):
         out=[]
         for item in z.infolist():
             if item.filename.lower().endswith((".xlsx",".pptx",".zip")):
-                out.extend(extract(read(z,item.filename),posixpath.basename(item.filename),depth+1))
+                child_name = item.filename if depth == 0 else name + "/" + item.filename
+                out.extend(extract(read(z,item.filename),child_name,depth+1))
         if not out:
             raise ValueError("В файле нет поддерживаемых таблиц или презентаций")
         return out

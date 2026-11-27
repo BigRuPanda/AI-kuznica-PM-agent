@@ -1,5 +1,7 @@
 import { ReleaseAnalytics } from './app';
+import { MetrikaJournal } from './metrika-status';
 import { ChatTrackerPreview, Connections, DemoObject, Tracking } from './tracking';
+import type { TrackerPreview } from './tracking';
 import { hiddenDemoPage, visibleTrackerStep } from './tracking-visibility';
 import { RangeResult } from './range-result';
 import { rangeLabel, RangeChart, DAY } from './range-chart';
@@ -19,14 +21,22 @@ import {
 import React, { useState, useEffect, useLayoutEffect, useCallback, useRef } from 'react';
 import { createRoot } from 'react-dom/client';
 import { post, jump, num } from './team-data';
-import type { Home, User, Case, Detail, View, Msg, Thread } from './team-data';
+import type { Home, User, Case, Detail, View, Msg, Thread, InvestigationRun, RatioSelections } from './team-data';
+import { describeMeasurement, MeasurementFields, measurementPayload, metricName, WatchSummary } from './measurement';
+import { AgreedMeasurement, InvestigationMeasurement } from './investigation-measurement';
 import { Cards, initialCards, labels } from './work-cards';
+import { InterviewSearch } from './interview-search';
 import { Icon } from './icons';
 import { Dialog } from './dialog';
 import { ChatMenu } from './chat-menu';
 import type { ChatAction } from './chat-menu';
 import { ThemeSwitch } from './theme-switch';
+import { MetricRules } from './metric-rules';
+import { InvestigationSettings } from './investigation-settings';
+import { CaseInvestigation, InvestigationSnapshot, useCaseInvestigation } from './case-investigation';
+import type { InvestigationCalculation } from './case-investigation';
 import { caseHeading, changeLabel, signalBaseline, signalPeriod } from './case-periods';
+import { SignalEvidence } from './signal-evidence';
 import { Answer } from './answer';
 import { moveMenu, moveView } from './motion';
 import { styleFormValidation } from './form-validation';
@@ -133,14 +143,15 @@ function CaseList({ items }: { items: Case[] }) {
           <a key={c.id} href={'#case/' + c.id}>
             <div>
               <span className="state">{c.state}</span>
+              {c.body.signal?.status === 'withdrawn' && <span className="state">Сигнал отозван</span>}
               <h3>{c.title}</h3>
               <small>{c.body.signal?.week || c.product}</small>
             </div>
             <div className="case-value" data-negative={(c.body.signal?.change ?? 0) < 0}>
-              {c.body.signal?.rule === 'relative'
+              {c.body.signal?.status === 'withdrawn' ? '—' : c.body.signal?.rule === 'relative'
                 ? changeLabel(c.body.signal.change)
                 : c.body.signal
-                  ? num(c.body.signal.value) + ' п.'
+                  ? num(c.body.signal.value) + (c.body.signal.metric ? '%' : ' п.')
                   : <Icon name="arrow" />}
             </div>
           </a>
@@ -189,9 +200,9 @@ function CompletedChecks({ body }: { body: Msg['body'] }) {
 function Overview({ home, onAsk }: { home: Home; onAsk: () => void }) {
   const watching = home.cases.filter((c) => c.state === 'Наблюдаем эффект');
   const attention = home.cases
-    .filter((c) => (c.state === 'Исследуем' && c.body.signal) || c.state === 'Нужно решение')
+    .filter((c) => (c.state === 'Исследуем' && c.body.signal && c.body.signal.status !== 'withdrawn') || c.state === 'Нужно решение')
     .sort((a, b) => (b.body.signal?.week || '').localeCompare(a.body.signal?.week || ''));
-  const featured = attention.find((c) => c.body.signal);
+  const featured = attention.find((c) => c.body.signal && c.body.signal.status !== 'withdrawn');
   const signal = featured?.body.signal;
   const relative = signal?.rule === 'relative';
 
@@ -210,10 +221,11 @@ function Overview({ home, onAsk }: { home: Home; onAsk: () => void }) {
           <article className="signal-panel">
             <div className="signal-main">
               <span className="state">{featured.state}</span>
+              {signal.metric && signal.status === 'provisional' && <span className="state">Предварительный сигнал</span>}
               <h3>{caseHeading(featured)}</h3>
               <p className="signal-product">{featured.product}</p>
               <strong className="signal-metric">
-                {relative ? changeLabel(signal.change) : num(signal.value) + ' п.'}
+                {relative || signal.metric ? changeLabel(signal.change, signal.changeUnit) : num(signal.value) + ' п.'}
               </strong>
             </div>
             <div className="signal-comparison">
@@ -222,9 +234,9 @@ function Overview({ home, onAsk }: { home: Home; onAsk: () => void }) {
                   <dt>{relative ? '4 полные недели' : 'Неделя сигнала'}</dt>
                   <dd>{signalPeriod(signal)}</dd>
                 </div>
-                {relative && (
+                {(relative || signal.metric) && (
                   <div>
-                    <dt>Предыдущие 12 недель</dt>
+                    <dt>{signal.metric ? 'База до релиза' : 'Предыдущие 12 недель'}</dt>
                     <dd>{signalBaseline(signal)}</dd>
                   </div>
                 )}
@@ -1047,6 +1059,8 @@ function Investigation({
 }) {
   const [d, set] = useState<Detail | null>(null),
     [full, filter] = useState(false),
+    [period, setPeriod] = useState<{from?: string; through?: string}>({}),
+    [ratioSelections, selectRatio] = useState<RatioSelections>({}),
     [peer, control] = useState(''),
     [sourceQuery, findSources] = useState(''),
     [cards, layout] = useState(initialCards),
@@ -1059,18 +1073,20 @@ function Investigation({
     [selection, select] = useState<string[]>([]),
     [err, fail] = useState(''),
     [confirmation, confirm] = useState<'reset' | 'finish'>(),
-    [updating, setUpdating] = useState(false);
+    [updating, setUpdating] = useState(false),
+    [preparingSignalIssue, setPreparingSignalIssue] = useState(false),
+    [draftToFocus, setDraftToFocus] = useState('');
   const prefix = 'pm-view/' + home.user.id + '/' + id;
   const load = useCallback(
     async () =>
-      set(await post<Detail>('view', { caseId: id, full, control: peer || undefined, sourceQuery })),
-    [id, full, peer, sourceQuery],
+      set(await post<Detail>('view', { caseId: id, full, control: peer || undefined, sourceQuery, ratioSelections, ...period })),
+    [id, full, peer, sourceQuery, ratioSelections, period],
   );
   useEffect(() => {
     setUpdating(true);
     fail('');
     let valid = true;
-    post<Detail>('view', { caseId: id, full, control: peer || undefined, sourceQuery })
+    post<Detail>('view', { caseId: id, full, control: peer || undefined, sourceQuery, ratioSelections, ...period })
       .then((v) => {
         if (valid) {
           set(v);
@@ -1102,13 +1118,15 @@ function Investigation({
     return () => {
       valid = false;
     };
-  }, [id, full, peer, sourceQuery]);
+  }, [id, full, peer, sourceQuery, ratioSelections, period]);
   useEffect(() => {
     post<{ id: string }>('case-thread', { caseId: id })
       .then((r) => thread(r.id))
       .catch((e) => fail(e.message));
     try {
       const v = JSON.parse(localStorage.getItem(prefix) || '{}');
+      setPeriod(JSON.parse(localStorage.getItem(prefix + '/period') || '{}'));
+      selectRatio(JSON.parse(localStorage.getItem(prefix + '/metric-series') || '{}'));
       filter(!!v.full);
       findSources(v.sourceQuery || '');
       if (v.control) control(v.control);
@@ -1138,54 +1156,145 @@ function Investigation({
     [pinned, prefix],
   );
   const [mobileChat, chatMode] = useState(false);
+  const [editingMeasurement, editMeasurement] = useState(false);
   const taskTitle = useRef<HTMLHeadingElement>(null);
   const effectSection = useRef<HTMLDetailsElement>(null);
+  const research = useCaseInvestigation(id, d?.investigation);
+  const viewRunId = d?.investigation?.current?.id;
+  const liveRunId = research.investigation?.current?.id;
+  useEffect(() => {
+    if (liveRunId !== viewRunId) void load().catch(e => fail(e.message));
+  }, [viewRunId, liveRunId, load]);
+  useLayoutEffect(() => {
+    if (!draftToFocus) return;
+    document.getElementById('case-draft-' + draftToFocus)?.focus();
+    setDraftToFocus('');
+  }, [draftToFocus]);
   if (!d) return <p className={err ? 'error' : 'empty'} role={err ? 'alert' : 'status'}>{err || 'Загружаем разбор…'}</p>;
   const v = d.view,
     c = d.case;
+  const signal = c.body.signal;
+  const redmine = home.integrations.redmine;
   const watchNext = c.state === 'Наблюдаем эффект';
+  const specified = c.body.plan?.measurement;
+  const agreement = c.body.plan?.measurementAgreement;
+  const agreed = specified && agreement ? { measurement: specified, agreement } : undefined;
+  const activeMeasurement = c.body.watch?.measurement;
+  const signalMetric = signal?.metric;
+  const productSignal = !!signalMetric && ['lk_reco_ctr','cfg_completion_rate','cfg_reach_rate'].includes(signalMetric);
+  const agreementMetric = productSignal ? signalMetric : ['','orders_index','family_orders_idx','индекс заказов']
+    .includes(signalMetric?.trim().toLowerCase() || '') ? 'orders_index' : undefined;
+  const targetMetric = activeMeasurement?.metric || specified?.metric || signalMetric;
+  const needsSalesContext = !targetMetric || targetMetric === 'orders_index' || !!v.summary[0]?.rows.length;
+  const caseCards = cards.filter(key => key !== 'watch' && (needsSalesContext || !['summary', 'trend'].includes(key)));
+  const shareCards = v.monitoring ? [...caseCards, 'watch'] : caseCards;
+  const oldMetric = c.body.plan?.metric?.trim().toLowerCase();
+  const clarifyMetric = !!oldMetric && !['orders_index','family_orders_idx','индекс заказов'].includes(oldMetric);
   const completed = c.state === 'Завершено';
+  const withdrawn = signal?.status === 'withdrawn';
+  const needsReconfirmation = !!agreement && !c.body.watch &&
+    (withdrawn || agreement.signalRevision !== (signal?.revision ?? 0));
+  const showEffect = watchNext || (completed && !!v.monitoring);
+  const researchAvailable = !!research.investigation;
+  const readyRuns = [research.investigation?.current, ...(research.investigation?.alternatives || [])];
+  const planAccepted = d.drafts.some(draft => draft.state === 'done' &&
+    readyRuns.some(run => run?.status === 'ready' && run.id === draft.investigationId));
+  const scheduleEffect = !completed && !needsReconfirmation && planAccepted;
+  const measurementEditor = (run: InvestigationRun) => {
+    if (!signal || !agreementMetric || withdrawn || completed || c.body.watch || watchNext ||
+      run.revision !== (signal.revision ?? 0) || (specified && !agreement)) return undefined;
+    if (run.owner && !run.published && !(c.body.owner === home.user.id && run.owner === home.user.id && !run.parentId))
+      return undefined;
+    return <InvestigationMeasurement key={run.id} run={run} signal={signal} metric={agreementMetric} product={c.product}
+      recovery={home.rules.recovery} previous={agreed} reload={load} />;
+  };
+  const onDraft = async (draftId: string) => {
+    await load();
+    chatMode(false);
+    setDraftToFocus(draftId);
+  };
   const openShare = () => {
-    select(cards);
-    writeConclusion(v.summary.filter((s) => s.change != null).map((s) => s.product + ' ' + changeLabel(s.change)).join(' · '));
+    select(shareCards);
+    writeConclusion(v.monitoring?.result.state ||
+      v.summary.filter((s) => s.change != null).map((s) => s.product + ' ' + changeLabel(s.change)).join(' · '));
     show(true);
   };
   const openNext = () => {
     chatMode(false);
     requestAnimationFrame(() => {
-      if (watchNext && effectSection.current) effectSection.current.open = true;
-      const target = watchNext ? effectSection.current?.querySelector('summary') : taskTitle.current;
+      const effectNext = showEffect || scheduleEffect;
+      if (effectNext && effectSection.current) effectSection.current.open = true;
+      const target = effectNext ? effectSection.current?.querySelector('summary') : taskTitle.current;
       target?.focus();
     });
   };
+  const caseActions = <div className={researchAvailable ? 'actions investigation-tools' : 'actions'}>
+    {signal && !withdrawn && (redmine.local || redmine.connected) && (
+      <button disabled={updating || preparingSignalIssue} aria-busy={preparingSignalIssue} onClick={() =>
+        action(async () => {
+          setPreparingSignalIssue(true);
+          try {
+            const draft = await post<TrackerPreview>('signal-issue-draft', { caseId: id, revision: signal.revision });
+            await onDraft(draft.id);
+          } finally {
+            setPreparingSignalIssue(false);
+          }
+        })
+      }>Подготовить задачу по сигналу</button>
+    )}
+    {(researchAvailable || !completed) && <button onClick={openShare} disabled={updating}>Поделиться</button>}
+    {!researchAvailable && <button className="primary arrow-action" disabled={updating && completed} onClick={completed ? openShare : openNext}>
+      {completed ? 'Поделиться' : watchNext ? 'Проверить эффект' : 'К задаче'}
+      <Icon name="arrow" />
+    </button>}
+  </div>;
+  const signalDetails = <>
+    {signal?.metric && <details>
+      <summary>Данные и источники сигнала</summary>
+      <SignalEvidence signal={signal} />
+      {v.signal?.metric && <a href={'#snapshot/' + v.id + '/signal'}>Открыть сохранённый расчёт сигнала</a>}
+    </details>}
+    {!!d.signalHistory?.length && <details className="signal-history">
+      <summary>История сигнала</summary>
+      <ol>{d.signalHistory.map((r, index, history) => <li key={r.revision}>
+        <strong>{r.event === 'withdrawn' || r.status === 'withdrawn' ? 'Отозван'
+          : r.event === 'corrected' ? 'Уточнён'
+          : r.status === 'provisional' ? 'Предварительный'
+          : !r.event && history[index + 1]?.status === 'confirmed' ? 'Данные обновлены' : 'Подтверждён'}</strong>
+        {' · '}{r.created ? new Date(r.created).toLocaleString('ru-RU', { dateStyle: 'short', timeStyle: 'short' }) : 'До введения журнала'}
+        {' · неделя с '}{new Date(r.week + 'T00:00:00Z').toLocaleDateString('ru-RU', { timeZone: 'UTC' })}
+        {r.status !== 'withdrawn' && ' · ' + num(r.value) + (r.metric ? '%' : ' п. индекса')}
+        {r.imported.map(doc => <small key={doc.version} title={doc.version}>{doc.file} · {doc.version.slice(0,10)}</small>)}
+      </li>)}</ol>
+    </details>}
+  </>;
   return (
     <>
-      <a className="crumb" href="#cases">
-        ← Разборы
-      </a>
-      {c.body.origin && (
-        <p>
-          <a href={'#snapshot/' + c.body.origin.calc + '/' + (c.body.origin.cards || initialCards).join(',')}>
-            Исходный ответ и расчёт
-          </a>
-        </p>
-      )}
-      <div className="page-head investigation-head">
+      <a className="crumb" href="#cases">← Разборы</a>
+      <div className="page-head investigation-head" data-research={researchAvailable || undefined}>
         <div>
-          <small>
-            {c.product} · {c.body.owner ? 'Личный разбор' : 'Команда'}
-          </small>
-          <h1>{caseHeading(c)}</h1>
+          <small>{!c.title.toLocaleLowerCase('ru').includes(c.product.toLocaleLowerCase('ru')) && c.product + ' · '}
+            {c.body.owner ? 'Личный разбор' : 'Команда'}</small>
+          <h1>{c.title}</h1>
+          {signal && !withdrawn && !research.investigation?.current?.period && <p>
+            {[signal.releaseId, signalPeriod(signal), changeLabel(signal.change, signal.changeUnit)].filter(Boolean).join(' · ')}
+          </p>}
           <span className="state">{c.state}</span>
+          {signal?.metric && signal.status === 'provisional' && <span className="state">Предварительный сигнал</span>}
+          {withdrawn && <p role="status">Сигнал отозван после пересчёта данных. Разбор и сохранённые выводы доступны для проверки.</p>}
+          {!researchAvailable && signalDetails}
         </div>
-        <div className="actions">
-          {!completed && <button onClick={openShare} disabled={updating}>Поделиться</button>}
-          <button className="primary arrow-action" disabled={updating && completed} onClick={completed ? openShare : openNext}>
-            {completed ? 'Поделиться' : watchNext ? 'Проверить эффект' : 'К задаче'}
-            <Icon name="arrow" />
-          </button>
-        </div>
+        {!researchAvailable && caseActions}
       </div>
+      {research.investigation && <CaseInvestigation investigation={research.investigation} error={research.error}
+        refresh={research.refresh} userId={home.user.id} canExplore={!withdrawn && !completed}
+        canPublish={!withdrawn && !completed && !c.body.owner}
+        canDraft={!!(redmine.local || redmine.connected)} onDraft={draftId => action(() => onDraft(draftId))}
+        measurement={measurementEditor}
+        next={!withdrawn && (showEffect || scheduleEffect) ? {
+          label: showEffect ? 'Посмотреть результат проверки эффекта' : 'Назначить проверку эффекта', open: openNext,
+        } : undefined} />}
+      {researchAvailable && caseActions}
       {tid && (
         <button className="mobile-toggle" aria-expanded={mobileChat} onClick={() => moveView(() => chatMode(!mobileChat))}>
           <Icon name="down" /> {mobileChat ? 'К разбору' : 'Обсудить'}
@@ -1194,6 +1303,31 @@ function Investigation({
       <div className={'case-layout ' + (mobileChat ? 'show-chat' : '')}>
         <div className="case-main" aria-busy={updating}>
           {err && <p role="alert">{err}</p>}
+          {c.body.origin && <p>
+            <a href={'#snapshot/' + c.body.origin.calc + '/' + (c.body.origin.cards || initialCards).join(',')}>
+              Исходный ответ и расчёт
+            </a>
+          </p>}
+          {researchAvailable && (signal?.metric || !!d.signalHistory?.length) && <div className="paper investigation-signal-details">
+            {signalDetails}
+          </div>}
+          <details className="paper">
+            <summary>Период расчёта</summary>
+            <form key={id + '/' + (period.from || '') + '/' + (period.through || '')} onSubmit={e => {
+              e.preventDefault();
+              const fields = new FormData(e.currentTarget);
+              const from = String(fields.get('from') || '') || undefined;
+              const through = String(fields.get('through') || '') || undefined;
+              if (from && through && from > through) { fail('Начало периода должно быть не позже конца.'); return; }
+              const next = {from, through};
+              localStorage.setItem(prefix + '/period', JSON.stringify(next));
+              setPeriod(next);
+            }}>
+              <label>Начало периода<input type="date" name="from" defaultValue={period.from} /></label>
+              <label>Срез по дату включительно<input type="date" name="through" defaultValue={period.through} /></label>
+              <button>Применить период</button>
+            </form>
+          </details>
           <div className="toolbar">
             <label>
               <input
@@ -1206,7 +1340,7 @@ function Investigation({
               />{' '}
               Только полные недели
             </label>
-            <label>
+            {needsSalesContext && <label>
               Контроль{' '}
               <select value={peer || v.summary[1]?.product || ''} onChange={(e) => control(e.target.value)}>
                 {home.products
@@ -1215,18 +1349,24 @@ function Investigation({
                     <option key={p}>{p}</option>
                   ))}
               </select>
-            </label>
+            </label>}
             <button
               onClick={() => confirm('reset')}
             >
               Сбросить вид
             </button>
           </div>
+          <InterviewSearch caseId={id} asOf={v.requested?.through} key={id + '/' + (v.requested?.through || '')} />
           <Cards
             view={v}
-            cards={cards}
+            cards={caseCards}
             backlog={d.backlog}
             pinned={pinned}
+            onMetricSeries={(card, series) => {
+              const next = { ...ratioSelections, [card]: series };
+              localStorage.setItem(prefix + '/metric-series', JSON.stringify(next));
+              selectRatio(next);
+            }}
             onAttach={(a) => {
               attach(a);
               chatMode(true);
@@ -1241,10 +1381,11 @@ function Investigation({
               localStorage.setItem(prefix, JSON.stringify({ cards, full, pinned: next }));
             }}
           />
-          {c.body.plan?.hypothesis && (
+          {c.body.plan && (c.body.plan.hypothesis || (specified && !agreement)) && (
             <section className="paper">
               <h3>План до разработки</h3>
               <p>{c.body.plan.hypothesis}</p>
+              {specified && <p>{describeMeasurement(specified)}</p>}
               <small>
                 {[c.body.plan.metric, c.body.plan.baseline, c.body.plan.control, c.body.plan.success]
                   .filter(Boolean)
@@ -1274,20 +1415,24 @@ function Investigation({
           />
           <details className="paper effect-panel" ref={effectSection}>
             <summary>Проверка эффекта</summary>
-            <p>{d.effect?.state || 'Укажите дату выкладки и цель.'}</p>
-            {c.body.watch && d.effect && <dl className="comparison-dates">
-              <div><dt>Дата выкладки</dt><dd>{c.body.watch.deployed}</dd></div>
-              <div><dt>Окно наблюдения</dt><dd>{d.effect.start} — {d.effect.end}</dd></div>
-              <div><dt>Цель / факт, п. индекса</dt><dd>{num(c.body.watch.target)} / {num(d.effect.actual ?? null)}</dd></div>
-              <div><dt>Изменение контроля · {c.body.watch.control}</dt><dd>{changeLabel(d.effect.ctrl ?? null)}</dd></div>
-              <div><dt>Полные недели, продукт / контроль</dt><dd>{d.effect.weeks} / {d.effect.controlWeeks} из 4</dd></div>
-            </dl>}
-            <form
+            {v.monitoring ? <WatchSummary {...v.monitoring} /> : needsReconfirmation
+              ? <p role="status">Согласуйте критерий в актуальном исследовании перед назначением проверки.</p>
+              : <p>{agreed ? 'Укажите дату выкладки.' : 'Укажите дату выкладки и цель.'}</p>}
+            {!!c.body.watchHistory?.length && <details>
+              <summary>Прошлые проверки</summary>
+              <ul>{c.body.watchHistory.map(item => <li key={item.revision}>
+                <a href={'#snapshot/' + item.calc + '/watch'}>Версия {item.revision} · {item.deployed}</a>
+              </li>)}</ul>
+            </details>}
+            {!needsReconfirmation && <form
+              key={id + '/' + (c.body.watch?.revision || 0)}
               onSubmit={(e) => {
                 e.preventDefault();
-                const b = Object.fromEntries(new FormData(e.currentTarget));
+                const b = measurementPayload(e.currentTarget);
                 action(async () => {
-                  await post('watch', { ...b, caseId: id, control: v.summary[1]?.product });
+                  await post('watch', { ...b, caseId: id, agreementId: agreement?.id,
+                    control: !productSignal && !b.measurement && !specified && !activeMeasurement ? v.summary[1]?.product : undefined });
+                  editMeasurement(false);
                   await load();
                   await refresh();
                 });
@@ -1295,14 +1440,20 @@ function Investigation({
             >
               <label>
                 Дата выкладки
-                <input type="date" name="deployed" required />
+                <input type="date" name="deployed" defaultValue={c.body.watch?.deployed} required />
               </label>
-              <label>
-                Целевой процент от базы
-                <input name="percent" type="number" min="1" max="300" defaultValue="90" required />
-              </label>
-              <button>Назначить проверку</button>
-            </form>
+              {productSignal && !agreed && <p>{[metricName(signalMetric!), c.product, signal?.segment, signal?.sourceId].filter(Boolean).join(' · ')}</p>}
+              {agreed ? !v.monitoring && <AgreedMeasurement {...agreed} /> : specified || (activeMeasurement && !editingMeasurement) ? (
+                <p>{describeMeasurement(specified || activeMeasurement!)}</p>
+              ) : <MeasurementFields required={clarifyMetric || productSignal || editingMeasurement} initialMetric={oldMetric}
+                product={c.product} signal={productSignal ? signal : undefined} initial={activeMeasurement} legacyWatch={!productSignal} />}
+              <div className="actions">
+                <button>Назначить проверку</button>
+                {activeMeasurement && !specified && <button type="button" onClick={() => editMeasurement(value => !value)}>
+                  {editingMeasurement ? 'Отменить изменение' : 'Изменить критерий'}
+                </button>}
+              </div>
+            </form>}
             <button
               onClick={() => confirm('finish')}
               disabled={completed}
@@ -1376,7 +1527,7 @@ function Investigation({
             action={action}
             context={ctx}
             attachment={attachment}
-            screen={{ calc: v.id, full, control: peer || v.summary[1]?.product, cards }}
+              screen={{ calc: v.id, full, control: peer || v.summary[1]?.product, cards: caseCards }}
             clearContext={() => {
               ask('');
               attach(undefined);
@@ -1401,6 +1552,10 @@ function Investigation({
                     filter(false);
                     control('');
                     findSources('');
+                    localStorage.removeItem(prefix + '/period');
+                    setPeriod({});
+                    localStorage.removeItem(prefix + '/metric-series');
+                    selectRatio({});
                     pin([]);
                     localStorage.setItem(prefix, JSON.stringify({ cards: initialCards, full: false, pinned: [] }));
                     return;
@@ -1428,7 +1583,7 @@ function Investigation({
                 maxLength={1400}
               />
             </label>
-            {cards.map((k) => (
+            {shareCards.map((k) => (
               <label key={k}>
                 <input
                   type="checkbox"
@@ -1502,9 +1657,12 @@ function Sources({ home, action, refresh }: { home: Home; action: Action; refres
                 type="button"
                 onClick={() =>
                   action(async () => {
-                    const r = await post<{ inserted: number }>('metrika');
-                    say('Метрика ответила. Добавлено версий: ' + r.inserted);
-                    await refresh();
+                    try {
+                      const r = await post<{ inserted: number }>('metrika');
+                      say('Метрика ответила. Добавлено версий: ' + r.inserted);
+                    } finally {
+                      await refresh();
+                    }
                   })
                 }
               >
@@ -1514,6 +1672,7 @@ function Sources({ home, action, refresh }: { home: Home; action: Action; refres
           </form>
         </section>
       )}
+      {home.user.space === 'team' && <MetrikaJournal status={home.metrikaSync} />}
       <section className="paper">
         <h3>Загруженные материалы</h3>
         {home.sources.map((s) => (
@@ -1531,33 +1690,35 @@ function Sources({ home, action, refresh }: { home: Home; action: Action; refres
   );
 }
 
-function Settings({ home, action, refresh, menu, changeMenu }: {
+const deliveryState: Record<string, string> = {
+  queued:'В очереди', sending:'Отправляется', delivered:'Доставлено', distributed:'Разложено по получателям',
+  uncertain:'Доставка не подтверждена', review:'Требуется сверка', cancelled:'Отменено',
+};
+const deliveryChannel: Record<string, string> = { telegram:'Telegram',smtp:'Электронная почта' };
+
+function Settings({ home, action, refresh, menu, changeMenu, scope }: {
   home: Home;
   action: Action;
   refresh: () => Promise<void>;
   menu: MenuLayout;
   changeMenu: (layout: MenuLayout) => void;
+  scope: 'team' | 'personal';
 }) {
   const [notice, say] = useState('');
   const admin = home.user.role === 'admin';
   return (
     <>
       <div className="page-head">
-        <h1>Настройки команды</h1>
+        <h1>Настройки</h1>
       </div>
-      <Connections home={home} action={action} refresh={refresh} />
-      <section className="paper menu-preference" aria-labelledby="menu-preference-title">
-        <h3 id="menu-preference-title">Положение меню</h3>
-        <div className="actions menu-preference-options">
-          <button type="button" aria-pressed={menu !== 'top'} onClick={() => changeMenu('left')}>
-            <Icon name="panelLeft" />Слева
-          </button>
-          <button type="button" aria-pressed={menu === 'top'} onClick={() => changeMenu('top')}>
-            <Icon name="panelTop" />Сверху
-          </button>
-        </div>
-      </section>
-      {admin && (
+      <nav className="settings-scopes" aria-label="Разделы настроек">
+        <a href="#settings" aria-current={scope === 'team' ? 'page' : undefined}>Настройки команды</a>
+        <a href="#settings/personal" aria-current={scope === 'personal' ? 'page' : undefined}>Мои настройки</a>
+      </nav>
+      <InvestigationSettings scope={scope} admin={admin} />
+      <Connections home={home} action={action} refresh={refresh} scope={scope} />
+      {scope === 'team' && <MetricRules admin={admin} refresh={refresh}/>}
+      {scope === 'team' && admin && (
         <section className="paper">
           <h3>Правило уведомления</h3>
           <form
@@ -1577,17 +1738,25 @@ function Settings({ home, action, refresh, menu, changeMenu }: {
             </label>
             <button>Сохранить</button>
           </form>
-          {home.deliveries.map((r) => (
-            <p key={r.channel + r.state}>
-              {r.channel} · {r.state}: {r.n}
-            </p>
-          ))}
         </section>
       )}
-      <section className="paper">
-        <h3>Доступ</h3>
-        <div className="actions">
-          {admin && (
+      {scope === 'team' && admin && (
+        <section className="paper">
+          <h3>Доставка уведомлений</h3>
+          <p>Фоновые уведомления {home.notificationsEnabled ? 'включены' : 'выключены'}.</p>
+          {Object.entries(deliveryChannel).filter(([channel]) => !home.notificationChannels.includes(channel)).map(([channel,label]) =>
+            <p key={channel}>{label} · канал выключен</p>)}
+          {home.deliveries.length ? <dl>{home.deliveries.map(({channel,state,n}) => (
+            <div className="event-row" key={channel+'/'+state}>
+              <dt>{deliveryChannel[channel] || channel} · {deliveryState[state] || state}</dt>
+              <dd>{n.toLocaleString('ru-RU')}</dd>
+            </div>
+          ))}</dl> : <p>Записей о доставке пока нет.</p>}
+        </section>
+      )}
+      {scope === 'team' && admin && (
+        <section className="paper">
+          <h3>Участники команды</h3>
             <button
               onClick={() =>
                 action(async () => {
@@ -1598,7 +1767,23 @@ function Settings({ home, action, refresh, menu, changeMenu }: {
             >
               Пригласить участника
             </button>
-          )}
+        </section>
+      )}
+      {scope === 'personal' && <>
+        <section className="paper menu-preference" aria-labelledby="menu-preference-title">
+          <h3 id="menu-preference-title">Положение меню</h3>
+          <div className="actions menu-preference-options">
+            <button type="button" aria-pressed={menu !== 'top'} onClick={() => changeMenu('left')}>
+              <Icon name="panelLeft" />Слева
+            </button>
+            <button type="button" aria-pressed={menu === 'top'} onClick={() => changeMenu('top')}>
+              <Icon name="panelTop" />Сверху
+            </button>
+          </div>
+        </section>
+        <section className="paper">
+          <h3>Личный доступ</h3>
+          <div className="actions">
           <button
             onClick={() =>
               action(async () => {
@@ -1616,8 +1801,9 @@ function Settings({ home, action, refresh, menu, changeMenu }: {
               Привязать Telegram
             </button>
           )}
-        </div>
-      </section>
+          </div>
+        </section>
+      </>}
       {notice && (
         <p className="notice" role="status">
           {notice}
@@ -1637,14 +1823,14 @@ function Snapshot({
   embedded?: boolean;
   previewTitle?: string;
 }) {
-  const [v, set] = useState<View | null>(null),
+  const [v, set] = useState<View | InvestigationCalculation | null>(null),
     [err, fail] = useState(''),
     [open, setOpen] = useState(false);
   useEffect(() => {
     let active = true;
     set(null);
     fail('');
-    post<View>('calc', { id })
+    post<View | InvestigationCalculation>('calc', { id })
       .then((result) => {
         if (active) set(result);
       })
@@ -1655,6 +1841,7 @@ function Snapshot({
       active = false;
     };
   }, [id]);
+  if (v && 'findings' in v) return <InvestigationSnapshot calculation={v} selected={selected} embedded={embedded} />;
   const custom = v as unknown as {
     kind?: string;
     metric: string;
@@ -1875,7 +2062,8 @@ function Workspace({ user, onLogout }: { user: User; onLogout: () => void }) {
         ) : route === 'snapshot' ? (
           <Snapshot id={id} selected={selected} />
         ) : settings ? (
-          <Settings home={home} action={action} refresh={refresh} menu={menu} changeMenu={changeMenu} />
+          <Settings home={home} action={action} refresh={refresh} menu={menu} changeMenu={changeMenu}
+            scope={route === 'settings' && id === 'personal' ? 'personal' : 'team'} />
         ) : route === 'sources' ? (
           <Sources home={home} action={action} refresh={refresh} />
         ) : route === 'chats' ? (
@@ -1946,8 +2134,10 @@ function Workspace({ user, onLogout }: { user: User; onLogout: () => void }) {
                 className="paper"
                 onSubmit={(e) => {
                   e.preventDefault();
-                  const b = Object.fromEntries(new FormData(e.currentTarget));
+                  const b = measurementPayload(e.currentTarget);
                   action(async () => {
+                    if (!b.from) delete b.from;
+                    if (!b.through) delete b.through;
                     const r = await post<{ id: string }>('create-case', b);
                     newCase(false);
                     await refresh();
@@ -1979,26 +2169,13 @@ function Workspace({ user, onLogout }: { user: User; onLogout: () => void }) {
                 </label>
                 <details>
                   <summary>Гипотеза и критерии до разработки</summary>
+                  <label>Начало исследования<input type="date" name="from" /></label>
+                  <label>Срез исследования по дату<input type="date" name="through" /></label>
                   <label>
                     Гипотеза
                     <textarea name="hypothesis" />
                   </label>
-                  <label>
-                    Целевая метрика
-                    <input name="metric" />
-                  </label>
-                  <label>
-                    База сравнения
-                    <input name="baseline" />
-                  </label>
-                  <label>
-                    Контроль
-                    <input name="control" />
-                  </label>
-                  <label>
-                    Критерий успеха
-                    <input name="success" />
-                  </label>
+                  <MeasurementFields />
                 </details>
                 <button>Создать личный разбор</button>
               </form>

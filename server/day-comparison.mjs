@@ -130,6 +130,18 @@ function requestWindow(q, previous, today) {
 export function explicitDayWindow(question, now) {
   return requestWindow(question.toLowerCase(), null, moscowDate.format(now));
 }
+export function investigationPeriod(question, now) {
+  const q = question.toLowerCase();
+  const dates = explicitDates(q, moscowDate.format(now).slice(0, 4));
+  const valid = dates.every(d => Number.isFinite(Date.parse(d)) && iso(Date.parse(d)) === d);
+  if (!valid) return;
+  if (dates.length === 1 && /по состоянию на|на дату|срез (?:на|по)|известно (?:к|на)|на конец дня/u.test(q))
+    return { through: dates[0] };
+  if (dates.length === 2 && dates[0] <= dates[1] && !duration.test(q) &&
+      /ctr|кликабельност|охват|индекс|релиз|воронк|за период|в среднем|суммарн/iu.test(q) &&
+      /(?:^|\s)(?:за|с)\s+\d/u.test(q) && !/изменени|изменил|разниц|сравни|между дат|на сколько/u.test(q))
+    return { from: dates[0], through: dates[1] };
+}
 
 function namedMetric(q, definitions) {
   const code = q.match(/\b(?:cfg_|lk_|family_|orders_)[a-z_]+\b/i)?.[0];
@@ -202,6 +214,8 @@ function finish(group, from, to) {
     product: group.product,
     metric: group.metric,
     segment: group.segment,
+    sourceId: group.sourceId,
+    definitionId: group.definitionId,
     unit: group.unit,
     from,
     to,
@@ -318,15 +332,15 @@ export function dayComparison(db, user, b, history, shared, now) {
     chart.step === DAY &&
     chart.lines &&
     (b.rangeId || b.materialIds?.length || !segment || chart.lines.some((l) => l.key === segment));
-  const weekly =
-    metric &&
-    ((same(chart?.product) && metric === chart?.metric && chart.step > DAY) || metricStepDays(metric) > 1);
+  const matchingRows = raw.filter(f => same(f.data.product) && f.data.metric_id === metric);
+  const weekly = metric && (same(chart?.product) && metric === chart?.metric && chart.step ?
+    chart.step > DAY : matchingRows.length ? matchingRows.every(f => f.data.step_days > 1) : metricStepDays(metric) > 1);
   const target = metric && !weekly ? [metric] : alternatives;
   const groups = new Map();
-  function add(family, id, key, unit, date, value, partial, source, version, details) {
+  function add(family, id, key, unit, date, value, partial, source, version, details, sourceId, definitionId) {
     if (!target.includes(id) || (segment && key !== segment)) return;
-    const k = JSON.stringify([family, id, key]);
-    if (!groups.has(k)) groups.set(k, { product: family, metric: id, segment: key, unit, days: new Map() });
+    const k = JSON.stringify([family, id, key, sourceId, definitionId]);
+    if (!groups.has(k)) groups.set(k, { product: family, metric: id, segment: key, sourceId, definitionId, unit, days: new Map() });
     if (!partial && Number.isFinite(value)) groups.get(k).days.set(date, { value, source, version, details });
   }
   if (frozen) {
@@ -349,7 +363,7 @@ export function dayComparison(db, user, b, history, shared, now) {
   } else {
     for (const f of raw) {
       const r = f.data;
-      if (!same(r.product) || metricStepDays(r.metric_id) !== 1) continue;
+      if (!same(r.product) || (r.step_days || metricStepDays(r.metric_id)) !== 1) continue;
       add(
         r.product,
         r.metric_id,
@@ -361,6 +375,8 @@ export function dayComparison(db, user, b, history, shared, now) {
         f.file + ' · ' + f.loc,
         f.version,
         r.detail_json,
+        r.source_id,
+        r.definition_id,
       );
     }
   }
@@ -433,8 +449,9 @@ export function dayComparison(db, user, b, history, shared, now) {
   const columns = ['Показатель', 'Сегмент', from, to, 'Разница', 'Изменение к первому дню'];
   const value = (v, unit) => (v === null ? 'Нет данных' : fmt(v) + (unit === '%' ? '%' : ''));
   const multipleProducts = new Set(rows.map((r) => r.product)).size > 1;
+  const multipleSources = new Set(rows.map(r => r.sourceId)).size > 1;
   const table = rows.map((r) => [
-    label(r.metric) + (multipleProducts ? ' · ' + r.product : ''),
+    label(r.metric) + (multipleProducts ? ' · ' + r.product : '') + (multipleSources ? ' · ' + r.sourceId : ''),
     devices[r.segment] || r.segment,
     value(r.a, r.unit),
     value(r.b, r.unit),
@@ -467,7 +484,7 @@ export function dayComparison(db, user, b, history, shared, now) {
   const materials = [];
   if (rows.length && /график|динамик/i.test(q)) {
     for (const r of rows.filter((r) => r.delta !== null)) {
-      const group = groups.get(JSON.stringify([r.product, r.metric, r.segment]));
+      const group = groups.get(JSON.stringify([r.product, r.metric, r.segment, r.sourceId, r.definitionId]));
       const points = [...group.days]
         .filter(([d]) => d >= from && d <= to)
         .sort(([a], [b]) => a.localeCompare(b))
@@ -480,6 +497,8 @@ export function dayComparison(db, user, b, history, shared, now) {
         }));
       const snap = {
         kind: 'metric-chart',
+        sourceId: r.sourceId,
+        definitionId: r.definitionId,
         title: label(r.metric) + ' · ' + r.segment,
         product: r.product,
         metric: r.metric,

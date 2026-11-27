@@ -1,10 +1,12 @@
 import { readFile, writeFile } from 'node:fs/promises';
 import { loadEnvFile } from 'node:process';
+import { checkDestination as checkIntegrationDestination } from './server/data-profile.mjs';
 
 const configFile = new URL('.env', import.meta.url);
 const template = new URL('.env.example', import.meta.url);
 
 async function telegram(token, method, params = {}) {
+  checkIntegrationDestination(process.env, 'https://api.telegram.org');
   let response;
   try {
     response = await fetch(`https://api.telegram.org/bot${token}/${method}`, {

@@ -2,7 +2,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { z } from 'zod/v4';
 import { operations, workspaceOperation } from './workspace-operations.mjs';
-import { dashboard, visibleCase, enqueue } from './workbench.mjs';
+import { dashboard, enqueue } from './workbench.mjs';
 export function teamTools(server, store, user, env = process.env, send = fetch) {
   const db = store.db;
   function register(name, description, inputSchema, fn) {
@@ -15,19 +15,16 @@ export function teamTools(server, store, user, env = process.env, send = fetch) 
     });
   }
   for (const [name, [description, schema]] of Object.entries(operations))
-    register(name, description, schema, (b) => workspaceOperation(store, user, name, b, env, send));
+    register(name, description, schema, (b) => workspaceOperation(store, user, name, b, env, send, false, undefined, true));
   register('workspace_overview', 'Доступные разборы, источники и чаты', {}, () => dashboard(db, user));
   register('search_evidence', 'Найти источники с координатами', { query: z.string().max(400) }, (b) =>
     workspaceOperation(store, user, 'search', b),
   );
   register(
     'analyze_case',
-    'Получить проверяемый расчёт на той же версии, что в вебе',
-    { caseId: z.string(), full: z.boolean().optional() },
-    (b) => {
-      visibleCase(db, user, b.caseId);
-      return workspaceOperation(store, user, 'view', b).view;
-    },
+    'Получить проверяемый расчёт разбора, при необходимости за выбранный период',
+    { ...operations.view[1], caseId: operations.view[1].caseId.unwrap() },
+    (b) => workspaceOperation(store, user, 'view', b).view,
   );
   register(
     'ask_workspace',
@@ -55,7 +52,7 @@ export function teamTools(server, store, user, env = process.env, send = fetch) 
     'draft_issue',
     'Подготовить черновик для подтверждения в вебе',
     { caseId: z.string(), title: z.string(), description: z.string() },
-    (b) => workspaceOperation(store, user, 'draft', b, env, send),
+    (b) => workspaceOperation(store, user, 'draft', b, env, send, false, undefined, true),
   );
 }
 export async function remoteMcp(req, res, body, store, user, env, send) {

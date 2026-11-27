@@ -1,7 +1,8 @@
-import { readFile, mkdir, copyFile, access, writeFile } from 'node:fs/promises';
+import { readFile, mkdir, copyFile, access, writeFile, readdir, unlink } from 'node:fs/promises';
 import { basename, dirname, join, resolve } from 'node:path';
 import { DatabaseSync, backup } from 'node:sqlite';
 import { databasePath } from '../server/config.mjs';
+import { checkSmtp } from '../server/data-profile.mjs';
 import { openStore } from '../server/store.mjs';
 import { initEvidence, importDocs, cases, analysisView, setSetting, digest } from '../server/evidence.mjs';
 import { metrika, telegram, python, mail } from '../server/connectors.mjs';
@@ -11,7 +12,6 @@ const [op, file] = process.argv.slice(2),
   base = databasePath(),
   env = process.env;
 async function backupRestore() {
-  const { readdir } = await import('node:fs/promises');
   const dir = dirname(base),
     out = join(dir, 'backups', new Date().toISOString().replace(/[:.]/g, '-'));
   await mkdir(out, { recursive: true });
@@ -37,9 +37,11 @@ async function backupRestore() {
     } finally {
       db.close();
     }
-    const snapshot = new DatabaseSync(dest, { readOnly: true });
+    const snapshot = new DatabaseSync(dest);
     const restored = dest + '.restore-test';
     try {
+      // Keep the archive self-contained even when the live database uses WAL.
+      snapshot.exec('PRAGMA journal_mode=DELETE');
       await backup(snapshot, restored);
     } finally {
       snapshot.close();
@@ -51,7 +53,6 @@ async function backupRestore() {
     } finally {
       check.close();
     }
-    const { unlink } = await import('node:fs/promises');
     await unlink(restored);
     count++;
   }
@@ -114,10 +115,12 @@ async function main() {
     return;
   }
   if (op === 'check-smtp') {
+    checkSmtp(env);
     const config = Object.fromEntries(
       ['SMTP_HOST', 'SMTP_PORT', 'SMTP_TLS', 'SMTP_USER', 'SMTP_PASSWORD'].map((k) => [k, env[k] || '']),
     );
-    await python('mail_delivery.py', ['--check'], JSON.stringify(config));
+    await python('mail_delivery.py', ['--check'], JSON.stringify({ ...config, DATA_PROFILE:env.DATA_PROFILE,
+      LOCAL_SMTP_TARGET:env.LOCAL_SMTP_TARGET }));
     console.log('Соединение с SMTP подтверждено.');
     return;
   }

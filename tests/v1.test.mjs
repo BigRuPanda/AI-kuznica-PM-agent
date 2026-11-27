@@ -10,7 +10,46 @@ import {root} from '../server/config.mjs';
 import {application} from '../server/http.mjs';
 import {page,runTool} from '../server/analytics.mjs';
 import {geminiCall} from '../server/gemini.mjs';
-import {makeAgent} from '../server/agent.mjs';
+import {apiConfigured,makeAgent,providerCall} from '../server/agent.mjs';
+
+test('ProxyAPI uses its own key and endpoint across tool calls', async () => {
+  const env = {LLM_BACKEND:'proxyapi', LLM_MODEL:'qwen/qwen3.7-flash',
+    LLM_API_KEY:'old-provider-key', LLM_BASE_URL:'https://other.invalid/v1'};
+  const unexpected = () => assert.fail('Unexpected model request');
+  assert.equal(apiConfigured(env), false);
+  await assert.rejects(providerCall(env, [], [], 'auto', unexpected), /PROXYAPI_API_KEY/);
+  env.PROXYAPI_API_KEY = 'fixture-proxy-key';
+  assert.equal(apiConfigured(env), true);
+  await assert.rejects(providerCall({...env, DATA_PROFILE:'local'}, [], [], 'auto', unexpected), /локальная/);
+
+  const messages = [{role:'user', content:'Проверь число.'}];
+  const tool = {type:'function', function:{name:'check_value', parameters:{type:'object', properties:{}}}};
+  const choice = {type:'function', function:{name:'check_value'}};
+  const call = {id:'test-call', type:'function', function:{name:'check_value', arguments:'{}'}};
+  const send = async (url, init) => {
+    assert.equal(String(url), 'https://api.proxyapi.ru/v1/chat/completions');
+    assert.equal(init.headers.Authorization, 'Bearer fixture-proxy-key');
+    assert.equal(init.redirect, 'error');
+    const body = JSON.parse(init.body);
+    assert.equal(body.model, env.LLM_MODEL);
+    assert.deepEqual(body.tools, [tool]);
+    if (body.messages.length === 1) {
+      assert.deepEqual(body.tool_choice, choice);
+      return Response.json({choices:[{message:{role:'assistant', content:null, tool_calls:[call]}}]});
+    }
+    assert.equal(body.tool_choice, 'auto');
+    assert.deepEqual(body.messages.slice(1), [
+      {role:'assistant', content:null, tool_calls:[call]},
+      {role:'tool', tool_call_id:'test-call', content:'37'},
+    ]);
+    return Response.json({choices:[{message:{role:'assistant', content:'37'}}], usage:{prompt_tokens:9, completion_tokens:2}});
+  };
+  const first = await providerCall(env, messages, [tool], choice, send);
+  messages.push(first, {role:'tool', tool_call_id:first.tool_calls[0].id, content:'37'});
+  const final = await providerCall(env, messages, [tool], 'auto', send);
+  assert.equal(final.content, '37');
+  assert.deepEqual(final.usage, {input:9, output:2});
+});
 
 test('Gemini Developer API uses the selected URL and a server-side key header',async()=>{
   const env={LLM_BACKEND:'gemini',LLM_MODEL:'gemini-3.5-flash',LLM_API_KEY:'fixture-key'};

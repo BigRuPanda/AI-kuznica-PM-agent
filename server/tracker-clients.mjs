@@ -72,6 +72,13 @@ function client(send, label, base, headers) {
     });
 }
 const list = (rows = []) => rows.map((r) => ({ id: String(r.id), name: r.name }));
+export const aiOrigin = 'ai-generated';
+export const aiNotice = 'Сгенерирована ИИ-помощником.';
+export function withAiNotice(description = '') {
+  return description.split(/\r?\n/).includes(aiNotice)
+    ? description
+    : [description, aiNotice].filter(Boolean).join('\n\n');
+}
 export function redmine(target, token, send) {
   const call = client(send, 'Redmine', target.url, { 'X-Redmine-API-Key': token });
   const projectPath = '/projects/' + encodeURIComponent(target.scope);
@@ -79,11 +86,13 @@ export function redmine(target, token, send) {
     return (await call(projectPath + '.json?include=trackers')).project;
   }
   function item(i) {
+    const field = i.custom_fields?.find(f => String(f.id) === target.originFieldId);
     return {
       key: String(i.id),
       url: target.url + '/issues/' + numeric(i.id),
       title: i.subject,
       description: i.description || '',
+      origin: field?.value === aiOrigin ? aiOrigin : null,
       status: i.status?.name || '',
       priority: i.priority?.name || '',
       assignee: i.assigned_to?.name || '',
@@ -104,7 +113,11 @@ export function redmine(target, token, send) {
     if (String(issue.project.id) !== String(p.id)) throw Error('Задача другого проекта');
     return item(issue);
   }
-  async function search(query, all = false) {
+  function originField() {
+    if (!target.originFieldId) throw Error('Укажите ID фильтруемого поля происхождения задачи в настройках Redmine');
+    return Number(numeric(target.originFieldId));
+  }
+  async function search(query, all = false, origin) {
     const p = await project();
     const params = new URLSearchParams({
       project_id: String(p.id),
@@ -114,12 +127,16 @@ export function redmine(target, token, send) {
       sort: 'updated_on:desc',
     });
     const number = query.trim().match(/^#?([1-9]\d*)$/);
+    if (origin === aiOrigin) {
+      params.set('cf_' + originField(), aiOrigin);
+      params.set('status_id', '*');
+    }
     if (number) {
       params.set('issue_id', number[1]);
       params.set('status_id', '*');
     } else if (query.trim()) {
       const q = new URLSearchParams({ q: query, issues: '1', limit: '20' });
-      if (!all) q.set('open_issues', '1');
+      if (!all && !origin) q.set('open_issues', '1');
       const found = await call(projectPath + '/search.json?' + q);
       const ids = (found.results || [])
         .filter((r) => ['issue', 'issue-closed'].includes(r.type))
@@ -127,9 +144,12 @@ export function redmine(target, token, send) {
       if (!ids.length) return [];
       params.set('issue_id', ids.join(','));
     }
-    return (await call('/issues.json?' + params)).issues
+    const matches = (await call('/issues.json?' + params)).issues
       .filter((i) => String(i.project.id) === String(p.id))
       .map(item);
+    if (origin && matches.some(issue => issue.origin !== origin))
+      throw Error('Redmine вернул задачи без выбранной метки. Включите использование поля происхождения как фильтра.');
+    return matches;
   }
   return {
     async check() {
@@ -178,12 +198,23 @@ export function redmine(target, token, send) {
         return { key: String(key), url: target.url + '/issues/' + numeric(key) };
       }
       fields.project_id = (await project()).id;
-      fields.description = [fields.description, 'Сгенерирована ИИ-помощником.', marker]
+      if (changes.origin === aiOrigin) {
+        fields.custom_fields = [{id: originField(), value: aiOrigin}];
+        fields.description = withAiNotice(fields.description);
+      }
+      fields.description = [fields.description, marker]
         .filter(Boolean)
         .join('\n\n');
       beforeWrite?.();
       const { issue } = await call('/issues.json', 'POST', { issue: fields });
       return { key: numeric(issue.id), url: target.url + '/issues/' + numeric(issue.id) };
+    },
+    async repairOrigin(issue) {
+      const changes = {};
+      if (issue.origin !== aiOrigin) changes.custom_fields = [{id: originField(), value: aiOrigin}];
+      const description = withAiNotice(issue.description);
+      if (description !== issue.description) changes.description = description;
+      if (Object.keys(changes).length) await call('/issues/' + numeric(issue.key) + '.json', 'PUT', {issue: changes});
     },
     async recover(key, marker) {
       const matches = key ? [await read(key)] : await search(marker, true);

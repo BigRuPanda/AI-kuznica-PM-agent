@@ -105,7 +105,7 @@ function Releases({id,journal,author,generation,onForm}:{id:string;journal:Journ
     return()=>{clearInterval(t);document.removeEventListener('visibilitychange',check);};
   },[id]);
   useEffect(()=>{
-    if(!r||r.report||journal.mode==='offline'||r.cards[r.release.target].status!=='ready')return;
+    if(!r||r.report||['offline','local'].includes(journal.mode)||r.cards[r.release.target].status!=='ready')return;
     const key=r.context.version+'/'+r.context.day;if(initial.current.has(key))return;initial.current.add(key);
     api('initial',{...r.context,segment:'all'}).then(()=>{if(alive.current)rerun(n=>n+1);}).catch(e=>{if(alive.current)fail(e.message);});
   },[r,journal.mode]);
@@ -169,7 +169,7 @@ function Releases({id,journal,author,generation,onForm}:{id:string;journal:Journ
       {eligible.slice(historyStart).map((m,j)=><article key={j+historyStart} className={'msg '+m.role}><header><Avatar name={m.author} agent={m.role==='assistant'}/><strong>{m.author}</strong><time dateTime={new Date(m.created).toISOString()} title={new Date(m.created).toLocaleString('ru-RU',{timeZone:'Europe/Moscow'})+' МСК'}>{clock.format(m.created)}</time></header><div className="message-body"><Answer text={m.text} compact={m.role==='assistant'&&m.refs?.some(ref=>ref.op==='build_chart')}/>
       {m.refs?.filter(ref=>ref.op==='build_chart').map(ref=><SavedChart key={ref.id} id={ref.id} preview author={author} suggested={names} onSave={()=>void activity()}/>)}
       {m.refs?.filter(ref=>ref.op!=='build_chart').map(ref=><a className="ref" href={calcHref(ref.id)} key={ref.id}>{ref.title} ↗</a>)}<small className="message-context">{segmentNames[m.context.segment]} · срез на {rel?dayDate(rel.launch,m.context.day):''}</small></div></article>)}</div></div>
-      <footer className="chat-footer">{journal.mode==='offline'&&<p className="hint">Для ответа подключите модель в серверном .env.</p>}
+      <footer className="chat-footer">{journal.mode==='offline'&&<p className="hint">Для ответа подключите модель в серверном .env.</p>}{journal.mode==='local'&&<p className="hint">Локальный режим. В ответе доступны расчёт выбранной метрики и его источник.</p>}
       <button className="suggest" onClick={()=>{write('Сколько дней обычно проходит от выставления счёта до оплаты? Построй график медианы.');requestId.current='';chatBox.current?.focus();}}>Исследовать скорость оплаты</button>
       <form className="composer" onSubmit={ask}><small>{busy?'Агент проверяет данные…':metricNames[viewMetric]+' · '+segmentNames[seg]}</small><div className="compose-field"><input ref={chatBox} aria-label="Спросить агента" required maxLength={1500} value={question} placeholder="Спросить агента…" onChange={e=>{write(e.target.value);requestId.current='';}}/>
       <button className="primary send" aria-label="Отправить вопрос" title="Отправить вопрос" disabled={!r||busy||!question.trim()}><Icon name="send"/></button></div></form></footer></div>

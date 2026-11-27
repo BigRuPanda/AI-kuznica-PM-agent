@@ -16,11 +16,12 @@ import {
 } from '../server/tracker-connections.mjs';
 import { confluence } from '../server/tracker-clients.mjs';
 import { initTracking, revisePage } from '../server/tracker-workflow.mjs';
+import { teamTools } from '../server/team-mcp.mjs';
 
 const owner = { id: 'one', role: 'admin', name: 'Автор' },
   peer = { id: 'two', role: 'member', name: 'Коллега' };
 const config = {
-  redmine: { service: 'redmine', url: 'https://bugs.test/pm', scope: 'store' },
+  redmine: { service: 'redmine', url: 'https://bugs.test/pm', scope: 'store', originFieldId: '17' },
   confluence: { service: 'confluence', url: 'https://kb.test/wiki', scope: 'TEAM', edition: 'dc' },
 };
 const macro =
@@ -60,7 +61,10 @@ function siteMock() {
       return json({ memberships: [{ user: { id: 5, name: 'Автор' } }], total_count: 1 });
     if (p.endsWith('/search.json'))
       return json({ results: remote.issues.map((i) => ({ type: 'issue', id: i.id })) });
-    if (p === '/pm/issues.json' && method === 'GET') return json({ issues: remote.issues });
+    if (p === '/pm/issues.json' && method === 'GET') {
+      const origin = !remote.ignoreFilter && u.searchParams.get('cf_17');
+      return json({ issues: remote.issues.filter(i => !origin || i.custom_fields?.some(f => f.id === 17 && f.value === origin)) });
+    }
     if (p === '/pm/issues.json' && method === 'POST') {
       assert.equal(b.issue.project_id, 7);
       const issue = {
@@ -68,6 +72,7 @@ function siteMock() {
         project: { id: 7 },
         subject: b.issue.subject,
         description: b.issue.description,
+        custom_fields: remote.ignoreOrigin ? [] : (b.issue.custom_fields || []),
         journals: [],
         allowed_statuses: [{ id: 2, name: 'В работе' }],
         priority: { id: 4, name: 'Высокий' },
@@ -80,10 +85,12 @@ function siteMock() {
       if (!issue) return status(404);
       if (auth === 'peer-key') return status(403);
       if (method === 'GET') return json({ issue });
-      if (remote.denyLink && b.issue.notes.includes('Confluence')) return status(403);
+      if (remote.denyLink && b.issue.notes?.includes('Confluence')) return status(403);
       if (b.issue.subject) issue.subject = b.issue.subject;
+      if (b.issue.description !== undefined) issue.description = b.issue.description;
+      if (b.issue.custom_fields && !remote.ignoreOrigin) issue.custom_fields = b.issue.custom_fields;
       if (b.issue.status_id) issue.status = { id: b.issue.status_id, name: 'В работе' };
-      issue.journals.push({ user: { name: 'Автор' }, notes: b.issue.notes });
+      if (b.issue.notes) issue.journals.push({ user: { name: 'Автор' }, notes: b.issue.notes });
       return committed('comment', new Response(''));
     }
     if (p.endsWith('/rest/api/space/TEAM')) return json({ id: 9, key: 'TEAM' });
@@ -228,6 +235,94 @@ test('Redmine personal identity, project checks, choices, uncertain create and j
   } finally {
     store.close();
   }
+});
+
+test('assistant-created Redmine and demo issues get a filterable origin, human edits retain authorship', async () => {
+  for (const external of [false, true]) {
+    const store = dbAt(), m = siteMock(), s = scenario(store, m);
+    try {
+      if (external) await s.connect('redmine');
+      const mcp = new Map();
+      teamTools({registerTool(name, _schema, fn) { mcp.set(name, fn); }}, store, owner, s.env, m.send);
+      const gen = async input => {
+        const r = await mcp.get('draft')({caseId:s.caseId, ...input});
+        assert.ok(!r.isError, r.content[0].text);
+        return JSON.parse(r.content[0].text);
+      };
+      const pending = await gen({title:'Проверка',description:'Сверить продажи.'});
+      assert.ok(pending.diff.some(d => d.field === 'Происхождение задачи' && d.after === 'ai-generated'));
+      const created = await s.confirm(pending);
+      const manual = await s.confirm(await s.draft('draft', {title:'Ручная проверка',description:'Сгенерирована ИИ-помощником.'}));
+      await s.confirm(await gen({key:manual.key,comment:'Комментарий помощника'}));
+      await s.confirm(await s.draft('draft', {key:created.key,description:'Уточнённое описание'}));
+      const result = await s.run('issue_read',{key:created.key});
+      assert.equal(result.origin,'ai-generated');
+      assert.match(result.description,/Уточнённое описание[\s\S]+Сгенерирована ИИ-помощником\./);
+      assert.equal((await s.run('issue_read',{key:manual.key})).origin,null);
+      const hits = await s.run('issue_search',{query:'',origin:'ai-generated'});
+      assert.deepEqual(hits.items.map(i=>i.key),[created.key]);
+      if (external) {
+        assert.ok(m.calls.some(c=>c.q.get('cf_17') === 'ai-generated'));
+        m.ignoreFilter = true;
+        await assert.rejects(s.run('issue_search',{query:'',origin:'ai-generated'}),/использование поля/);
+      }
+    } finally { store.close(); }
+  }
+});
+
+test('the signal draft is scoped to the participant and the current signal revision', async () => {
+  const store = dbAt(), s = scenario(store, siteMock());
+  try {
+    const { caseId } = s;
+    const op = (data = {}, user = owner) => s.run('signal-issue-draft', { caseId, ...data }, user);
+    const saveSignal = (signal) => store.db.prepare("UPDATE cases SET body=json_set(body,'$.signal',json(?)) WHERE id=?")
+      .run(JSON.stringify(signal), caseId);
+    const signal = {
+      revision: 3, status: 'confirmed', metric: 'lk_reco_ctr', releaseId: 'release-1', segment: 'desktop',
+      week: '2026-11-02', n: 3, d: 100, value: 3, change: -62.5,
+    };
+    assert.throws(() => op(), /нет действующего сигнала/);
+    saveSignal(signal);
+    assert.throws(() => op({}, peer), /Разбор недоступен/);
+    store.db.prepare("UPDATE cases SET body=json_remove(body,'$.owner') WHERE id=?").run(caseId);
+    const [first, repeated, otherUser] = await Promise.all([op(), op({ revision: 3 }), op({}, peer)]);
+    assert.equal(first.id, repeated.id);
+    assert.notEqual(first.id, otherUser.id);
+    assert.match(first.description, /3 \/ 100 = 3%/);
+    assert.throws(() => op({ title: 'Подмена заголовка' }), /Unrecognized key/);
+    saveSignal({ ...signal, revision: 4, n: 4, value: 4, change: -50 });
+    assert.throws(() => op({ revision: 3 }), /Сигнал изменился/);
+    const next = await op();
+    assert.notEqual(next.id, first.id);
+    assert.match(next.description, /4 \/ 100 = 4%/);
+    saveSignal({ ...signal, revision: 5, status: 'withdrawn' });
+    assert.throws(() => op(), /нет действующего сигнала/);
+    assert.equal(store.db.prepare('SELECT COUNT(*) n FROM draft_actions WHERE case_id=?').get(caseId).n, 3);
+  } finally { store.close(); }
+});
+
+test('unverified Redmine origin keeps the created ID and repairs one issue after a restart', async () => {
+  const store = dbAt(), m = siteMock(), s = scenario(store, m);
+  try {
+    await s.connect('redmine');
+    const d = await workspaceOperation(store,owner,'draft',{caseId:s.caseId,title:'Проверить'},s.env,m.send,false,undefined,true);
+    m.ignoreOrigin = true;
+    m.drop = 'issue';
+    await assert.rejects(s.confirm(d),/Таймаут/);
+    const incomplete = await s.confirm(d);
+    assert.equal(incomplete.state,'partial');
+    assert.equal(incomplete.key,'1');
+    initWorkbench(store.db);
+    m.ignoreOrigin = false;
+    configure(store.db, owner, {...config.redmine, originFieldId:'28'});
+    const done = await s.confirm(d);
+    assert.equal(done.state,'done');
+    assert.equal((await s.confirm(d)).key,incomplete.key);
+    assert.equal((await s.run('issue_read',{key:done.key})).origin,'ai-generated');
+    assert.equal(m.calls.filter(c=>c.method==='POST' && c.p.endsWith('/issues.json')).length,1);
+    assert.equal(m.calls.filter(c=>c.method==='PUT' && c.b.issue.custom_fields).length,1);
+    assert.deepEqual(m.issues[0].custom_fields,[{id:28,value:'ai-generated'}]);
+  } finally { store.close(); }
 });
 
 test('Data Center page recovery, concurrent confirms, partial backlink and changed storage version', async () => {

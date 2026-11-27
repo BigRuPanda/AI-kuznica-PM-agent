@@ -1,17 +1,21 @@
 import { randomUUID } from 'node:crypto';
+import { signalHistory } from './signal-history.mjs';
+import { readInvestigations, requireActionableRun, syncInvestigations } from './case-investigations.mjs';
 import { z } from 'zod/v4';
 import {
   analysisView,
   cases,
   effect,
+  createMeasurementAgreement,
+  createMeasurementWatch,
   search,
+  caseEvidenceSearch,
   facts,
-  metricStepDays,
-  rankBacklog,
   updateCase,
   setting,
   defaultRules,
   digest,
+  fmt,
 } from './evidence.mjs';
 import { visibleCase, dashboard, thread, cardTypes } from './workbench.mjs';
 import { access, grant, readSnapshot, readRange, compareRanges, neighboring } from './chart-ranges.mjs';
@@ -20,6 +24,8 @@ import { trackerClient, prepareTracker, confirmTracker, preview, publicPage, cas
 import { runTool } from './analytics.mjs';
 import { prepareResearch, researchContext } from './agent-research.mjs';
 import { saveMaterial } from './materials.mjs';
+import { aggregateMetric, describeMetricSeries, observationWithin } from './metric-observations.mjs';
+import { measurementSpec, measuredSignal, legacyOrderMetric, startMeasurementWatch } from './watch-measurement.mjs';
 
 const text = z.string().min(1).max(2400),
   id = z.string().min(1).max(150),
@@ -36,6 +42,8 @@ const ref = z.object({
     .max(2),
 });
 const caseInput = { caseId: id };
+const signalIssueInput = z.strictObject({ ...caseInput, revision: z.number().int().nonnegative().optional() });
+const metricSeriesInput = z.object({ product: id, segment: id, sourceId: id, definitionId: id });
 const viewInput = {
   caseId: id.optional(),
   product: optional,
@@ -45,16 +53,37 @@ const viewInput = {
   from: optional,
   through: optional,
   releaseWeek: optional,
+  ratioSelections: z.object({ ctr: metricSeriesInput.optional(), reach: metricSeriesInput.optional() }).optional(),
 };
+const measurement = z.object({
+  metric: z.enum(['orders_index', 'lk_reco_ctr', 'cfg_completion_rate', 'cfg_reach_rate']),
+  product: optional,
+  segment: optional,
+  sourceId: optional,
+  definitionId: optional,
+  control: optional,
+  controlSegment: optional,
+  controlSourceId: optional,
+  controlDefinitionId: optional,
+  baselineFrom: optional,
+  baselineThrough: optional,
+  comparison: z.enum(['gte', 'lte']),
+  targetMode: z.enum(['absolute', 'baseline_percent']),
+  targetValue: z.number().finite().nonnegative(),
+  minDenominator: z.number().int().positive().optional(),
+});
 const createInput = {
   title: text,
   product: text,
+  from: z.iso.date().optional(),
+  through: z.iso.date().optional(),
   release: optional,
   hypothesis: optional,
   metric: optional,
   baseline: optional,
   control: optional,
   success: optional,
+  measurement: measurement.optional(),
   message: z.number().int().optional(),
 };
 const issueInput = {
@@ -80,9 +109,17 @@ const publishInput = {
 const watchInput = {
   caseId: id,
   deployed: z.string(),
-  percent: z.coerce.number().positive().max(300),
+  percent: z.coerce.number().positive().max(300).optional(),
   control: optional,
+  measurement: measurement.optional(),
+  agreementId: id.optional(),
 };
+const agreementInput = z.strictObject({
+  caseId: id,
+  runId: id,
+  expectedAgreementId: id.nullable(),
+  measurement,
+});
 export const operations = {
   funnel: [
     'Рассчитать по счётчикам этапы подбора, завершение и корзину, проверить сегменты и покрытие. Используй для вопросов о пути покупки. В чате thread и rangeId подставит сервер.',
@@ -96,7 +133,7 @@ export const operations = {
   ],
   overview: ['Найти активные сигналы, разборы и беседы команды', {}],
   metrics: ['Список доступных семейств, метрик и разрезов', {}],
-  view: ['Посчитать недельный индекс и контроль, открыть разбор, проверить соседние периоды', viewInput],
+  view: ['Посчитать недельный индекс и контроль, открыть разбор, проверить соседние периоды. Если у карточки CTR или охвата есть варианты, передай выбранный ряд в ratioSelections.ctr или ratioSelections.reach.', viewInput],
   calc: ['Открыть точную историческую версию недельного расчёта', { id }],
   range_compare: ['Рассчитать A и B по закреплённому графику', { selection: ref }],
   range_read: ['Открыть сохранённые интервалы и точные значения. Используй для вопроса о выделении.', { id }],
@@ -108,11 +145,13 @@ export const operations = {
     'Найти подтверждения и альтернативы в интервью, релизах, исследованиях, бэклоге',
     {
       query: text,
+      caseId: id.optional(),
+      asOf: optional,
       kinds: z.array(z.enum(['interview', 'competitor', 'backlog', 'releases', 'dictionary'])).optional(),
     },
   ],
   case_links: ['Доступные участнику задачи и страницы этого разбора', { caseId: id }],
-  issue_search: ['Найти задачи в проекте Redmine', { query: z.string().max(400) }],
+  issue_search: ['Найти задачи в проекте Redmine, при необходимости по метке происхождения', { query: z.string().max(400), origin: z.literal('ai-generated').optional() }],
   issue_read: [
     'Прочитать задачу с комментариями и разрешёнными переходами',
     { key: id, local: z.boolean().optional() },
@@ -132,15 +171,20 @@ export const operations = {
       baseVersion: z.number().int().positive().optional(),
     },
   ],
-  'create-case': ['Создать личный разбор по явному поручению', createInput],
+  'create-case': ['Создать личный разбор по явному поручению. Сохрани заданную цель в measurement. Для CTR ≥ 5% передай lk_reco_ctr, gte, absolute и targetValue 5.', createInput],
   append_case: [
     'Дополнить разбор выводом и ссылкой на доказательство',
     { ...caseInput, note: text, rangeId: id.optional() },
   ],
   chart: [
-    'Построить график. Для агрегатов скопируй сочетание metric, product, segment из metrics. Для недельного индекса заказов используй orders_index и семейство продукта. Параметры field и stat относятся к архивному releaseId.',
+    'Построить график. Для агрегатов скопируй metric, product, segment, sourceId, definitionId из каталога metrics. Для недельного индекса заказов используй orders_index и семейство продукта. Параметры field и stat относятся к архивному releaseId.',
     {
       metric: optional,
+      from: optional,
+      through: optional,
+      full: z.boolean().optional(),
+      sourceId: optional,
+      definitionId: optional,
       product: optional,
       segment: optional,
       releaseId: id.optional(),
@@ -172,7 +216,7 @@ export const operations = {
     'Сохранить явно высказанную поправку к источнику',
     { ...caseInput, source: text, comment: text },
   ],
-  watch: ['Назначить наблюдение по подтверждённой дате выкладки и цели', watchInput],
+  watch: ['Назначить наблюдение на четыре полные недели с подтверждённой даты выкладки. Для цели из плана передай дату. Для нового критерия передай measurement. Число 5 для абсолютной цели CTR означает 5%.', watchInput],
   decide: [
     'Изменить статус разбора по просьбе пользователя',
     { ...caseInput, state: z.enum(['Исследуем', 'Нужно решение', 'Завершено']) },
@@ -189,12 +233,20 @@ export const writes = new Set([
   'watch',
   'decide',
 ]);
+function checkPublicationCalculation(db, user, id, product) {
+  const snapshot = readSnapshot(db, user, id);
+  if (snapshot.kind === 'investigation-calculation')
+    throw Error('Опубликуйте выбранную версию исследования из самого разбора.');
+  if (snapshot.product !== product) throw Error('Расчёт другого продукта');
+}
+
 function commitPublication(store, user, key, data) {
   const db = store.db,
     c = visibleCase(db, user, data.caseId);
-  if (data.calc) access(db, user, data.calc);
+  if (data.calc) checkPublicationCalculation(db, user, data.calc, c.product);
   if (data.rangeId) access(db, user, data.rangeId);
   if (!db.prepare('SELECT id FROM published WHERE id=?').get(key)) {
+    if (c.body.owner) syncInvestigations(db, c.id);
     delete c.body.owner;
     updateCase(db, c);
     db.prepare('INSERT INTO published VALUES(?,?,?,?,?)').run(
@@ -220,8 +272,14 @@ function commitPublication(store, user, key, data) {
 function metricCatalog(db) {
   return db
     .prepare(
-      `SELECT DISTINCT json_extract(body,'$.metric_id') metric,json_extract(body,'$.product') product,
-    json_extract(body,'$.segment') segment FROM facts WHERE kind='metrics' ORDER BY metric,product,segment`,
+      `WITH observations AS (
+    SELECT body,json_extract(body,'$.source_id') origin FROM facts WHERE kind='metrics'
+    UNION ALL SELECT body,json_extract(body,'$.combine_group') origin FROM facts
+    WHERE kind='metrics' AND json_extract(body,'$.combine_group') IS NOT NULL)
+    SELECT DISTINCT json_extract(body,'$.metric_id') metric,json_extract(body,'$.product') product,
+    json_extract(body,'$.segment') segment,origin sourceId,
+    json_extract(body,'$.definition_id') definitionId,json_extract(body,'$.unit') unit,
+    json_extract(body,'$.step_days') stepDays FROM observations ORDER BY metric,product,segment,sourceId,definitionId`,
     )
     .all();
 }
@@ -230,16 +288,20 @@ function resolveSeries(db, input) {
   const catalog = metricCatalog(db);
   const metrics = catalog.filter((r) => r.metric === input.metric);
   const products = metrics.filter((r) => !input.product || r.product === input.product);
-  const matches = products.filter((r) => !input.segment || r.segment === input.segment);
+  const matches = products.filter((r) => (!input.segment || r.segment === input.segment) &&
+    (!input.sourceId || r.sourceId === input.sourceId) &&
+    (!input.definitionId || r.definitionId === input.definitionId));
   if (matches.length === 1) return matches[0];
-  const options = products.length
-    ? products
+  const options = matches.length
+    ? matches
+    : products.length
+      ? products
     : metrics.length
       ? metrics
       : catalog.filter((r) => !input.product || input.product === r.product);
   const choices = (options.length ? options : catalog)
     .slice(0, 8)
-    .map((r) => [r.metric, r.product, r.segment].join(' / '));
+    .map((r) => r.metric + ' / ' + describeMetricSeries(r));
   throw Object.assign(
     Error(
       choices.length
@@ -248,6 +310,90 @@ function resolveSeries(db, input) {
     ),
     { code: 'CHART_SERIES_UNAVAILABLE' },
   );
+}
+
+function prepareSignalIssue(store, user, input, env, send) {
+  const { caseId, revision } = signalIssueInput.parse(input);
+  const c = visibleCase(store.db, user, caseId);
+  const signal = c.body.signal;
+  if (!signal || signal.status === 'withdrawn' || c.state === 'Завершено')
+    throw Error('В разборе нет действующего сигнала');
+  const currentRevision = signal.revision ?? 0;
+  if (revision !== undefined && revision !== currentRevision)
+    throw Error('Сигнал изменился. Обновите разбор перед подготовкой задачи.');
+  const request = digest(JSON.stringify(['signal-issue-draft', user.id, caseId, currentRevision]));
+  const description = [
+    c.title,
+    signal.releaseId && 'Релиз: ' + signal.releaseId,
+    signal.segment && 'Сегмент: ' + signal.segment,
+    'Неделя сигнала: ' + signal.week,
+    signal.metric
+      ? 'Значение: ' + fmt(signal.n) + ' / ' + fmt(signal.d) + ' = ' + fmt(signal.value) + '%.'
+      : 'Индекс заказов: ' + fmt(signal.value) + ' п.',
+    signal.baselineFrom && signal.baselineThrough &&
+      'База (' + signal.baselineFrom + ' — ' + signal.baselineThrough + '): ' +
+      fmt(signal.baseN) + ' / ' + fmt(signal.baseD) + ' = ' + fmt(signal.baseValue) + '%.',
+    signal.change != null && 'Изменение: ' + fmt(signal.change) + ' ' + (signal.changeUnit || '%') + '.',
+    signal.source && 'Источник: ' + signal.source,
+    'Разбор ' + c.id + ', версия сигнала ' + currentRevision + '.',
+    '\nПроверить причины отклонения и предложить дальнейшие действия.',
+  ].filter(Boolean).join('\n');
+  return prepareTracker(store, user, 'issue', {
+    caseId,
+    title: ('Проверить сигнал · ' + c.title + ' · ' + signal.week).slice(0, 240),
+    description,
+  }, env, send, request, false, true, {signalRevision: currentRevision});
+}
+
+function signalMeasurement(c) {
+  const signal = c.body.signal;
+  if (!signal) return null;
+  if (measuredSignal(signal.metric)) return {
+    metric: signal.metric, product: c.product, segment: signal.segment || 'all',
+    sourceId: signal.sourceId, definitionId: signal.definitionId, stepDays: signal.stepDays, counterIds: signal.counterIds,
+  };
+  return legacyOrderMetric(signal.metric) ? { metric: 'orders_index', product: c.product, segment: 'all' } : null;
+}
+
+function agreeMeasurement(store, user, input) {
+  const b = agreementInput.parse(input);
+  const db = store.db;
+  return store.tx(() => {
+    const c = visibleCase(db, user, b.caseId);
+    const signal = c.body.signal, series = signalMeasurement(c);
+    if (!series || signal.status === 'withdrawn' || c.state === 'Завершено')
+      throw Error('Откройте разбор действующего сигнала.');
+    if (c.body.watch || c.state === 'Наблюдаем эффект')
+      throw Error('Критерий зафиксирован после назначения проверки эффекта.');
+    const run = requireActionableRun(db, user, c.id, b.runId);
+    const signalRevision = signal.revision ?? 0;
+    if (run.revision !== signalRevision)
+      throw Error('Сигнал уточнён. Откройте актуальное исследование.');
+    const privatePrimary = c.body.owner === user.id && run.owner === user.id && !run.parentId;
+    if (run.owner && !run.published && !privatePrimary)
+      throw Error('Опубликуйте исследование перед согласованием критерия для разбора.');
+    const plan = c.body.plan || {};
+    const previous = plan.measurementAgreement;
+    if (plan.measurement && !previous) throw Error('В разборе уже согласован критерий измерения.');
+    const inputSpec = b.measurement;
+    if (['metric', 'product', 'segment', 'sourceId', 'definitionId']
+      .some(key => inputSpec[key] && inputSpec[key] !== series[key]))
+      throw Error('Подтвердите метрику и ряд сигнала.');
+    if (!inputSpec.baselineFrom || !inputSpec.baselineThrough)
+      throw Error('Укажите начало и конец базового периода.');
+    const normalized = measurementSpec({
+      ...inputSpec, ...series, minDenominator: inputSpec.minDenominator ?? signal.minDenominator,
+    }, c.product);
+    const request = digest(JSON.stringify([run.id, signalRevision, normalized]));
+    if (previous?.request === request) return { measurement: plan.measurement, agreement: previous };
+    if ((previous?.id || null) !== b.expectedAgreementId)
+      throw Error('План измерения уже обновлён. Откройте текущий критерий.');
+    const { measurement, baseline, controlBaseline, target, tolerance } = createMeasurementAgreement(db, normalized);
+    const agreement = { id: randomUUID(), runId: run.id, signalRevision, request, baseline, controlBaseline, target, tolerance };
+    c.body.plan = { ...plan, measurement, measurementAgreement: agreement };
+    updateCase(db, c);
+    return { measurement, agreement };
+  });
 }
 
 export function workspaceOperation(
@@ -259,11 +405,17 @@ export function workspaceOperation(
   send = fetch,
   sharedOnly = false,
   requestId,
+  assistantAuthored = false,
 ) {
   const db = store.db;
   const meta = operations[op];
   const b = meta ? z.object(meta[1]).parse(input) : input;
   const current = () => visibleCase(db, user, b.caseId);
+  if (op === 'signal-issue-draft') return prepareSignalIssue(store, user, b, env, send);
+  if (op === 'investigation-measurement') {
+    if (assistantAuthored || sharedOnly) throw Error('Подтвердите критерий в разборе.');
+    return agreeMeasurement(store, user, b);
+  }
   if (op === 'funnel') {
     if (!b.thread) throw Error('Укажите беседу для сохранения результата');
     const shared = thread(db, user, b.thread).scope === 'group';
@@ -310,17 +462,21 @@ export function workspaceOperation(
   if (op === 'range_read') return readRange(db, user, b.id);
   if (op === 'selection_context') return neighboring(store, user, b.id, sharedOnly);
   if (op === 'range_compare') return compareRanges(store, user, b.selection);
-  if (op === 'search') return search(db, b.query, b.kinds);
+  if (op === 'search') return b.caseId
+    ? caseEvidenceSearch(db, current().product, b.query, b.kinds, b.asOf)
+    : search(db, b.query, b.kinds, 8, { asOf: b.asOf });
   if (op === 'view') {
     const c = b.caseId ? current() : null;
     const view = analysisView(db, b);
     grant(db, view.id, 'user', user.id);
-    if (!c) return { view, backlog: rankBacklog(db, view.product) };
+    if (!c) return { view, backlog: view.backlog };
     return {
       case: c,
+      investigation: readInvestigations(db, user, c.id, sharedOnly),
+      signalHistory: c.body.signal && !b.through ? signalHistory(db,c.id) : [],
       view,
-      effect: effect(db, c),
-      backlog: rankBacklog(db, c.product),
+      effect: view.monitoring?.result ?? null,
+      backlog: view.backlog,
       personal: JSON.parse(
         db.prepare('SELECT body FROM personal_views WHERE user=? AND case_id=?').get(user.id, c.id)?.body ||
           'null',
@@ -339,6 +495,9 @@ export function workspaceOperation(
   }
   if (op === 'create-case') {
     const { title, product, release, message, ...plan } = b;
+    if (plan.from && plan.through && plan.from > plan.through)
+      throw Error('Начало исследования должно быть не позже конца периода.');
+    if (plan.measurement) plan.measurement = measurementSpec(plan.measurement, product);
     let origin = null;
     if (message) {
       const m = db
@@ -362,6 +521,7 @@ export function workspaceOperation(
       JSON.stringify({ owner: user.id, responsible: user.name, release: release || null, plan, origin }),
     );
     if (origin) grant(db, origin.calc, 'user', user.id);
+    syncInvestigations(db, key);
     return { id: key, title, product };
   }
   if (op === 'append_case') {
@@ -421,7 +581,7 @@ export function workspaceOperation(
       } else {
         if (!b.product || !facts(db, 'sales').some((f) => f.data.product_family === b.product))
           throw Error('Для индекса заказов выберите семейство из ordersIndex.products.');
-        view = analysisView(db, { product: b.product });
+        view = analysisView(db, { product: b.product, from: b.from, through: b.through, full: b.full });
       }
       if (
         (b.product && b.product !== view.product) ||
@@ -442,37 +602,60 @@ export function workspaceOperation(
       };
     }
     const series = resolveSeries(db, b);
-    const rows = facts(db, 'metrics')
+    const sourceRows = facts(db, 'metrics')
       .filter(
         (r) =>
           r.data.metric_id === series.metric &&
           r.data.product === series.product &&
-          r.data.segment === series.segment,
-      )
+          (r.data.source_id === series.sourceId || r.data.combine_group === series.sourceId) &&
+          r.data.definition_id === series.definitionId && r.data.step_days === series.stepDays,
+      );
+    const rows = sourceRows.filter(r => r.data.segment === series.segment && observationWithin(r.data, b.from, b.through) &&
+      (!b.full || !r.data.partial && !/неполн/i.test(r.data.comment || '')))
       .sort((a, b) => a.data.date.localeCompare(b.data.date));
     if (!rows.length) throw Error('В этом разрезе нет наблюдений');
-    const step = metricStepDays(b.metric) * 86400000;
+    const step = series.stepDays * 86400000;
+    let points = rows.map((r) => ({
+      date: r.data.date, value: r.data.value, numerator: r.data.numerator, denominator: r.data.denominator,
+      details: r.data.detail_json ? JSON.parse(r.data.detail_json) : null, sample: r.data.sample_size,
+      partial: !!r.data.partial || /неполн/i.test(r.data.comment || ''), source: r.file + ' · ' + r.loc, version: r.version,
+      ...(series.unit === 'ratio' && r.data.value == null &&
+        {reason: aggregateMetric([r.data], series.metric).reason}),
+    }));
+    if (series.sourceId.startsWith('group:')) {
+      const byDate = new Map();
+      for (const f of rows) {
+        if (!byDate.has(f.data.date)) byDate.set(f.data.date, []);
+        byDate.get(f.data.date).push(f);
+      }
+      points = [...byDate].map(([date, group]) => {
+        const total = aggregateMetric(group.map(f => f.data), series.metric, series);
+        const sources = group.map(f => ({source:f.file + ' · ' + f.loc, version:f.version}));
+        return {date, value:total.value == null || series.unit !== 'ratio' ? total.value : total.value / 100,
+          numerator:total.n, denominator:total.d, reason:total.reason, sources, combineMembers:total.combineMembers,
+          details: {}, partial:group.some(f => f.data.partial || /неполн/i.test(f.data.comment || '')),
+          version:group[0].version, source:sources.map(s => s.source).join(', ')};
+      });
+    } else if (new Set(points.map(p => p.date)).size !== points.length) {
+      throw Error('У выбранного сегмента несколько наблюдений на одну дату. Уточните названия группировок в источнике.');
+    }
     const view = {
       kind: 'metric-chart',
       step,
+      sourceId: series.sourceId,
+      definitionId: series.definitionId,
       product: series.product,
       title: b.title || b.metric,
       metric: b.metric,
       segment: series.segment,
       unit: rows[0].data.unit,
-      points: rows.map((r) => ({
-        date: r.data.date,
-        value: r.data.value,
-        details: r.data.detail_json ? JSON.parse(r.data.detail_json) : null,
-        sample: r.data.sample_size,
-        partial: /неполн/i.test(r.data.comment || ''),
-        source: r.file + ' · ' + r.loc,
-        version: r.version,
-      })),
+      full: !!b.full,
+      metricVersions: [...new Set(sourceRows.map(r => r.version))],
+      points,
     };
     const observed = view.points.filter((p) => Number.isFinite(p.value));
     if (!observed.length)
-      throw Object.assign(Error('Для ряда пока нет числовых наблюдений.'), {
+      throw Object.assign(Error(points.find(p => p.reason)?.reason || 'Для ряда пока нет числовых наблюдений.'), {
         code: 'CHART_SERIES_UNAVAILABLE',
       });
     const hash = digest(JSON.stringify(view));
@@ -482,6 +665,8 @@ export function workspaceOperation(
     return {
       id: hash,
       source: 'metric',
+      sourceId: view.sourceId,
+      definitionId: view.definitionId,
       title: view.title,
       metric: view.metric,
       product: view.product,
@@ -535,11 +720,12 @@ export function workspaceOperation(
         send,
         requestId,
         sharedOnly,
+        assistantAuthored,
       );
     }
     return Promise.resolve(trackerClient(store, user, target, env, send, undefined, sharedOnly)).then(
       async (api) => {
-        if (op.endsWith('_search')) return { local: !!target.local, items: await api.search(b.query) };
+        if (op.endsWith('_search')) return { local: !!target.local, items: await api.search(b.query, false, b.origin) };
         if (op === 'issue_options') return api.options();
         const value = await api.read(b.key);
         return op === 'page_read' ? publicPage(value) : value;
@@ -556,8 +742,7 @@ export function workspaceOperation(
     const c = current();
     const range = b.rangeId ? readRange(db, user, b.rangeId) : null;
     if (!range && !b.calc) throw Error('Нужен расчёт или выделение для публикации');
-    if (b.calc && readSnapshot(db, user, b.calc).product !== c.product)
-      throw Error('Расчёт другого продукта');
+    if (b.calc) checkPublicationCalculation(db, user, b.calc, c.product);
     if (range && range.source === 'weekly' && range.product !== c.product)
       throw Error('Выделение другого продукта');
     const cards = (b.cards || []).filter((k) => cardTypes.includes(k));
@@ -605,9 +790,62 @@ export function workspaceOperation(
     );
     return { ok: true };
   }
-  if (op === 'watch') {
-    const c = current(),
-      v = analysisView(db, { caseId: c.id, control: b.control });
+  if (op === 'watch') return store.tx(() => {
+    const c = current(), precommitted = c.body.plan?.measurement, signal = c.body.signal;
+    const previous = c.body.watch, agreement = c.body.plan?.measurementAgreement;
+    if (b.agreementId && b.agreementId !== agreement?.id)
+      throw Error('План измерения уже обновлён. Откройте текущий критерий.');
+    if (agreement && previous?.agreementId !== agreement.id &&
+      (signal?.status === 'withdrawn' || agreement.signalRevision !== (signal?.revision ?? 0)))
+      throw Error('Сигнал уточнён. Согласуйте критерий в актуальном исследовании перед назначением проверки.');
+    if (agreement && (b.measurement || b.percent || b.control))
+      throw Error('Используется согласованный критерий проверки. Передайте дату выкладки.');
+    if (!b.measurement && !b.percent && previous?.version === 2 && previous.deployed === b.deployed)
+      return { caseId: c.id, ...effect(db, c) };
+    if (precommitted && b.measurement)
+      throw Error('Для этого разбора используется план проверки, заданный до выкладки. Передайте только дату.');
+    const automatic = measuredSignal(signal?.metric) ? {
+      ...signalMeasurement(c),
+      baselineFrom: signal.baselineFrom, baselineThrough: signal.baselineThrough,
+      control: b.control, minDenominator: signal.minDenominator,
+    } : null;
+    if (automatic && b.measurement && ['metric', 'product', 'segment', 'sourceId', 'definitionId']
+      .some(key => automatic[key] && b.measurement[key] && automatic[key] !== b.measurement[key]))
+      throw Error('Выберите метрику, продукт, сегмент и источник сигнала.');
+    const spec = precommitted || (b.measurement && { ...automatic, ...b.measurement }) ||
+      (!b.percent && previous?.version === 2 && previous.measurement) || (automatic && {
+      ...automatic, comparison: 'gte', targetMode: 'baseline_percent',
+      targetValue: b.percent ?? setting(db, 'rules', defaultRules).recovery,
+    });
+    const save = (watch) => {
+      if (previous) {
+        const prior = analysisView(db, { caseId: c.id });
+        grant(db, prior.id, 'case', c.id);
+        c.body.watchHistory = [...(c.body.watchHistory || []),
+          { revision: previous.revision ?? 1, calc: prior.id, deployed: previous.deployed }];
+      }
+      watch.revision = previous ? (previous.revision ?? 1) + 1 : 1;
+      c.body.watch = watch;
+      c.state = 'Наблюдаем эффект';
+      updateCase(db, c);
+      return { caseId: c.id, ...effect(db, c) };
+    };
+    if (agreement) return save(startMeasurementWatch({
+      version: 2, measurement: precommitted, agreementId: agreement.id, control: precommitted.control,
+      target: agreement.target, tolerance: agreement.tolerance, baseline: agreement.baseline,
+      controlBaseline: agreement.controlBaseline, signalRevision: agreement.signalRevision,
+    }, b.deployed));
+    if (spec) {
+      const normalized = measurementSpec(spec, c.product);
+      const request = digest(JSON.stringify([normalized, b.deployed]));
+      if (previous?.version === 2 && previous.request === request)
+        return { caseId: c.id, ...effect(db, c) };
+      return save({ ...createMeasurementWatch(db, normalized, b.deployed), request });
+    }
+    if (!legacyOrderMetric(c.body.plan?.metric))
+      throw Error('Уточните целевую метрику и критерий старого плана в форме наблюдения.');
+    if (!b.percent) throw Error('Укажите процент от базы индекса заказов или план измерения.');
+    const v = analysisView(db, { caseId: c.id, control: b.control });
     if (
       !/^\d{4}-\d\d-\d\d$/.test(b.deployed) ||
       new Date(b.deployed + 'T12:00:00Z').toISOString().slice(0, 10) !== b.deployed ||
@@ -615,17 +853,14 @@ export function workspaceOperation(
       !v.summary[0]?.before
     )
       throw Error('Нужны дата выкладки, база и контроль');
-    c.body.watch = {
+    return save({
       deployed: b.deployed,
       target: (v.summary[0].before * b.percent) / 100,
       control: v.summary[1].product,
       controlBase: v.summary[1].before,
       tolerance: setting(db, 'rules', defaultRules).controlTolerance,
-    };
-    c.state = 'Наблюдаем эффект';
-    updateCase(db, c);
-    return { caseId: c.id, ...effect(db, c) };
-  }
+    });
+  });
   if (op === 'decide') {
     const c = current();
     c.state = b.state;

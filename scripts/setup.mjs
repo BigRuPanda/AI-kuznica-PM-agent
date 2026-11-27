@@ -16,7 +16,7 @@ const add = [];
 for (const [key, defaultValue] of Object.entries(template)) {
   if (Object.hasOwn(current, key) && (!['ADMIN_INVITE_KEY', 'DEMO_INVITE_KEY', 'INTEGRATION_KEY'].includes(key) || current[key]))
     continue;
-  const value = ['ADMIN_INVITE_KEY', 'DEMO_INVITE_KEY', 'INTEGRATION_KEY'].includes(key)
+  const value = key === 'DATA_PROFILE' && Object.keys(current).length ? 'configured' : ['ADMIN_INVITE_KEY', 'DEMO_INVITE_KEY', 'INTEGRATION_KEY'].includes(key)
     ? randomBytes(key === 'INTEGRATION_KEY' ? 32 : 24).toString('base64url')
     : defaultValue;
   add.push(key + '=' + JSON.stringify(value));

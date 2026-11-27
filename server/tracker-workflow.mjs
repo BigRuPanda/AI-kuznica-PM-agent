@@ -1,7 +1,9 @@
 import { randomUUID } from 'node:crypto';
+import { digest, getCase } from './evidence.mjs';
 import { targetFor, remoteClient, initConnections, connectionInfo } from './tracker-connections.mjs';
-import { escapeXml, plain, decodeText, storageOffset } from './tracker-clients.mjs';
+import { aiOrigin, aiNotice, withAiNotice, escapeXml, plain, decodeText, storageOffset } from './tracker-clients.mjs';
 import { demoClient, initTrackerDemo, localHref } from './tracker-demo.mjs';
+import { requireActionableRun, visibleRun } from './case-investigations.mjs';
 
 export function initTracking(db) {
   initConnections(db);
@@ -26,6 +28,12 @@ export function trackerClient(store, user, target, env, send, caseId, sharedOnly
   const api = demoClient(store.db, user, target.service, caseId, sharedOnly);
   return {
     ...api,
+    ...(api.repairOrigin && {
+      repairOrigin: (issue, beforeRepair) => store.tx(() => {
+        beforeRepair?.();
+        return api.repairOrigin(issue);
+      }),
+    }),
     save: (...args) => {
       const beforeWrite = args.pop();
       return store.tx(() => {
@@ -45,6 +53,7 @@ export function preview(row) {
   return {
     id: row.id,
     caseId: row.case_id,
+    investigationId: b.investigationId,
     state: row.state,
     external: row.external,
     kind: b.kind,
@@ -73,8 +82,13 @@ const fields = {
   trackerId: 'Тип задачи',
   comment: 'Комментарий',
 };
-async function issueDraft(client, input, target) {
+async function issueDraft(client, input, target, assistantAuthored) {
   const current = input.key ? await client.read(input.key) : {};
+  const generated = !input.key && assistantAuthored;
+  if (generated && !target.local && !target.originFieldId)
+    throw Error('Для задачи ИИ настройте фильтруемое поле происхождения в Redmine');
+  if (generated || (current.origin === aiOrigin && input.description !== undefined))
+    input = {...input, description: withAiNotice(input.description)};
   const changes = {};
   for (const k of Object.keys(fields))
     if (input[k] !== undefined && input[k] !== current[k]) changes[k] = input[k];
@@ -102,6 +116,10 @@ async function issueDraft(client, input, target) {
     diff.push({ field: fields[key], before: name(current[key]), after: name(value) });
   }
   if (!diff.length) throw Error('Укажите изменение задачи');
+  if (generated) {
+    changes.origin = aiOrigin;
+    diff.push({field: 'Происхождение задачи', before: '', after: aiOrigin});
+  }
   return {
     kind: 'issue',
     target,
@@ -195,16 +213,62 @@ function pageDraft(input, current, target, issue, marker) {
     revision: randomUUID(),
   };
 }
-export async function prepareTracker(store, user, kind, input, env, send, requestId, sharedOnly = false) {
+function sameTarget(db, user, target) {
+  return JSON.stringify(targetFor(db, user, target.service)) === JSON.stringify(target);
+}
+
+function requireDraftVersion(db, user, caseId, draft) {
+  if (draft.investigationId) {
+    requireActionableRun(db, user, caseId, draft.investigationId);
+    if (!sameTarget(db, user, draft.target))
+      throw Error('Назначение изменилось. Подготовьте новый черновик.');
+  }
+  if (draft.signalRevision !== undefined) {
+    const c = getCase(db, caseId);
+    const signal = c.body.signal;
+    if (c.body.owner && c.body.owner !== user.id) throw Error('Разбор недоступен');
+    if (!signal || signal.status === 'withdrawn' || c.state === 'Завершено')
+      throw Error('В разборе нет действующего сигнала');
+    if ((signal.revision ?? 0) !== draft.signalRevision)
+      throw Error('Сигнал изменился. Подготовьте черновик по текущей версии.');
+  }
+}
+
+function legacySignalRevision(row, draft) {
+  if (draft.kind !== 'issue' || draft.key || !draft.description) return;
+  const prefix = 'Разбор ' + row.case_id + ', версия сигнала ';
+  for (const line of draft.description.split(/\r?\n/)) {
+    if (!line.startsWith(prefix)) continue;
+    const raw = line.slice(prefix.length);
+    if (!/^\d+\.$/.test(raw)) continue;
+    const revision = Number(raw.slice(0, -1));
+    if (row.id === digest(JSON.stringify(['signal-issue-draft', row.user, row.case_id, revision])))
+      return revision;
+  }
+}
+
+export async function prepareTracker(store, user, kind, input, env, send, requestId, sharedOnly = false, assistantAuthored = false, binding) {
   const db = store.db,
     id = requestId || randomUUID();
-  const existing = db.prepare('SELECT * FROM draft_actions WHERE id=? AND user=?').get(id, user.id);
-  if (existing) return preview(existing);
-  const target = targetFor(db, user, kind === 'page' ? 'confluence' : 'redmine');
+  const select = db.prepare('SELECT * FROM draft_actions WHERE id=? AND user=?');
+  const existing = select.get(id, user.id);
+  if (existing && !binding?.selection && !(binding && existing.state === 'obsolete')) return preview(existing);
+  const target = binding?.target || targetFor(db, user, kind === 'page' ? 'confluence' : 'redmine');
   const client = await trackerClient(store, user, target, env, send, input.caseId, sharedOnly);
   let body;
-  if (kind === 'issue') body = await issueDraft(client, input, target);
-  else {
+  if (kind === 'issue') {
+    const selection = binding?.selection;
+    if (selection) {
+      const items = await client.search(selection.query);
+      if (!items.some(item => item.key === selection.key && item.url === selection.url))
+        throw Error('Выберите доступную задачу из результатов поиска.');
+    }
+    body = await issueDraft(client, input, target, assistantAuthored);
+    if (selection) {
+      if (body.key !== selection.key) throw Error('Выберите доступную задачу из результатов поиска.');
+      body.sourceUrl = selection.url;
+    }
+  } else {
     let issue;
     if (input.issueKey) {
       const t = targetFor(db, user, 'redmine');
@@ -220,13 +284,24 @@ export async function prepareTracker(store, user, kind, input, env, send, reques
     if (current && input.baseVersion !== undefined && input.baseVersion !== current.version)
       body.conflict = 'Страница изменилась. Сравните с версией ' + current.version;
   }
-  db.prepare("INSERT OR IGNORE INTO draft_actions VALUES(?,?,?,?,'draft',NULL)").run(
-    id,
-    input.caseId,
-    user.id,
-    JSON.stringify(body),
-  );
-  return preview(db.prepare('SELECT * FROM draft_actions WHERE id=? AND user=?').get(id, user.id));
+  const save = () => {
+    if (binding) {
+      body.investigationId = binding.runId;
+      body.signalRevision = binding.signalRevision;
+      requireDraftVersion(db, user, input.caseId, body);
+    }
+    const serialized = JSON.stringify(body);
+    if (binding && existing) {
+      db.prepare(`UPDATE draft_actions SET body=?,state='draft'
+        WHERE id=? AND user=? AND state='obsolete' AND external IS NULL
+          AND json_extract(body,'$.receipt') IS NULL AND json_extract(body,'$.inFlight') IS NULL
+          AND json_extract(body,'$.uncertain') IS NOT 1`).run(serialized, id, user.id);
+    }
+    db.prepare("INSERT OR IGNORE INTO draft_actions VALUES(?,?,?,?,'draft',NULL)")
+      .run(id, input.caseId, user.id, serialized);
+    return preview(select.get(id, user.id));
+  };
+  return binding ? store.tx(save) : save();
 }
 function cleanReceipt(r) {
   return { key: r.key, url: r.url };
@@ -238,6 +313,8 @@ export async function confirmTracker(store, user, row, revision, env, send) {
     marker = 'pm-' + id;
   if (row.state === 'done')
     return { ...(b.receipt || {}), key: row.external, local: !!b.target.local, state: 'done' };
+  b.signalRevision ??= legacySignalRevision(row, b);
+  const versionBound = b.investigationId || b.signalRevision !== undefined;
   if (b.kind === 'page' && revision !== b.revision)
     throw Error('Откройте и подтвердите актуальный предпросмотр страницы');
   if (
@@ -251,12 +328,25 @@ export async function confirmTracker(store, user, row, revision, env, send) {
       .run(state, JSON.stringify(b), b.receipt?.key || null, id);
   let attempted = false;
   let uncertain = !!b.uncertain || (row.state === 'uncertain' && !!b.inFlight);
+  let obsolete = row.state === 'obsolete';
+  function checkVersion() {
+    if (!versionBound) return;
+    try {
+      requireDraftVersion(db, user, row.case_id, b);
+    } catch (e) {
+      obsolete = true;
+      throw e;
+    }
+  }
   function beforeWrite() {
+    checkVersion();
     attempted = true;
     b.inFlight = b.receipt ? 'backlink' : 'main';
     persist('sending');
   }
   const getClient = (t) => trackerClient(store, user, t, env, send, row.case_id);
+  const verifyOrigin = b.kind === 'issue' && !b.key && b.changes?.origin === aiOrigin;
+  const hasReceipt = !!b.receipt;
   async function refreshPage(client) {
     const current = await client.read(b.key);
     let fresh;
@@ -280,8 +370,9 @@ export async function confirmTracker(store, user, row, revision, env, send) {
     return preview({ ...row, state: 'draft', body: JSON.stringify(b) });
   }
   try {
-    if (row.state === 'obsolete') throw Error('Подготовьте новый черновик по текущей версии');
+    if (obsolete) throw Error('Подготовьте новый черновик по текущей версии');
     if (!b.receipt) {
+      if (!uncertain) checkVersion();
       const api = await getClient(b.target);
       let result;
       if (uncertain) {
@@ -292,6 +383,10 @@ export async function confirmTracker(store, user, row, revision, env, send) {
       } else {
         if (b.key) {
           const current = await api.read(b.key);
+          if (b.investigationId && current.key !== b.key) {
+            obsolete = true;
+            throw Error('Задача изменилась. Подготовьте новый черновик.');
+          }
           if (b.kind === 'page' && current.version !== b.version) return await refreshPage(api);
         }
         if (b.kind === 'page') {
@@ -311,8 +406,33 @@ export async function confirmTracker(store, user, row, revision, env, send) {
       attempted = false;
       uncertain = false;
       b.uncertain = false;
-      // A restart after this checkpoint may only reconcile or write the backlink.
-      if (b.issue) persist('sending');
+      if (b.issue || verifyOrigin) persist('sending');
+    }
+    if (verifyOrigin) {
+      // A field mapping may be corrected between confirmations. Keep the issue on its original site/project.
+      const target = hasReceipt && !b.target.local
+        ? { ...b.target, originFieldId: targetFor(db, user, 'redmine').originFieldId }
+        : b.target;
+      const api = await getClient(target);
+      let issue = await api.read(b.receipt.key);
+      const verified = issue => issue.key === b.receipt.key && issue.origin === aiOrigin && issue.description.split(/\r?\n/).includes(aiNotice);
+      if (issue.key !== b.receipt.key) throw Error('Redmine не подтвердил номер сохранённой задачи.');
+      if (!verified(issue) && hasReceipt) {
+        const checkRepair = () => {
+          if (!versionBound) return;
+          requireDraftVersion(db, user, row.case_id, {...b, target});
+          if (!b.investigationId && !sameTarget(db, user, target))
+            throw Error('Назначение изменилось. Проверьте настройки Redmine.');
+        };
+        if (target.local) await api.repairOrigin(issue, checkRepair);
+        else {
+          checkRepair();
+          await api.repairOrigin(issue);
+        }
+        issue = await api.read(b.receipt.key);
+      }
+      if (!verified(issue)) throw Error('Метка ai-generated или пометка в описании отсутствует при чтении. Проверьте поле и права, затем повторите сверку.');
+      b.target = target;
     }
     if (b.issue) {
       const api = await getClient(b.issue.target),
@@ -332,14 +452,14 @@ export async function confirmTracker(store, user, row, revision, env, send) {
     persist('done');
     return { ...b.receipt, state: 'done', local: !!b.target.local };
   } catch (e) {
-    const ambiguous = attempted && (!e.status || e.status >= 500 || e.status === 408);
+    const ambiguous = attempted && !(versionBound && b.target.local) && (!e.status || e.status >= 500 || e.status === 408);
     b.uncertain = uncertain || ambiguous;
     if (!b.uncertain) delete b.inFlight;
     b.reason = e.message;
     const state =
-      row.state === 'obsolete' ? 'obsolete' : b.uncertain ? 'uncertain' : b.receipt ? 'partial' : 'draft';
+      obsolete ? 'obsolete' : b.uncertain ? 'uncertain' : b.receipt ? 'partial' : 'draft';
     persist(state);
-    if (b.receipt) return { ...b.receipt, state, reason: 'Страница сохранена. Обратная ссылка: ' + b.reason };
+    if (b.receipt) return { ...b.receipt, state, reason: (b.kind === 'issue' ? 'Задача сохранена. ' : 'Страница сохранена. Обратная ссылка: ') + b.reason };
     throw e;
   }
 }
@@ -370,30 +490,33 @@ export async function revisePage(store, user, row, input, env, send) {
 }
 
 export async function caseLinks(store, user, caseId, env, send, sharedOnly) {
-  const rows = store.db
+  const { db } = store;
+  const rows = db
     .prepare('SELECT body FROM draft_actions WHERE case_id=? AND external IS NOT NULL ORDER BY rowid DESC')
     .all(caseId);
   const candidates = new Map();
+  const visible = id => !id || visibleRun(db, user, caseId, id, sharedOnly);
   for (const row of rows) {
     const b = JSON.parse(row.body);
-    if (b.receipt) candidates.set(b.receipt.url, { ...b.receipt, target: b.target });
+    if (!visible(b.investigationId)) continue;
+    if (b.receipt) candidates.set(b.receipt.url, { ...b.receipt, target: b.target, investigationId: b.investigationId });
     if (b.issue) candidates.set(b.issue.url, b.issue);
   }
   const settings = connectionInfo(store.db, user),
     items = [];
-  for (const { target, key } of candidates.values()) {
-    const current = targetFor(store.db, user, target.service);
+  for (const { target, key, investigationId } of candidates.values()) {
     if (
       !target.local &&
       (sharedOnly ||
         !settings[target.service].connected ||
-        JSON.stringify(current) !== JSON.stringify(target))
+        !sameTarget(db, user, target))
     )
       continue;
     try {
       const api = await trackerClient(store, user, target, env, send, caseId, sharedOnly);
       const object = await api.read(key);
-      items.push({ service: target.service, key: object.key, url: object.url, title: object.title });
+      if (visible(investigationId))
+        items.push({ service: target.service, key: object.key, url: object.url, title: object.title });
     } catch (e) {
       if (!target.local && ![401, 403, 404].includes(e.status)) throw e;
     }

@@ -228,6 +228,24 @@ p {
   border-color: var(--focus);
 }
 .menu-preference-options button[aria-pressed='true']:hover { background: var(--surface-hover); }
+.settings-scopes {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-bottom: 20px;
+  border-bottom: 1px solid var(--border);
+}
+.settings-scopes a {
+  padding: .6rem .8rem;
+  border-bottom: 2px solid transparent;
+  color: inherit;
+  text-decoration: none;
+}
+.settings-scopes a[aria-current='page'] {
+  border-color: var(--accent-text);
+  color: var(--accent-text);
+  font-weight: 600;
+}
 @media (min-width: 821px) {
   .team-app[data-menu='left'] > .side {
     --sidebar-expansion: calc(var(--sidebar-width) - var(--sidebar-min-width));
@@ -619,7 +637,12 @@ p {
 }
 .login-box form .primary { width: 100%; margin-top: 7px; }
 .investigation-head > div:first-child { min-width: 0; }
+.signal-evidence { overflow-wrap: anywhere; }
 .investigation-head .actions { flex: none; }
+.signal-history { margin-top: 0.75rem; }
+.signal-history ol { margin: 0.5rem 0 0; padding-inline-start: 1.35rem; font-size: 0.9rem; }
+.signal-history li + li { margin-top: 0.45rem; }
+.signal-history small { margin: 0.15rem 0 0; overflow-wrap: anywhere; }
 .arrow-action .ui-icon,
 .case-value .ui-icon {
   transition: transform var(--panel-motion) var(--ease-out);

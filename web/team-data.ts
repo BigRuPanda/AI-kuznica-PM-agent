@@ -1,6 +1,31 @@
 export type User = { id: string; name: string; login: string; role: string; space: string };
+export type SignalWeekEvidence = {
+  week: string;
+  n: number;
+  d: number;
+  rows: { date: string; segment?: string; n?: number; d?: number; sourceId?: string; source: string; version: string }[];
+};
 export type Signal = {
+  status?: 'provisional' | 'confirmed' | 'withdrawn';
+  revision?: number;
   rule: string;
+  metric?: string;
+  segment?: string;
+  source?: string;
+  sourceId?: string;
+  definitionId?: string;
+  stepDays?: number;
+  evidence?: { baseline: SignalWeekEvidence[]; latest: SignalWeekEvidence };
+  minDenominator?: number;
+  releaseId?: string;
+  changeUnit?: string;
+  n?: number;
+  d?: number;
+  baseN?: number;
+  baseD?: number;
+  baseValue?: number;
+  baselineFrom?: string;
+  baselineThrough?: string;
   start: string;
   week: string;
   change: number | null;
@@ -8,7 +33,31 @@ export type Signal = {
   count: number;
   threshold: number;
 };
-export type Watch = { state: string; weeks: number; controlWeeks: number; start: string; end: string; actual?: number; ctrl?: number };
+export type Measurement = {
+  metric: string; product?: string; segment?: string; sourceId?: string; definitionId?: string;
+  control?: string; controlSegment?: string; controlSourceId?: string; controlDefinitionId?: string; unit?: string;
+  baselineFrom?: string; baselineThrough?: string; comparison: 'gte' | 'lte';
+  targetMode: 'absolute' | 'baseline_percent'; targetValue: number; minDenominator?: number;
+};
+export type WatchSample = {
+  value: number | null; n?: number | null; d?: number | null; sourceId?: string;
+  definitionId?: string; sources?: string[]; versions: string[];
+};
+export type MeasurementAgreement = {
+  id: string; runId: string; signalRevision: number; target: number; tolerance: number;
+  baseline: WatchSample; controlBaseline?: WatchSample;
+};
+export type WatchPlan = {
+  deployed: string; target: number; control?: string; revision?: number; measurement?: Measurement;
+  baseline?: WatchSample; controlBaseline?: WatchSample; tolerance?: number;
+  agreementId?: string; signalRevision?: number;
+};
+export type Watch = {
+  state: string; reason?: string; weeks: number; controlWeeks: number; start?: string; end?: string;
+  actual?: number | null; ctrl?: number | null; unit?: string; metric?: string; target?: number;
+  sample?: WatchSample; peer?: WatchSample;
+};
+export type Monitoring = { plan: WatchPlan; result: Watch };
 export type Case = {
   id: string;
   product: string;
@@ -19,9 +68,13 @@ export type Case = {
     owner?: string;
     origin?: { calc: string; cards: string[]; full: boolean };
     release?: string;
-    watch?: { deployed: string; target: number; control: string };
+    watch?: WatchPlan;
+    watchHistory?: { revision: number; calc: string; deployed: string }[];
     notes?: { author: string; created: number; text: string; rangeId?: string }[];
-    plan?: { hypothesis: string; metric: string; baseline: string; control: string; success: string };
+    plan?: {
+      hypothesis?: string; metric?: string; baseline?: string; control?: string; success?: string;
+      measurement?: Measurement; measurementAgreement?: MeasurementAgreement;
+    };
   };
   effect?: Watch;
 };
@@ -39,9 +92,12 @@ export type Home = {
   cases: Case[];
   threads: Thread[];
   sources: Source[];
+  metrikaSync?: import('./metrika-status').MetrikaStatus;
   products: string[];
   rules: { threshold: number; recovery: number };
   releases: Release[];
+  notificationsEnabled: boolean;
+  notificationChannels: string[];
   deliveries: { state: string; channel: string; n: number }[];
 };
 export type Sample = {
@@ -65,27 +121,68 @@ export type Evidence = {
   kind: string;
   key: string;
   source: string;
+  metadata?: {question?: string; hypothesis?: string; relation?: string; date?: string};
   data: string | { title?: string; description_short?: string; description?: string };
 };
+export type MetricSeries = { product: string; segment: string; sourceId: string; definitionId: string };
+export type MetricChoice = MetricSeries & { metric: string; stepDays: number; unit: string };
+export type RatioSelections = Partial<Record<'ctr' | 'reach', MetricSeries>>;
+type RatioCard = { n: number | null; d: number | null; reason?: string; choices?: MetricChoice[]; selection?: Partial<MetricSeries> };
 export type View = {
   id: string;
   product: string;
   base: string;
   pivot: string;
   cut: string;
+  calendarPeriod?: boolean;
+  requested?: { from?: string; through?: string; releaseWeek?: string };
   full: boolean;
   summary: Comparison[];
   timeline: { file: string; loc: string; data: Release }[];
   evidence: Evidence[];
   corrections: { source: string; comment: string; author: string }[];
-  ctr: { n: number; d: number; sources: string[] };
-  reach: { n: number; d: number; sources?: string[] };
+  ctr: RatioCard & { sources: string[] };
+  reach: RatioCard & { sources?: string[] };
   gap?: string;
   signal?: Signal;
+  monitoring?: Monitoring;
 };
 export type Issue = { key: string; title: string; category: string; reason: string; source: string };
+export type InvestigationSource = { label: string; calcId?: string; findingId?: string; url?: string };
+export type InvestigationHypothesis = {
+  title: string; for: string[]; against: string[]; test: string;
+  sourceRefs?: { for: InvestigationSource[]; against: InvestigationSource[] };
+};
+export type InvestigationResult = {
+  summary: string; action: string; plan: string; outcomes: string[];
+  hypotheses: InvestigationHypothesis[]; issueQuery?: string; issueSourceKey?: string;
+};
+export type InvestigationCheck = {
+  role: string; question: string; status: string; result: string; impact: string; period?: string;
+  sources: InvestigationSource[];
+};
+export type InvestigationRun = {
+  id: string; caseId: string; revision: number | string; owner: string | null; mode: string;
+  status: 'queued' | 'running' | 'waiting' | 'retry' | 'ready' | 'superseded';
+  reason?: string; question?: string; parentId?: string; published?: boolean; publishedBy?: string;
+  result?: InvestigationResult | null; checks: InvestigationCheck[]; calcId?: string;
+  period?: string; unit?: string; created?: number; summary?: string;
+  measurementContext?: Pick<Measurement, 'baselineFrom' | 'baselineThrough' | 'control'>;
+};
+export type InvestigationBundle = { current: InvestigationRun | null; alternatives: InvestigationRun[]; history: InvestigationRun[] };
 export type Detail = {
   case: Case;
+  investigation?: InvestigationBundle;
+  signalHistory?: {
+    revision: number;
+    created: number;
+    status: NonNullable<Signal['status']>;
+    event: 'confirmed' | 'corrected' | 'withdrawn' | null;
+    metric: string | null;
+    week: string;
+    value: number;
+    imported: { file: string; version: string }[];
+  }[];
   personal?: { revision?: string; cards: string[]; full?: boolean; control?: string; pin?: boolean };
   view: View;
   effect: Watch | null;

@@ -1,5 +1,6 @@
 import {GoogleAuth} from 'google-auth-library';
 import {randomUUID} from 'node:crypto';
+import {checkModelTransport} from './data-profile.mjs';
 
 const auth=new GoogleAuth({scopes:['https://www.googleapis.com/auth/cloud-platform']});
 export function geminiRequest(messages,tools,choice){
@@ -28,6 +29,7 @@ export function geminiRequest(messages,tools,choice){
     toolConfig:{functionCallingConfig:{mode:choice==='auto'?'AUTO':'ANY',...(typeof choice==='object'?{allowedFunctionNames:[choice.function.name]}:{})}}};
 }
 export async function geminiCall(env,messages,tools,choice,send,credentials=auth){
+  checkModelTransport(env);
   const developer=env.LLM_BACKEND==='gemini';
   const model=env.LLM_MODEL||(developer?'gemini-3.5-flash':'gemini-3.5-flash-lite'),location=env.GOOGLE_CLOUD_LOCATION||'global';
   if(!/^[\w.-]+$/.test(model)||!/^[a-z0-9-]+$/.test(location))throw Error('Проверьте модель и регион Google Cloud.');

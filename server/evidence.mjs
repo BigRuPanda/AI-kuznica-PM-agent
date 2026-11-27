@@ -1,4 +1,11 @@
 import { createHash } from 'node:crypto';
+import { planWatch, prepareMeasurement, measuredEffect, measuredSignal, legacyOrderMetric } from './watch-measurement.mjs';
+import {initResearchSearch, removeResearchIndex, indexResearchFile, searchResearch} from './research-search.mjs';
+import { initSignalHistory, reconcileSignals } from './signal-history.mjs';
+import { initInvestigations, syncInvestigations } from './case-investigations.mjs';
+import { getMetricEpisodes } from './metric-rules.mjs';
+import { aggregateMetric, defaultStepDays, normalizeObservation, observationKey } from './metric-observations.mjs';
+import { backlogRecommendations } from './backlog.mjs';
 export const digest = (value) => createHash('sha256').update(value).digest('hex');
 export function productFamily(value = '') {
   const p = value.toLowerCase().trim();
@@ -6,12 +13,7 @@ export function productFamily(value = '') {
   if (/kaspersky|каспер/.test(p)) return 'kaspersky';
   return p;
 }
-export const metricStepDays = (metric) =>
-  ['orders_index', 'family_orders_idx', 'cfg_option_share', 'cfg_step_dropoff', 'lk_reco_ctr'].includes(
-    metric,
-  )
-    ? 7
-    : 1;
+export const metricStepDays = defaultStepDays;
 const WEEK = 7 * 86400000;
 const dateMs = (s) => Date.parse(s + 'T00:00:00Z');
 const iso = (t) => new Date(t).toISOString().slice(0, 10);
@@ -34,6 +36,28 @@ export function initEvidence(db) {
       'CREATE TABLE IF NOT EXISTS evidence_calcs(id TEXT PRIMARY KEY,body TEXT NOT NULL);' +
       'CREATE TABLE IF NOT EXISTS feedback(id INTEGER PRIMARY KEY,source TEXT NOT NULL,product TEXT NOT NULL,author TEXT NOT NULL,comment TEXT NOT NULL,created INTEGER NOT NULL);',
   );
+  initResearchSearch(db);
+  initSignalHistory(db);
+  initInvestigations(db);
+  if (!db.prepare("SELECT 1 FROM settings WHERE key='observation_schema_v2'").get()) {
+    db.exec('SAVEPOINT migrate_metric_observations');
+    try {
+      db.prepare("DELETE FROM facts WHERE kind='metrics'").run();
+      const save = db.prepare("INSERT OR REPLACE INTO facts VALUES('metrics',?,?,?,?,?)");
+      for (const doc of db.prepare('SELECT version,file,body FROM documents ORDER BY rowid').iterate()) {
+        for (const item of JSON.parse(doc.body).facts) {
+          if (item.kind !== 'metrics') continue;
+          const row = normalizeObservation(item.row, doc.file);
+          save.run(observationKey(row), doc.version, doc.file, item.loc, JSON.stringify(row));
+        }
+      }
+      setSetting(db, 'observation_schema_v2', true);
+      db.exec('RELEASE migrate_metric_observations');
+    } catch (error) {
+      db.exec('ROLLBACK TO migrate_metric_observations; RELEASE migrate_metric_observations');
+      throw error;
+    }
+  }
 }
 export function setting(db, k, fallback) {
   const s = db.prepare('SELECT body FROM settings WHERE key=?').get(k);
@@ -46,30 +70,37 @@ export const defaultRules = { threshold: 25, controlTolerance: 10, recovery: 90 
 function identity(f, file) {
   const r = f.row ?? {};
   if (f.kind === 'sales') return JSON.stringify([r.product_family, r.week_start]);
-  if (f.kind === 'metrics') return JSON.stringify([r.metric_id, r.date, r.product, r.segment]);
+  if (f.kind === 'metrics') return observationKey(r);
   if (f.kind === 'dictionary') return r.metric_id;
   if (f.kind === 'backlog') return r.task_id;
   if (f.kind === 'releases') return r.release_id;
   return file + '/' + f.loc;
 }
-export function importDocs(store, docs, { notify = true } = {}) {
+export function importDocs(store, docs, { notify = true, onImported } = {}) {
   const { db } = store;
   const save = db.prepare(
     'INSERT INTO facts VALUES(?,?,?,?,?,?) ON CONFLICT(kind,key) DO UPDATE SET version=excluded.version,file=excluded.file,loc=excluded.loc,body=excluded.body',
   );
   return store.tx(() => {
-    let inserted = 0;
+    const imported = [];
     for (const doc of docs) {
       if (!Array.isArray(doc.facts) || typeof doc.file !== 'string') throw Error('Некорректный документ');
       const version = digest(JSON.stringify(doc));
-      if (db.prepare('SELECT 1 FROM documents WHERE version=?').get(version)) continue;
-      db.prepare('INSERT INTO documents VALUES(?,?,?,?)').run(
-        version,
-        doc.file,
-        Date.now(),
-        JSON.stringify(doc),
-      );
-      db.prepare("DELETE FROM facts WHERE file=? AND kind IN ('competitor','interview')").run(doc.file);
+      const researchOnly = doc.facts.every(f => f.kind === 'interview' || f.kind === 'competitor');
+      const archived = db.prepare('SELECT 1 FROM documents WHERE version=?').get(version);
+      if (archived) {
+        if (!researchOnly || db.prepare('SELECT version FROM research_file_versions WHERE file=?').get(doc.file)?.version === version) continue;
+      } else {
+        db.prepare('INSERT INTO documents VALUES(?,?,?,?)').run(version, doc.file, Date.now(), JSON.stringify(doc));
+      }
+      // Old official ZIP imports stored these nested interview workbooks by basename.
+      // Their archived documents and any already published snapshot keep their old addresses.
+      const oldFiles = doc.legacyInterviewFile ? [doc.file, doc.legacyInterviewFile] : [doc.file];
+      for (const file of oldFiles) {
+        removeResearchIndex(db, file);
+        db.prepare("DELETE FROM facts WHERE file=? AND kind IN ('competitor','interview')").run(file);
+        if (file !== doc.file) db.prepare('DELETE FROM research_file_versions WHERE file=?').run(file);
+      }
       for (const f of doc.facts) {
         if (
           !['sales', 'metrics', 'dictionary', 'backlog', 'releases', 'interview', 'competitor'].includes(
@@ -82,12 +113,17 @@ export function importDocs(store, docs, { notify = true } = {}) {
           (!Number.isFinite(f.row.orders_index) || !Number.isFinite(dateMs(f.row.week_start)))
         )
           throw Error('Проверьте дату и индекс продаж в ' + f.loc);
-        save.run(f.kind, identity(f, doc.file), version, doc.file, f.loc, JSON.stringify(f.row ?? f.text));
+        const body = f.kind === 'metrics' ? normalizeObservation(f.row, doc.file) : f.row ?? f.text;
+        save.run(f.kind, f.kind === 'metrics' ? observationKey(body) : identity(f, doc.file), version, doc.file, f.loc, JSON.stringify(body));
       }
-      inserted++;
+      indexResearchFile(db, doc.file);
+      if (researchOnly) db.prepare('INSERT OR REPLACE INTO research_file_versions VALUES(?,?)').run(doc.file, version);
+      else db.prepare('DELETE FROM research_file_versions WHERE file=?').run(doc.file);
+      imported.push({file:doc.file, version});
     }
-    if (inserted) scan(db, notify);
-    return { inserted, documents: db.prepare('SELECT count(*) n FROM documents').get().n };
+    if (imported.length) scan(db, notify, imported);
+    onImported?.();
+    return { inserted:imported.length, documents: db.prepare('SELECT count(*) n FROM documents').get().n };
   });
 }
 export function facts(db, kind) {
@@ -108,9 +144,10 @@ export function listSales(db) {
     }))
     .sort((a, b) => a.week.localeCompare(b.week));
 }
-export function scan(db, notify = true) {
+export function scan(db, notify = true, imported = []) {
   const all = listSales(db),
     rules = setting(db, 'rules', defaultRules);
+  const episodes = new Map();
   const def = facts(db, 'dictionary').find((f) => f.data.metric_id === 'family_orders_idx');
   const absolute = def?.data.bad_signal?.match(/ниже\s+(\d+(?:[.,]\d+)?)\s+две недели подряд/i);
   for (const product of new Set(all.map((r) => r.product))) {
@@ -137,11 +174,12 @@ export function scan(db, notify = true) {
         run.count++;
         run.last = w.week;
         previous[rule] = run;
-        run.history.push({ week: w.week, change, value: w.value });
+        run.history.push({ week: w.week, change, value: w.value, version: w.version, source: w.source });
         if (rule === 'absolute' && run.count < 2) continue;
-        const id = digest([product, rule, run.start].join('/')).slice(0, 24);
         const desc = rule === 'relative' ? 'Снижение среднего индекса' : 'Индекс ниже порога справочника';
         const info = {
+          product,
+          title: desc,
           rule,
           start: run.start,
           week: w.week,
@@ -149,31 +187,16 @@ export function scan(db, notify = true) {
           history: run.history,
           change,
           value: w.value,
-          threshold: rule === 'relative' ? rules.threshold : Number(absolute[1]),
+          confirmedWeek: run.history[1]?.week,
+          threshold: rule === 'relative' ? rules.threshold : Number(absolute[1].replace(',', '.')),
           source: w.source,
         };
-        const existing = db.prepare('SELECT body FROM cases WHERE id=?').get(id);
-        const body = { ...(existing ? JSON.parse(existing.body) : {}), signal: info };
-        db.prepare(
-          'INSERT INTO cases VALUES(?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET body=excluded.body',
-        ).run(id, product, desc + ' · ' + product, 'Исследуем', JSON.stringify(body));
-        if (run.count === 2) {
-          const alert = db
-            .prepare('INSERT OR IGNORE INTO alerts VALUES(?,?,?,?)')
-            .run(id, id, w.week, JSON.stringify(info));
-          if (notify && alert.changes)
-            for (const channel of ['telegram', 'smtp']) {
-              db.prepare('INSERT OR IGNORE INTO deliveries(id,channel,state,body) VALUES(?,?,?,?)').run(
-                id + channel,
-                channel,
-                'queued',
-                JSON.stringify({ caseId: id, text: desc + ' · ' + product + ' · ' + w.week }),
-              );
-            }
-        }
+        episodes.set(JSON.stringify([product,rule,run.start]), info);
       }
     }
   }
+  reconcileSignals(db, [...episodes.values(), ...getMetricEpisodes(db)], notify, imported);
+  syncInvestigations(db);
 }
 export function cases(db) {
   return db
@@ -187,7 +210,10 @@ export function getCase(db, id) {
   return { ...r, body: JSON.parse(r.body) };
 }
 export function updateCase(db, c) {
-  db.prepare('UPDATE cases SET state=?,body=? WHERE id=?').run(c.state, JSON.stringify(c.body), c.id);
+  // A PM can save a plan or note from a case opened before the latest source correction.
+  db.prepare(`UPDATE cases SET state=?,body=CASE WHEN json_type(body,'$.signal')='object'
+    THEN json_set(?, '$.signal', json_extract(body,'$.signal')) ELSE ? END WHERE id=?`)
+    .run(c.state, JSON.stringify(c.body), JSON.stringify(c.body), c.id);
 }
 function tokens(input) {
   return [
@@ -201,21 +227,24 @@ function tokens(input) {
     ),
   ];
 }
-export function search(db, query, kinds = ['interview', 'competitor', 'backlog', 'releases'], limit = 8) {
+export function search(db, query, kinds = ['interview', 'competitor', 'backlog', 'releases'], limit = 8, { asOf, excluded = [] } = {}) {
+  checkDate(asOf);
   const words = tokens(query),
-    found = [];
-  for (const kind of kinds) {
+    found = searchResearch(db, query, kinds, limit, asOf, excluded);
+  for (const kind of kinds.filter(k => k !== 'interview' && k !== 'competitor')) {
     for (const r of facts(db, kind)) {
+      const date = kind === 'backlog' ? r.data.created_date : kind === 'releases' ? r.data.release_date : undefined;
+      if (asOf && ['backlog','releases'].includes(kind) && (!date || date > asOf)) continue;
+      const source = r.file + ' · ' + r.loc;
+      if (excluded.includes(source)) continue;
       const hay = tokens(JSON.stringify(r.data)).join(' ');
       const score = words.reduce((s, w) => s + (hay.includes(w) ? 1 : 0), 0);
-      const context =
-        kind === 'interview' && typeof r.data === 'string' ? (r.data.match(/,/g) || []).length / 12 : 0;
       if (score)
         found.push({
           kind,
           key: r.key,
-          score: score + Math.min(context, 0.9),
-          source: r.file + ' · ' + r.loc,
+          score,
+          source,
           version: r.version,
           data: r.data,
         });
@@ -223,8 +252,18 @@ export function search(db, query, kinds = ['interview', 'competitor', 'backlog',
   }
   return found.sort((a, b) => b.score - a.score || a.source.localeCompare(b.source)).slice(0, limit);
 }
+function sourceCorrections(db, product) {
+  return db.prepare('SELECT source,author,comment FROM feedback WHERE product=? ORDER BY id').all(product);
+}
+function excludedSources(corrections) {
+  const latest = new Map(corrections.map(c => [c.source, c.comment]));
+  return [...latest].filter(([, comment]) => comment.startsWith('[Исключить связь]')).map(([source]) => source);
+}
+export function caseEvidenceSearch(db, product, query, kinds, asOf) {
+  return search(db, query, kinds, 8, { asOf, excluded: excludedSources(sourceCorrections(db, product)) });
+}
 function salesSummary(all, product, from, to, cut, full) {
-  const series = all.filter((x) => x.product === product);
+  const series = all.filter((x) => x.product === product && x.week >= from && dateMs(x.week) + WEEK - 86400000 <= dateMs(cut));
   const before = series.filter((r) => r.week >= from && r.week < to && !r.partial);
   const after = series.filter((r) => r.week > to && r.week <= cut && (!full || !r.partial));
   const transition = series.filter((r) => r.week === to && r.week <= cut && (!full || !r.partial));
@@ -244,73 +283,83 @@ function salesSummary(all, product, from, to, cut, full) {
     rows,
   };
 }
+function checkDate(value) {
+  if (value !== undefined && (!/^\d{4}-\d{2}-\d{2}$/.test(value) ||
+      !Number.isFinite(dateMs(value)) || iso(dateMs(value)) !== value))
+    throw Error('Укажите календарную дату в формате ГГГГ-ММ-ДД.');
+}
+function ratioCard(rows, metric, limits, selection) {
+  const available = aggregateMetric(rows, metric, limits);
+  const result = selection ? aggregateMetric(rows, metric, { ...limits, ...selection }) : available;
+  return { n: result.n, d: result.d, reason: result.reason,
+    ...(available.choices.length && {choices: available.choices}),
+    ...(selection && {selection}),
+    sources: result.selectedRows?.map(r => r.evidenceSource) || [] };
+}
 export function analysisView(
   db,
-  { caseId, product, full = false, control, from, releaseWeek, through, sourceQuery = '' } = {},
+  { caseId, product, full = false, control, from, releaseWeek, through, sourceQuery = '', ratioSelections = {} } = {},
 ) {
+  for (const date of [from, through, releaseWeek]) checkDate(date);
+  if (from && through && from > through) throw Error('Начало периода должно быть не позже конца.');
+  if (releaseWeek && through && releaseWeek > through) throw Error('Неделя релиза должна быть не позже даты среза.');
   const c = caseId ? getCase(db, caseId) : null,
     all = listSales(db);
   product = c?.product || product || all.at(-1)?.product || '';
-  const related = search(db, product, ['releases'], 12);
-  const latest = all.filter((x) => x.product === product).at(-1)?.week;
-  const anchor = c?.body.signal?.start || latest;
+  const metrics = facts(db, 'metrics').map(f => ({ ...f.data, evidenceSource: f.file + ' · ' + f.loc }));
+  const reported = all.filter(x => x.product === product);
+  const latestWeek = reported.at(-1)?.week;
+  const latestDay = metrics.reduce((max, r) => {
+    const observed = dateMs(r.date) + ((r.step_days || metricStepDays(r.metric_id)) - 1) * 86400000;
+    return Number.isFinite(observed) ? Math.max(max, observed) : max;
+  }, -Infinity);
+  const cut = through || [latestWeek && iso(dateMs(latestWeek) + WEEK - 86400000),
+    Number.isFinite(latestDay) && iso(latestDay)].filter(Boolean).sort().at(-1) || '';
+  const related = search(db, product, ['releases'], Number.MAX_SAFE_INTEGER, { asOf: through });
+  const latest = reported.filter(x => x.week <= cut).at(-1)?.week;
+  const rawSignal = c?.body.signal;
+  const signal = !through || rawSignal?.week <= through ? rawSignal : null;
+  const anchor = signal?.start || latest || (cut && monday(cut));
   const release = related
-    .filter((x) => String(x.data.release_date) <= String(anchor) && x.data.release_type === 'major')
+    .filter((x) => x.data.release_date <= anchor && x.data.release_type === 'major')
     .sort((a, b) => b.data.release_date.localeCompare(a.data.release_date))[0];
   const pivot =
     releaseWeek ||
-    (release && c?.body.signal?.rule !== 'absolute' ? monday(release.data.release_date) : anchor);
+    (release && signal?.rule !== 'absolute' ? monday(release.data.release_date) : anchor);
   const base = from || (pivot ? iso(dateMs(pivot) - 13 * WEEK) : '');
-  const cut = through || latest;
   const peers = [...new Set(all.map((x) => x.product))].filter((x) => x !== product);
   const compare = control === false ? [] : [control || peers[0]].filter(Boolean);
   const summary = pivot ? [product, ...compare].map((p) => salesSummary(all, p, base, pivot, cut, full)) : [];
   const timeline = pivot
     ? facts(db, 'releases').filter(
-        (f) => Math.abs(dateMs(f.data.release_date) - dateMs(pivot)) <= 14 * 86400000,
+        (f) => f.data.release_date >= base && f.data.release_date <= cut &&
+          Math.abs(dateMs(f.data.release_date) - dateMs(pivot)) <= 14 * 86400000,
       )
     : [];
-  const ctr = facts(db, 'metrics').filter(
-    (f) =>
-      f.data.metric_id === 'lk_reco_ctr' &&
-      !/неполн/i.test(f.data.comment || '') &&
-      (!through || f.data.date <= through),
-  );
-  const ctrCounts = ctr.reduce(
-    (v, f) => {
-      const x = JSON.parse(f.data.detail_json || '{}');
-      return [v[0] + (x.click_visits || 0), v[1] + (x.viewed_visits || 0)];
-    },
-    [0, 0],
-  );
-  const corrections = db
-    .prepare('SELECT source,author,comment FROM feedback WHERE product=? ORDER BY id')
-    .all(product);
-  const latestFeedback = new Map(corrections.map((c) => [c.source, c.comment]));
+  const limits = { from: base || undefined, through: cut || undefined };
+  const kpi = c?.body.watch?.measurement || c?.body.plan?.measurement;
+  const ctrSeries = kpi?.metric === 'lk_reco_ctr' ? kpi : signal?.metric === 'lk_reco_ctr' ? signal : null;
+  const ctr = ratioCard(metrics.filter(r => !full || !r.partial && !/неполн/i.test(r.comment || '')), 'lk_reco_ctr', limits,
+    ratioSelections.ctr || (ctrSeries && { product: ctrSeries.product || product, segment: ctrSeries.segment,
+      sourceId: ctrSeries.sourceId, definitionId: ctrSeries.definitionId }));
+  const corrections = sourceCorrections(db, product);
+  const excluded = excludedSources(corrections);
   const evidence = ['interview', 'competitor', 'backlog'].flatMap((k) =>
-    search(db, product + ' ' + String(sourceQuery).slice(0, 400), [k], 12)
-      .filter((e) => !latestFeedback.get(e.source)?.startsWith('[Исключить связь]'))
-      .slice(0, 3),
+    search(db, product + ' ' + String(sourceQuery).slice(0, 400), [k], 12, { asOf: through, excluded }).slice(0, 3),
   );
-  const reach = facts(db, 'metrics').filter(
-    (f) =>
-      f.data.metric_id === 'cfg_reach_rate' &&
-      tokens(product).some((t) => tokens(f.data.product).includes(t)) &&
-      (!through || f.data.date <= through),
-  );
-  const reachCounts = reach.reduce(
-    (v, f) => {
-      const x = JSON.parse(f.data.detail_json || '{}');
-      return [v[0] + (x.configurator_visits || 0), v[1] + (x.family_visits || 0)];
-    },
-    [0, 0],
-  );
+  const reach = ratioCard(metrics.filter(r => product && productFamily(r.product) === productFamily(product) &&
+    (!full || !/неполн/i.test(r.comment || ''))), 'cfg_reach_rate', limits, ratioSelections.reach);
   const definition = facts(db, 'dictionary').find((f) => f.data.metric_id === 'cfg_add_to_cart_rate');
   const gap = definition
     ? String(definition.data.comment || '') + ' · ' + definition.file + ' · ' + definition.loc
     : 'Определение события добавления в корзину пока не загружено.';
   const result = {
     product,
+    calendarPeriod: true,
+    requested: { from, through, releaseWeek },
+    asOf: through,
+    releaseVersions: db.prepare("SELECT version FROM documents WHERE version IN (SELECT version FROM facts WHERE kind='releases') ORDER BY rowid")
+      .all().map(row => row.version),
     metricVersions: db
       .prepare(
         "SELECT version FROM documents WHERE version IN (SELECT version FROM facts WHERE kind='metrics') ORDER BY rowid",
@@ -326,50 +375,48 @@ export function analysisView(
     evidence,
     corrections,
     gap,
-    backlog: rankBacklog(db, product),
-    ctr: { n: ctrCounts[0], d: ctrCounts[1], sources: ctr.map((f) => f.file + ' · ' + f.loc) },
-    reach: { n: reachCounts[0], d: reachCounts[1], sources: reach.map((f) => f.file + ' · ' + f.loc) },
-    signal: c?.body.signal ?? null,
+    backlog: rankBacklog(db, product, {
+      through: cut, historical: Boolean(through),
+      releaseId: c?.body.release || release?.data.release_id,
+      metricId: c?.body.plan?.measurement?.metric || signal?.metric || c?.body.plan?.metric,
+      signal,
+    }),
+    ctr,
+    reach,
+    signal: signal ?? null,
+    ...(c?.body.watch && { monitoring: { plan: c.body.watch, result: effect(db, c, through) } }),
   };
   const id = digest(JSON.stringify(result));
   db.prepare('INSERT OR IGNORE INTO evidence_calcs VALUES(?,?)').run(id, JSON.stringify(result));
   return { id, ...result };
 }
-export function rankBacklog(db, product) {
-  const ranked = facts(db, 'backlog')
-    .filter((f) => !['done', 'closed', 'закрыта'].includes(String(f.data.status).toLowerCase()))
-    .map((f) => {
-      const task = f.data,
-        diagnosis = /ошиб|уч[её]т|аналитик/i.test(task.type + ' ' + task.title);
-      const relevant = search(db, product, ['backlog'], 20).some((x) => x.key === f.key);
-      const category = diagnosis ? 'Проверить сейчас' : relevant ? 'Готово к разработке' : 'Отложить';
-      return {
-        key: task.task_id,
-        title: task.title,
-        category,
-        reason: diagnosis
-          ? 'Пробел измерения ограничивает проверку гипотезы.'
-          : relevant
-            ? 'Задача связана с исследуемым продуктом.'
-            : 'Прямая связь с текущим сигналом пока не установлена.',
-        source: f.file + ' · ' + f.loc,
-      };
-    });
-  const signal = cases(db).find((c) => c.product === product && c.body.signal?.rule === 'relative');
-  if (signal)
-    ranked.push({
-      key: 'Предложение',
-      title: 'Проверить путь от выбора до самостоятельного заказа · ' + product,
-      category: 'Проверить сейчас',
-      reason:
-        'Устойчивое изменение индекса. Сверить прохождение пути на разных устройствах и регистрацию его шагов.',
-      source: signal.body.signal.source,
-    });
-  return ranked;
+export function rankBacklog(db, product, context = {}) {
+  const signal = context.signal || cases(db).find((c) => c.product === product &&
+    c.body.signal?.rule === 'relative' && c.body.signal.status !== 'withdrawn' &&
+    (!context.through || c.body.signal.week <= context.through))?.body.signal;
+  return backlogRecommendations(facts(db, 'backlog'), facts(db, 'dictionary'), facts(db, 'releases'), {
+    ...context, product, signal,
+  });
 }
-export function effect(db, c) {
+function measurementRows(db, spec) {
+  return spec.metric === 'orders_index' ? listSales(db) : facts(db, 'metrics')
+    .filter(f => f.data.metric_id === spec.metric)
+    .map(f => ({ ...f.data, version: f.version, evidenceSource: f.file + ' · ' + f.loc }));
+}
+export function createMeasurementWatch(db, spec, deployed) {
+  return planWatch(measurementRows(db, spec), spec, deployed, setting(db, 'rules', defaultRules).controlTolerance);
+}
+export function createMeasurementAgreement(db, spec) {
+  return prepareMeasurement(measurementRows(db, spec), spec, setting(db, 'rules', defaultRules).controlTolerance, true);
+}
+export function effect(db, c, through) {
   const plan = c.body.watch;
   if (!plan) return null;
+  if (plan.version === 2) return measuredEffect(measurementRows(db, plan.measurement), plan, through);
+  if (c.body.plan?.measurement || measuredSignal(c.body.signal?.metric) || !legacyOrderMetric(c.body.plan?.metric))
+    return { state: 'Уточните метрику наблюдения',
+      reason: 'В прошлой версии записан индекс заказов. Назначьте проверку с критерием для нужной метрики.',
+      metric: c.body.plan?.measurement?.metric || c.body.signal?.metric, actual: null, weeks: 0, controlWeeks: 0 };
   const start = iso(dateMs(monday(plan.deployed)) + (monday(plan.deployed) === plan.deployed ? 0 : WEEK));
   const end = iso(dateMs(start) + 3 * WEEK);
   const all = listSales(db),

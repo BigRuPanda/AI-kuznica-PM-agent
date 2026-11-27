@@ -6,6 +6,7 @@ import {profiles} from './config.mjs';
 import {name,hash} from './store.mjs';
 import {geminiCall} from './gemini.mjs';
 import {chatAnswerFormat} from './answer-format.mjs';
+import {checkModelTransport,localData} from './data-profile.mjs';
 
 const reportSpec=z.object({summary:z.string().max(1200).optional(),highlights:z.array(z.object({metric:z.number().int().min(0).max(4),reason:z.string().min(1).max(600)})).max(2),
   intervals:z.array(z.object({metric:z.number().int().min(0).max(4),start:z.number().int(),end:z.number().int(),segment:z.enum(['all','new','returning']),reason:z.string().min(1).max(600)})).max(3)});
@@ -14,6 +15,8 @@ const system='Ты помощник продакта. Отвечай по-рус
   'Для вопросов о скорости оплаты или о новой метрике используй build_chart. Время от выставления до оплаты: start=invoice,end=payment,field=duration,stat=median. '+
   'Если данных не хватает, сообщи какие поля или период нужны. Сохраняй контекст уточнений. До/после — семь суток с каждой стороны. Видимый срез и версия заданы сервером.\n'+chatAnswerFormat;
 export function apiConfigured(env=process.env){
+  if(localData(env))return false;
+  if(env.LLM_BACKEND==='proxyapi')return Boolean(env.PROXYAPI_API_KEY && env.LLM_MODEL);
   if(env.LLM_BACKEND==='vertex')return Boolean(env.GOOGLE_CLOUD_PROJECT);
   if(['gemini','vertex-express'].includes(env.LLM_BACKEND))return Boolean(env.LLM_API_KEY);
   return Boolean(env.LLM_BASE_URL&&env.LLM_MODEL);
@@ -38,12 +41,19 @@ function apiTools(){
 }
 export async function providerCall(env,messages,tools,choice='auto',send=fetch){
   if(['gemini','vertex','vertex-express'].includes(env.LLM_BACKEND))return geminiCall(env,messages,tools,choice,send);
-  if(!apiConfigured(env))throw Error('Для подключения модели задайте LLM_BASE_URL и LLM_MODEL в .env, а ключ — в LLM_API_KEY.');
-  const target=new URL(env.LLM_BASE_URL.replace(/\/+$/,'')+'/chat/completions');
+  checkModelTransport(env);
+  const proxyapi = env.LLM_BACKEND === 'proxyapi';
+  if(!apiConfigured(env))throw Error(proxyapi
+    ? 'Для ProxyAPI задайте PROXYAPI_API_KEY и LLM_MODEL в корневом .env.'
+    : 'Для подключения модели задайте LLM_BASE_URL и LLM_MODEL в .env, а ключ — в LLM_API_KEY.');
+  const baseUrl = proxyapi ? 'https://api.proxyapi.ru/v1' : env.LLM_BASE_URL;
+  const key = proxyapi ? env.PROXYAPI_API_KEY : env.LLM_API_KEY;
+  const target=new URL(baseUrl.replace(/\/+$/,'')+'/chat/completions');
   if(target.protocol!=='https:'&&!(target.protocol==='http:'&&['localhost','127.0.0.1','[::1]'].includes(target.hostname)))throw Error('Для удалённого API модели требуется HTTPS.');
   let response;
-  try{response=await send(target,{method:'POST',redirect:'error',signal:AbortSignal.timeout(60000),headers:{'Content-Type':'application/json',...(env.LLM_API_KEY?{Authorization:'Bearer '+env.LLM_API_KEY}:{})},
-    body:JSON.stringify({model:env.LLM_MODEL,messages,tools,tool_choice:choice})});}catch{throw Object.assign(Error('Модель недоступна. Проверьте подключение и параметры .env.'),{retryable:true});}
+  const history = messages.map(({usage, googleParts, ...message}) => message);
+  try{response=await send(target,{method:'POST',redirect:'error',signal:AbortSignal.timeout(60000),headers:{'Content-Type':'application/json',...(key?{Authorization:'Bearer '+key}:{})},
+    body:JSON.stringify({model:env.LLM_MODEL,messages:history,tools,tool_choice:choice})});}catch{throw Object.assign(Error('Модель недоступна. Проверьте подключение и параметры .env.'),{retryable:true});}
   if(!response.ok)throw Object.assign(Error('Провайдер модели вернул HTTP '+response.status+'.'),{status:response.status});
   const data=await response.json(),reply=data.choices?.[0]?.message;
   if(!reply)throw Error('Модель вернула пустой ответ.');return {...reply,usage:{input:data.usage?.prompt_tokens,output:data.usage?.completion_tokens}};
@@ -111,7 +121,13 @@ export function makeAgent(store,{env=process.env,send=fetch,alternate}={}){
     if(existing)return JSON.parse(existing.body);
     const a=analysis(store,body),ctx=a.context;
     const history=store.messages(ctx.releaseId).filter(m=>m.context.day<=ctx.day).slice(-12).map(m=>({role:m.role,text:m.text,context:m.context,refs:m.refs}));
-    const turn=env.LLM_BACKEND==='codex'&&alternate&&!apiConfigured(env)?await alternate(store,a,history,question):await apiTurn(store,a,history,question,env,send);
+    let turn;
+    if(localData(env)){
+      const card=a.cards[ctx.metric],calc=runTool(store,'compare_metric',ctx);
+      turn={answer:'Локальный расчёт выбранной метрики «'+card.title+'». '+card.caption+' '+card.formula,refs:[calc]};
+    }else if(env.LLM_BACKEND==='codex'&&alternate&&!apiConfigured(env)){
+      turn=await alternate(store,a,history,question);
+    }else turn=await apiTurn(store,a,history,question,env,send);
     let decision=turn.decision;
     if(!decision&&apiConfigured(env))decision=await review(a,turn.answer).catch(()=>null);
     const refs=turn.refs.map(c=>({id:c.id,op:c.op,title:c.result.title||({breakdown:'Разбивка по клиентам',funnel:'Шаги воронки'}[c.op])||'Расчёт'}));
@@ -124,6 +140,7 @@ export function makeAgent(store,{env=process.env,send=fetch,alternate}={}){
     const a=analysis(store,{...input,segment:'all'});
     if(store.one('SELECT 1 FROM report_versions WHERE release=? AND version=?',a.rel.id,a.v.id)||a.cards[a.rel.target].status!=='ready')return;
     let decision;
+    if(localData(env))return;
     if(apiConfigured(env))decision=await review(a,'Первый полный обзор.');
     else if(env.LLM_BACKEND==='codex'&&alternate){const t=await alternate(store,a,[],'Составь первый полный обзор и выбери графики и участки.');decision={...t.decision,summary:t.answer.slice(0,1200)};}
     if(decision)store.tx(()=>storeReview(a,decision,a.cards[a.rel.target].caption));

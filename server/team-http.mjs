@@ -33,13 +33,22 @@ import {
   workJobs,
   deliver,
 } from './workbench.mjs';
-import { python, metrika, telegram } from './connectors.mjs';
+import { python, telegram } from './connectors.mjs';
+import { initMetrikaSync, metrikaStatus, syncMetrika } from './metrika-sync.mjs';
 import { preview, revisePage } from './tracker-workflow.mjs';
 import { configure, connectionInfo, personalConnection, finishOAuth } from './tracker-connections.mjs';
 import { remoteMcp } from './team-mcp.mjs';
 import { retainMaterial, readMaterial, attachedMaterials, materialRef, materialPreview } from './materials.mjs';
 import { access } from './chart-ranges.mjs';
 import { resumeJob } from './workbench.mjs';
+import { metricRuleStatus, saveMetricRule } from './metric-rules.mjs';
+import { researchSettings, saveResearchSettings } from './investigation-settings.mjs';
+import { notificationChannels } from './data-profile.mjs';
+import {
+  createAlternative, publishInvestigation, readInvestigations,
+  syncInvestigations, workInvestigation,
+} from './case-investigations.mjs';
+import { prepareInvestigationDraft } from './investigation-draft.mjs';
 
 export function createTeamApp({
   base = databasePath(),
@@ -51,6 +60,8 @@ export function createTeamApp({
     spaces = new Map(),
     legacy = new Map(),
     busy = new Set(),
+    researching = new Set(),
+    reconciledAt = new Map(),
     authAttempts = new Map();
   const urlBase = new URL(env.APP_BASE_URL || 'http://127.0.0.1:8090'),
     secure = urlBase.protocol === 'https:';
@@ -59,6 +70,8 @@ export function createTeamApp({
       const s = openStore(workspacePath(base, id));
       initEvidence(s.db);
       initWorkbench(s.db);
+      initMetrikaSync(s.db);
+      reconciledAt.set(id, Date.now());
 
       spaces.set(id, s);
     }
@@ -99,6 +112,20 @@ export function createTeamApp({
   async function tick() {
     if (spaces.size === 0) return;
     for (const [id, s] of spaces) {
+      if (Date.now() - (reconciledAt.get(id) || 0) >= 60_000) {
+        try {
+          syncInvestigations(s.db);
+          reconciledAt.set(id, Date.now());
+        } catch {
+          console.error('Не удалось сверить активные исследования');
+        }
+      }
+      if (!researching.has(id)) {
+        researching.add(id);
+        void workInvestigation(s, env, send, { reconcile: false })
+          .catch(() => console.error('Не удалось обработать очередь исследований'))
+          .finally(() => researching.delete(id));
+      }
       if (busy.has(id)) continue;
       busy.add(id);
       void (async () => {
@@ -106,14 +133,7 @@ export function createTeamApp({
         const minutes = Number(env.METRIKA_SYNC_MINUTES || 0),
           sync = setting(s.db, 'last_metrika_sync', { at: 0 });
         if (id === 'team' && env.METRIKA_TOKEN && minutes >= 5 && Date.now() - sync.at >= minutes * 60000) {
-          setSetting(s.db, 'last_metrika_sync', { at: Date.now(), status: 'running' });
-          try {
-            const data = await metrika(env, send);
-            importDocs(s, data.docs);
-            setSetting(s.db, 'last_metrika_sync', { at: Date.now(), status: 'ready', samples: data.samples });
-          } catch (e) {
-            setSetting(s.db, 'last_metrika_sync', { at: Date.now(), status: 'error', reason: e.message });
-          }
+          await syncMetrika(s, env, send).catch(() => {}); // The journal retains failures for each source.
         }
         for (const c of cases(s.db).filter((x) => x.state === 'Наблюдаем эффект' && x.body.watch)) {
           const report = effect(s.db, c);
@@ -123,7 +143,7 @@ export function createTeamApp({
               c.state = 'Нужно решение';
               updateCase(s.db, c);
               if (id === 'team')
-                for (const channel of ['telegram', 'smtp'])
+                for (const channel of notificationChannels(env))
                   s.db
                     .prepare("INSERT OR IGNORE INTO deliveries(id,channel,state,body) VALUES(?,?,'queued',?)")
                     .run(
@@ -230,7 +250,7 @@ export function createTeamApp({
         if (!user) return reply(401, { error: 'Войдите и повторите подключение Confluence' });
         await finishOAuth(space(user.space).db, user, url.searchParams, env, send);
         res.writeHead(303, {
-          Location: '/#settings',
+          Location: '/#settings/personal',
           'Cache-Control': 'no-store',
           'Referrer-Policy': 'no-referrer',
         });
@@ -266,7 +286,7 @@ export function createTeamApp({
           const docs = JSON.parse(await python('office_import.py', [name], raw, env));
           return reply(
             200,
-            importDocs(space(user.space), docs, { notify: env.NOTIFICATIONS_ENABLED === 'true' }),
+            importDocs(space(user.space), docs, { notify: env.NOTIFICATIONS_ENABLED === 'true' && notificationChannels(env) }),
           );
         }
         if (!req.headers['content-type']?.startsWith('application/json'))
@@ -287,6 +307,11 @@ export function createTeamApp({
         }
         const store = space(user.space),
           db = store.db;
+        if (op === 'investigation-status') return reply(200, readInvestigations(db, user, b.caseId));
+        if (op === 'investigation-alternative') return reply(200, createAlternative(db, user, b));
+        if (op === 'investigation-publish') return reply(200, publishInvestigation(db, user, b));
+        if (op === 'investigation-draft') return reply(200, await prepareInvestigationDraft(store, user, b, env, send));
+        if (op === 'investigation-measurement') return reply(200, workspaceOperation(store, user, op, b));
         if (op === 'logout') {
           accounts.logout(token);
           return reply(200, {}, { 'Set-Cookie': tokenCookie('', 0) });
@@ -308,6 +333,9 @@ export function createTeamApp({
         if (op === 'overview')
           return reply(200, {
             ...dashboard(db, user),
+            metrikaSync: user.space === 'team' ? metrikaStatus(db, env) : { reports: [] },
+            notificationsEnabled: user.space === 'team' && env.NOTIFICATIONS_ENABLED === 'true',
+            notificationChannels: user.space === 'team' ? notificationChannels(env) : [],
             integrations: connectionInfo(db, user),
           });
         if (op === 'invite') {
@@ -322,6 +350,17 @@ export function createTeamApp({
             .prepare('INSERT INTO bindings VALUES(?,?,?)')
             .run(digest(code), user.id, Date.now() + 600000);
           return reply(200, { command: '/start ' + code });
+        }
+        if (op === 'research-settings') return reply(200, researchSettings(db, user));
+        if (op === 'save-research-settings') return reply(200, saveResearchSettings(db, user, b));
+        if (op === 'metric-rule-status') return reply(200, metricRuleStatus(db));
+        if (op === 'metric-rules') {
+          admin(user);
+          store.tx(() => {
+            saveMetricRule(db, b);
+            scan(db, env.NOTIFICATIONS_ENABLED === 'true' && notificationChannels(env));
+          });
+          return reply(200, metricRuleStatus(db));
         }
         if (op === 'rules') {
           admin(user);
@@ -451,19 +490,17 @@ export function createTeamApp({
           );
           return reply(200, { thread: id, id: result.id });
         }
-        if (Object.hasOwn(catalog, op) || ['publish', 'confirm', 'approve_preview'].includes(op))
+        if (Object.hasOwn(catalog, op) || ['publish', 'confirm', 'approve_preview', 'signal-issue-draft'].includes(op))
           return reply(200, await workspaceOperation(store, user, op, b, env, send));
         if (op === 'metrika') {
           admin(user);
-          const result = await metrika(env, send);
-          const update = importDocs(store, result.docs);
-          setSetting(db, 'last_metrika_sync', { at: Date.now(), status: 'ready', samples: result.samples });
-          return reply(200, { ...update, samples: result.samples });
+          return reply(200, await syncMetrika(store, env, send));
         }
         if (op === 'status') {
           admin(user);
           return reply(200, {
             metrika: !!env.METRIKA_TOKEN,
+            metrikaSync: metrikaStatus(db, env),
             integrations: connectionInfo(db,user),
             telegram: !!env.TELEGRAM_BOT_TOKEN,
             smtp: !!env.SMTP_HOST,
@@ -509,7 +546,7 @@ export function createTeamApp({
   async function close() {
     if (timer) clearInterval(timer);
     if (server.listening) await new Promise((r) => server.close(r));
-    while (busy.size) await new Promise((r) => setTimeout(r, 50));
+    while (busy.size || researching.size) await new Promise((r) => setTimeout(r, 50));
     for (const s of spaces.values()) s.close();
     accounts.db.close();
   }

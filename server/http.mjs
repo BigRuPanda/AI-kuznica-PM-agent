@@ -7,9 +7,10 @@ import {name,openStore} from './store.mjs';
 import {page,runTool} from './analytics.mjs';
 import {makeAgent,apiConfigured} from './agent.mjs';
 import {codexTurn} from './codex-model.mjs';
+import {localData} from './data-profile.mjs';
 
 export function application(store,{env=liveModelEnv,send=fetch}={}){
-  const mode=()=>apiConfigured(env)?(env.LLM_BACKEND||'api'):env.LLM_BACKEND==='codex'?'codex':'offline';
+  const mode=()=>localData(env)?'local':apiConfigured(env)?(env.LLM_BACKEND||'api'):env.LLM_BACKEND==='codex'?'codex':'offline';
   const agent=makeAgent(store,{env,send,alternate:codexTurn});
   return createServer(async(req,res)=>{
     const json=(status,body)=>{res.writeHead(status,{'Content-Type':'application/json; charset=utf-8','Cache-Control':'no-store'});res.end(JSON.stringify(body));};

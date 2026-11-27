@@ -2,8 +2,10 @@ import { RangeChart, WEEK } from './range-chart';
 import type { Attachment } from './range-chart';
 import React, { useState } from 'react';
 import { num, sourceText } from './team-data';
-import type { View, Issue } from './team-data';
+import type { View, Issue, MetricSeries } from './team-data';
 import { analysisPeriods, changeLabel } from './case-periods';
+import { SignalEvidence } from './signal-evidence';
+import { WatchSummary } from './measurement';
 import { Icon } from './icons';
 import { moveView } from './motion';
 export const labels: Record<string, string> = {
@@ -16,6 +18,7 @@ export const labels: Record<string, string> = {
   reach: 'Выбор опций',
   gap: 'Качество измерения',
   watch: 'Проверка эффекта',
+  signal: 'Расчёт сигнала',
 };
 export const initialCards = ['summary', 'trend', 'evidence', 'timeline', 'backlog'];
 
@@ -53,6 +56,8 @@ function Sources({ view }: { view: View }) {
                   {entries.map((item) => (
                     <div className="excerpt" key={item.key}>
                       <small>{item.source}</small>
+                      {item.metadata?.question && <small>Вопрос исследования · {item.metadata.question}</small>}
+                      {item.metadata?.hypothesis && <small>Гипотеза «{item.metadata.hypothesis}» · {item.metadata.relation}</small>}
                       <p>{sourceText(item)}</p>
                     </div>
                   ))}
@@ -81,6 +86,7 @@ export function Cards({
   onAsk,
   onPin,
   onAttach,
+  onMetricSeries,
   pinned = [],
 }: {
   view: View;
@@ -89,6 +95,7 @@ export function Cards({
   onAsk?: (q: string) => void;
   onPin?: (k: string) => void;
   onAttach?: (a: Attachment) => void;
+  onMetricSeries?: (card: 'ctr' | 'reach', series: MetricSeries | undefined) => void;
   pinned?: string[];
 }) {
   const [proof, setProof] = useState('');
@@ -106,6 +113,22 @@ export function Cards({
               </button>
             )}
           </div>
+          {(k === 'ctr' || k === 'reach') && !!view[k].choices?.length && onMetricSeries && (() => {
+            const { choices = [], selection } = view[k];
+            const selected = choices.findIndex(c => selection && c.sourceId === selection.sourceId &&
+              c.definitionId === selection.definitionId && c.product === selection.product && c.segment === selection.segment);
+            return <label>Ряд наблюдений
+              <select value={selected < 0 ? '' : selected} onChange={e => {
+                const index = e.target.value;
+                onMetricSeries(k, index === '' ? undefined : choices[Number(index)]);
+              }}>
+                <option value="">Автовыбор</option>
+                {choices.map((choice, index) => <option key={index} value={index}>
+                  {choice.sourceId} · {choice.product} · {choice.segment} · {choice.stepDays === 7 ? 'неделя' : 'день'} · {choice.definitionId}
+                </option>)}
+              </select>
+            </label>;
+          })()}
           {k === 'summary' && (
             <>
               <div className="kpis">
@@ -193,30 +216,35 @@ export function Cards({
             ))}
           {k === 'ctr' && (
             <p className="big-number">
-              {view.ctr.d ? num((view.ctr.n / view.ctr.d) * 100) + '%' : 'Нет данных для CTR'}{' '}
+              {view.ctr.d && view.ctr.n != null ? num((view.ctr.n / view.ctr.d) * 100) + '%' : 'Нет данных для CTR'}{' '}
               <small>
-                {view.ctr.n} клика / {view.ctr.d} визитов, где увидели блок
+                {view.ctr.n != null && view.ctr.d != null
+                  ? view.ctr.n + ' клика / ' + view.ctr.d + ' визитов, где увидели блок'
+                  : view.ctr.reason}
               </small>
             </p>
           )}
           {k === 'reach' && (
             <p>
-              {view.reach.n} визитов с выбором опции из {view.reach.d} визитов в строках с измеренным
-              знаменателем.
+              {view.reach.d && view.reach.n != null
+                ? view.reach.n + ' визитов с выбором опции из ' + view.reach.d + ' визитов в строках с измеренным знаменателем.'
+                : view.reach.reason || 'За период нет наблюдений с измеренным знаменателем.'}
             </p>
           )}
           {k === 'gap' && (
             <p>{view.gap || 'Для вывода о причине нужны подтверждённые данные следующего шага.'}</p>
           )}
-          {k === 'watch' && <p>Период наблюдения и критерий успеха указаны в разделе «Проверка эффекта».</p>}
-          <div className="card-foot">
+          {k === 'watch' && (view.monitoring ? <WatchSummary {...view.monitoring} /> :
+            <p>Период наблюдения и критерий успеха указаны в разделе «Проверка эффекта».</p>)}
+          {k === 'signal' && view.signal?.metric && <SignalEvidence signal={view.signal} />}
+          {k !== 'watch' && <div className="card-foot">
             <button aria-expanded={proof === k} onClick={() => moveView(() => setProof(proof === k ? '' : k))}>Расчёт</button>
             {onAsk && <button onClick={() => onAsk(labels[k])}>Спросить</button>}
-          </div>
+          </div>}
           {proof === k && (
             <details open className="proof">
               <summary>Источники и период</summary>
-              {['summary', 'trend'].includes(k) && (
+              {['summary', 'trend', 'ctr', 'reach', 'timeline'].includes(k) && (
                 <p>
                   База с {view.base}, неделя релиза {view.pivot}, срез по {view.cut}.{' '}
                   {view.full ? 'Только полные недели.' : ''}
