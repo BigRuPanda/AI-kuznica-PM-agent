@@ -11,6 +11,7 @@ import { application } from './http.mjs';
 import {
   initEvidence,
   importDocs,
+  verifySourceArchive,
   updateCase,
   cases,
   digest,
@@ -63,7 +64,7 @@ export function createTeamApp({
     secure = urlBase.protocol === 'https:';
   function space(id) {
     if (!spaces.has(id)) {
-      const s = openStore(workspacePath(base, id));
+      const s = openStore(workspacePath(base, id), { seedDemo: !env.SOURCE_ARCHIVE_SHA256 });
       initEvidence(s.db);
       initWorkbench(s.db, env);
 
@@ -155,7 +156,7 @@ export function createTeamApp({
         await workJobs(s, accounts, env, send);
         const minutes = Number(env.METRIKA_SYNC_MINUTES || 0),
           sync = setting(s.db, 'last_metrika_sync', { at: 0 });
-        if (id === 'team' && env.METRIKA_TOKEN && minutes >= 5 && Date.now() - sync.at >= minutes * 60000) {
+        if (!env.SOURCE_ARCHIVE_SHA256 && id === 'team' && env.METRIKA_TOKEN && minutes >= 5 && Date.now() - sync.at >= minutes * 60000) {
           setSetting(s.db, 'last_metrika_sync', { at: Date.now(), status: 'running' });
           try {
             const data = await metrika(env, send);
@@ -302,6 +303,7 @@ export function createTeamApp({
           if (!/\.(xlsx|zip|pptx)$/i.test(name) || name.length > 250)
             throw Error('Выберите XLSX, PPTX или ZIP');
           const raw = await readBody(req, 32 * 1024 * 1024);
+          verifySourceArchive(raw, env.SOURCE_ARCHIVE_SHA256);
           const docs = JSON.parse(await python('office_import.py', [name], raw, env));
           return reply(
             200,
@@ -348,6 +350,7 @@ export function createTeamApp({
           return reply(200, {
             ...dashboard(db, user),
             bridgeEnabled: !!env.SIGNAL_BRIDGE_URL,
+            archiveOnly: !!env.SOURCE_ARCHIVE_SHA256,
             integrations: connectionInfo(db, user, env),
           });
         if (op === 'invite') {
@@ -500,6 +503,7 @@ export function createTeamApp({
         if (Object.hasOwn(catalog, op) || ['publish', 'confirm', 'approve_preview'].includes(op))
           return reply(200, await workspaceOperation(store, user, op, b, env, send));
         if (op === 'metrika') {
+          if (env.SOURCE_ARCHIVE_SHA256) throw Error('Источником этого разбора служит архив организатора.');
           admin(user);
           const result = await metrika(env, send);
           const update = importDocs(store, result.docs);
@@ -527,6 +531,8 @@ export function createTeamApp({
         if (!user) return reply(401, { error: 'Войдите в приложение' });
         if (method === 'POST' && ['/api/import', '/api/releases'].includes(p) && user.role !== 'admin')
           return reply(403, { error: 'Импорт архива доступен администратору' });
+        if (env.SOURCE_ARCHIVE_SHA256 && method === 'POST' && p === '/api/import')
+          return reply(400, {error:'В этом пространстве используется архив организатора.'});
         req.pmActor = user.name;
         if (!legacy.has(user.space)) legacy.set(user.space, application(space(user.space), { env, send }));
         req.headers.host = '127.0.0.1';

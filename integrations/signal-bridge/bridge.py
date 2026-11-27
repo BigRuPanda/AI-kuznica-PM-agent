@@ -227,9 +227,10 @@ def create_task(p):
     if (p.get('confirmed') is not True or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]{0,99}',ref)
             or not 1<=len(title)<=240 or not 1<=len(detail)<=12000 or not isinstance(p.get('report_id'),str)):
         raise ValueError('Нужны reference, report_id, title, description и явное confirmed=true.')
-    report = get_report(p['report_id'])
+    report_id = p['report_id']
+    report = get_report(report_id) if report_id else None
     extra = issue_fields(p.get('fields',{}),creating=True)
-    fingerprint = digest(encode([ref,title,detail,report['id']] + ([extra] if extra else [])))
+    fingerprint = digest(encode([ref,title,detail,report_id] + ([extra] if extra else [])))
     project_id = services.project()
     marker = 'Signal-Ref: '+digest(encode([services.redmine_url(),project_id,ref]))[:36]
     with db() as c:
@@ -243,14 +244,14 @@ def create_task(p):
                 return task_view(existing)
         else:
             c.execute('INSERT INTO tasks(ref,fingerprint,marker,report_id,title) VALUES(?,?,?,?,?)',
-                      (ref,fingerprint,marker,report['id'],title))
+                      (ref,fingerprint,marker,report_id,title))
     if existing:
         found = services.find_marker(project_id,marker)
         if len(found)!=1:
             raise ValueError('Отправка ожидает сверки в Redmine. Число задач с меткой: '+str(len(found))+'. '+marker)
         issue = found[0]
     else:
-        fields = dict(project_id=project_id,subject=title,description=detail+'\n\n'+report_text(report)+'\n\n'+marker)
+        fields = dict(project_id=project_id,subject=title,description='\n\n'.join(filter(None,[detail,report_text(report) if report else None,marker])))
         tracker_id = setting('REDMINE_TRACKER_ID')
         if tracker_id:
             fields['tracker_id'] = int(tracker_id)
@@ -307,12 +308,12 @@ def sync_tasks():
                             event(c,f"closed:{row['marker']}:{episode}",'issue_closed',
                                   f"Redmine · задача #{remote['id']} закрыта\n{remote['subject']}\nСтатус: {status['name']} · {item['ref']}{link}")
                     if closed and not c.execute('SELECT 1 FROM closures WHERE ref=? AND episode=?',(item['ref'],episode)).fetchone():
-                        report = json.loads(c.execute('SELECT body FROM reports WHERE id=?',(row['report_id'],)).fetchone()[0])
+                        report = json.loads(c.execute('SELECT body FROM reports WHERE id=?',(row['report_id'],)).fetchone()[0]) if row['report_id'] else None
                         base = setting('REDMINE_PUBLIC_URL') or services.redmine_url()
                         snapshot = dict(reference=item['ref'],episode=episode,issue=remote['id'],title=remote['subject'],
                                         status=status['name'],observed=now(),closed_on=remote.get('closed_on'),closing_note=closing_note(remote),
                                         url=base.rstrip('/')+'/issues/'+str(remote['id']),
-                                        report={k:report[k] for k in ('id','start','end','periods','status','web')})
+                                        report={k:report[k] for k in ('id','start','end','periods','status','web')} if report else None)
                         c.execute('INSERT INTO closures(ref,episode,body) VALUES(?,?,?)',(item['ref'],episode,encode(snapshot)))
                     c.execute('UPDATE tasks SET status=?,closed=?,episode=?,updated=?,checked=? WHERE ref=?',
                               (status['name'],int(closed),episode,remote['updated_on'],now(),item['ref']))

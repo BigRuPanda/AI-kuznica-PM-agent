@@ -124,6 +124,7 @@ test('verified contacts, private results, Redmine confirmation and one delivery 
       caseId: 'case-test',
       title: 'Проверить путь покупки',
       description: 'Проверить корзину',
+      includeReport: true,
     });
     const key = await call('confirm', { id: draft.id });
     assert.equal(key.key, 'Redmine #17');

@@ -644,7 +644,7 @@ export function Tracking({
       </div>}
       <p className="muted">
         {site.bridge
-          ? 'Redmine через Signal Bridge · к новой задаче прикладывается снимок Метрики'
+          ? 'Redmine через Signal Bridge'
           : site.local
             ? tab === 'confluence'
               ? 'Страницы рабочего пространства'

@@ -486,3 +486,29 @@ test('personal Redmine closes into a private wiki page, preserves the Excel vers
     store.close();
   }
 });
+
+test('a source lookup preserves zero, missing dates and the exact row of the imported version', () => {
+  const store = openStore(':memory:', { seedDemo: false });
+  try {
+    initEvidence(store.db);
+    assert.deepEqual(store.datasets(), []);
+    assert.deepEqual(store.releases(), []);
+    const doc = { file: 'source.xlsx', facts: [
+      { kind: 'sales', loc: 'Sales!A7', row: { product_family:'Product', week_start:'2026-01-05', orders_index:0 } },
+    ] };
+    importDocs(store, [doc], {notify:false});
+    const query = {product:'Product', metric:'orders_index', date:'2026-01-05'};
+    const op = (name, data) => workspaceOperation(store, owner, name, data);
+    const [hit] = op('source_value', query);
+    assert.equal(hit.value, 0);
+    assert.deepEqual(op('source_value', {...query, date:'2026-01-12'}), []);
+    assert.deepEqual(op('source_value', {...query, segment:'mobile'}), []);
+    const version = hit.version;
+    importDocs(store, [{...doc, facts:[{...doc.facts[0], row:{...doc.facts[0].row, orders_index:5}}]}], {notify:false});
+    const original = op('knowledge-source', {version, loc:hit.loc});
+    assert.equal(original.rows[0].value.orders_index, 0);
+    assert.throws(() => op('knowledge-source', {version, loc:'Sales!A99'}), /отсутствует/);
+  } finally {
+    store.close();
+  }
+});

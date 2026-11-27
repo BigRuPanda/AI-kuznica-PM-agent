@@ -36,6 +36,52 @@ function open() {
   initWorkbench(s.db);
   return s;
 }
+test('exact weekly questions reference the recorded value or report the available dates without a model', async () => {
+  const s = open();
+  try {
+    importDocs(s, [{ file: 'orders.xlsx', facts: [{
+      kind: 'sales', loc: 'Продажи!A8',
+      row: { product_family: 'Продукт', week_start: '2026-02-02', orders_index: 0 },
+    }] }], { notify: false });
+    const thread = createThread(s.db, user, 'Продажи');
+    const ask = async (date, suffix) => {
+      enqueue(s, user, { thread, question: 'Какой индекс заказов Продукт за неделю с ' + date + '? ' + suffix });
+      await workJobs(s, { publicUser: () => user }, {});
+      return messages(s.db, user, thread).items.at(-1).body;
+    };
+    const value = await ask('2026-02-02', 'Дай ссылку на строку.');
+    assert.match(value.text, /— 0/);
+    assert.match(value.readSources[0].label, /orders.xlsx · Продажи!A8/);
+    const missing = await ask('2026-02-09', 'Проверь, есть ли в книге строка за эту дату.');
+    assert.match(missing.text, /нет строки за неделю с 2026-02-09/);
+    assert.match(missing.text, /последняя — 2026-02-02/);
+    assert.deepEqual(missing.readSources, []);
+  } finally {
+    s.close();
+  }
+});
+test('a request for a new issue returns its saved draft and waits for confirmation', async () => {
+  const s = open();
+  try {
+    const { caseId, thread } = sample(s);
+    enqueue(s, user, { caseId, thread, question: 'Подготовь заявку в Redmine по этому разбору' });
+    await workJobs(s, { publicUser: () => user }, api, async (_url, options) => {
+      const request = JSON.parse(options.body);
+      assert.ok(!request.tools.some(t => t.function.name === 'page_draft'));
+      if (request.messages.at(-1).role === 'tool') return say('Заявка уже доступна в Redmine.');
+      const args = { title: 'Проверить расчёт', description: 'Сверить значение с исходной книгой' };
+      const call = { id: 'new-issue', type: 'function', function: { name: 'draft', arguments: JSON.stringify(args) } };
+      return Response.json({ choices: [{ message: { tool_calls: [call] } }] });
+    });
+    const result = messages(s.db, user, thread).items.at(-1).body;
+    assert.deepEqual(result.steps, ['issue_search', 'draft']);
+    assert.equal(result.actions[0].state, 'draft');
+    assert.match(result.text, /черновик «Проверить расчёт»/);
+    assert.match(result.text, /подтвердите создание/);
+  } finally {
+    s.close();
+  }
+});
 test('chart corrections survive later turns and the open screen cannot replace the corrected series', async () => {
   const path = join(await mkdtemp(join(tmpdir(), 'chart-focus-')), 'data.sqlite');
   let s = openStore(path);

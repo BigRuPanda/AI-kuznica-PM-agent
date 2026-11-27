@@ -1,5 +1,9 @@
 import { createHash } from 'node:crypto';
 export const digest = (value) => createHash('sha256').update(value).digest('hex');
+export function verifySourceArchive(bytes, expected) {
+  if (expected && digest(bytes) !== expected)
+    throw Error('В этом пространстве используется исходный ZIP организатора.');
+}
 export function productFamily(value = '') {
   const p = value.toLowerCase().trim();
   if (/astra|астр/.test(p)) return 'astra';
@@ -95,6 +99,18 @@ export function facts(db, kind) {
     .prepare('SELECT key,version,file,loc,body FROM facts WHERE kind=? ORDER BY key')
     .all(kind)
     .map(({ body, ...meta }) => ({ ...meta, data: JSON.parse(body) }));
+}
+export function sourceValues(db, { product, metric, date, segment }) {
+  const weekly = metric === 'orders_index';
+  return facts(db, weekly ? 'sales' : 'metrics').filter(({ data }) => {
+    const family = weekly ? data.product_family : data.product;
+    return family?.toLowerCase() === product.toLowerCase() &&
+      (weekly ? data.week_start === date : data.metric_id === metric && data.date === date) &&
+      (!segment || (weekly ? segment === 'all' : segment === data.segment));
+  }).map(({ file, loc, version, data }) => ({
+    file, loc, version, product, date, metric, segment: data.segment,
+    value: weekly ? data.orders_index : data.value, unit: weekly ? 'индекс' : data.unit, comment: data.comment,
+  }));
 }
 export function listSales(db) {
   return facts(db, 'sales')
@@ -216,6 +232,8 @@ export function search(db, query, kinds = ['interview', 'competitor', 'backlog',
           key: r.key,
           score: score + Math.min(context, 0.9),
           source: r.file + ' · ' + r.loc,
+          file: r.file,
+          loc: r.loc,
           version: r.version,
           data: r.data,
         });

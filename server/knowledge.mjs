@@ -27,13 +27,18 @@ export function excelSources(db) {
     .all();
 }
 
-export function sourceRows(db, version, offset = 0) {
+export function sourceRows(db, version, offset = 0, loc) {
   if (!Number.isSafeInteger(offset) || offset < 0) throw Error('Проверьте номер строки');
   const doc = db
-    .prepare("SELECT file,body,created FROM documents WHERE version=? AND lower(file) LIKE '%.xlsx'")
+    .prepare("SELECT file,body,created FROM documents WHERE version=? AND (lower(file) LIKE '%.xlsx' OR lower(file) LIKE '%.pptx')")
     .get(version);
   if (!doc) throw Error('Версия Excel недоступна в этом пространстве');
   const { facts } = JSON.parse(doc.body);
+  if (loc) {
+    const index = facts.findIndex(r => r.loc === loc);
+    if (index < 0) throw Error('Строка отсутствует в этой версии документа');
+    offset = index;
+  }
   return {
     file: doc.file,
     version,

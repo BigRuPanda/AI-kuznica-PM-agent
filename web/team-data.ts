@@ -26,7 +26,7 @@ export type Case = {
   effect?: Watch;
 };
 export type Thread = { id: string; title: string; scope: string; canRename: boolean; canDelete: boolean };
-export type Source = { file: string; versions: number; updated: number };
+export type Source = { total: number; role?: string; version: string; file: string; versions: number; updated: number };
 export type Release = {
   release_id: string;
   release_date: string;
@@ -35,6 +35,7 @@ export type Release = {
 };
 export type Home = {
   bridgeEnabled: boolean;
+  archiveOnly?: boolean;
   integrations: Record<'redmine' | 'confluence', import('./tracking').Integration>;
   user: User;
   cases: Case[];
@@ -138,7 +139,7 @@ export type Msg = {
     personal?: { caseId: string; cards: string[]; full?: boolean; control?: string; pin?: boolean };
     rounds?: number;
     steps?: string[];
-    readSources?: { url: string; label: string }[];
+    readSources?: { url: string; label: string; detail?: string }[];
     full?: boolean;
     sourceQuery?: string;
     cards?: string[];

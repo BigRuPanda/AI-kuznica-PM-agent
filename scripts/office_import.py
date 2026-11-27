@@ -130,6 +130,9 @@ def extract(data, name, depth=0):
         for item in z.infolist():
             if item.filename.lower().endswith((".xlsx",".pptx",".zip")):
                 out.extend(extract(read(z,item.filename),posixpath.basename(item.filename),depth+1))
+            elif item.filename.lower().endswith((".pdf",".docx")):
+                # Keep supporting documents in the inventory. Account instructions may contain credentials.
+                out.append({"file":posixpath.basename(item.filename),"facts":[],"role":"reference"})
         if not out:
             raise ValueError("В файле нет поддерживаемых таблиц или презентаций")
         return out

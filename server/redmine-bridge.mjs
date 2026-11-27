@@ -59,8 +59,7 @@ export function bridgeTracker(db, user, env, send) {
     const body = JSON.parse(draft.body);
     const reference = 'web-draft-' + id;
     const stored = db.prepare('SELECT report FROM redmine_drafts WHERE reference=?').get(reference);
-    const report = stored?.report || body.report?.id;
-    if (!report) throw Error('У черновика нет снимка Метрики. Подготовьте новый черновик.');
+    const report = stored?.report ?? body.report?.id ?? '';
     db.prepare('INSERT OR IGNORE INTO redmine_drafts VALUES(?,?,?)').run(reference, id, report);
     const { title, description, priorityId, assigneeId, trackerId } = changes;
     beforeWrite();
@@ -142,7 +141,7 @@ export async function collectClosures(store, accounts, env, send) {
         WHERE r.reference=?`,
         )
         .get(row.reference);
-      if (draft && draft.report === row.report.id) {
+      if (draft && (draft.report || '') === (row.report?.id || '')) {
         saveClosure(db, accounts, draft.case_id, draft.user, {
           ...row,
           description: JSON.parse(draft.body).description,

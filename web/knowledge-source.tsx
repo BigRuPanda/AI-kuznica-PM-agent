@@ -7,15 +7,15 @@ type Extract = Workbook & {
   rows: { loc: string; value: string | Record<string, unknown> }[];
 };
 
-export function SourceExtract({ version }: { version: string }) {
-  const [offset, setOffset] = useState(0),
+export function SourceExtract({ version, loc }: { version: string; loc?: string }) {
+  const [offset, setOffset] = useState<number | undefined>(),
     [data, set] = useState<Extract>(),
     [error, fail] = useState('');
   useEffect(() => {
     let live = true;
     set(undefined);
     fail('');
-    post<Extract>('knowledge-source', { version, offset })
+    post<Extract>('knowledge-source', { version, offset, loc: offset === undefined ? loc : undefined })
       .then((d) => {
         if (live) set(d);
       })
@@ -25,7 +25,7 @@ export function SourceExtract({ version }: { version: string }) {
     return () => {
       live = false;
     };
-  }, [version, offset]);
+  }, [version, offset, loc]);
   return (
     <section className="paper">
       <a href="#knowledge">База знаний</a>
@@ -55,9 +55,9 @@ export function SourceExtract({ version }: { version: string }) {
             </div>
           ))}
           <div className="actions">
-            {offset > 0 && <button onClick={() => setOffset(offset - 40)}>Предыдущие 40</button>}
-            {offset + data.rows.length < data.total && (
-              <button onClick={() => setOffset(offset + 40)}>Следующие 40</button>
+            {data.offset > 0 && <button onClick={() => setOffset(Math.max(0, data.offset - 40))}>Предыдущие 40</button>}
+            {data.offset + data.rows.length < data.total && (
+              <button onClick={() => setOffset(data.offset + 40)}>Следующие 40</button>
             )}
           </div>
         </>

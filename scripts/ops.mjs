@@ -3,7 +3,7 @@ import { basename, dirname, join, resolve } from 'node:path';
 import { DatabaseSync, backup } from 'node:sqlite';
 import { databasePath } from '../server/config.mjs';
 import { openStore } from '../server/store.mjs';
-import { initEvidence, importDocs, cases, analysisView, setSetting, digest } from '../server/evidence.mjs';
+import { initEvidence, importDocs, verifySourceArchive, cases, analysisView, setSetting, digest } from '../server/evidence.mjs';
 import { metrika, telegram, python, mail } from '../server/connectors.mjs';
 import { openAccounts, workspacePath } from '../server/accounts.mjs';
 import { initConnections, personalConnection, targetFor } from '../server/tracker-connections.mjs';
@@ -142,7 +142,9 @@ async function main() {
     if (op === 'import' || op === 'prepare-demo') {
       if (!file) throw Error('Укажите путь к XLSX, PPTX или ZIP');
       const path = resolve(file);
-      const docs = JSON.parse(await python('office_import.py', [basename(path)], await readFile(path)));
+      const bytes = await readFile(path);
+      verifySourceArchive(bytes, env.SOURCE_ARCHIVE_SHA256);
+      const docs = JSON.parse(await python('office_import.py', [basename(path)], bytes));
       console.log(
         importDocs(store, docs, { notify: op === 'import' && env.NOTIFICATIONS_ENABLED === 'true' }),
       );

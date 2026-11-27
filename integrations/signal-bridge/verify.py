@@ -54,6 +54,15 @@ class Checks(unittest.TestCase):
         self.report=bridge.refresh_report()
         self.p=dict(reference='SIG-8',title='Проверка',description='Проверить период',report_id=self.report['id'],confirmed=True)
 
+    def test_task_without_report_does_not_attach_the_latest(self):
+        with patch.object(bridge, 'get_report', side_effect=AssertionError('Unexpected report lookup')):
+            task = bridge.create_task(dict(self.p, report_id=''))
+        self.assertEqual(task['report_id'], '')
+        self.assertNotIn(self.report['web'], self.posts[0]['issue']['description'])
+        self.issue['status'] = {'id':4, 'name':'Done'}
+        self.assertEqual(bridge.sync_tasks()['errors'], [])
+        self.assertIsNone(bridge.closures(0)[0]['report'])
+
     def test_signal_requires_volume_and_notifies_once(self):
         self.data['periods'][1][-1]=16
         self.assertEqual(bridge.refresh_report()['status'],'Сигнал')

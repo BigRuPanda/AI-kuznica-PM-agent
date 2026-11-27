@@ -9,6 +9,8 @@ import { materialForResult, readMaterial } from './materials.mjs';
 import { chartObservations } from './chart-focus.mjs';
 
 const system = [
+  'Проверяй конкретное значение за дату через source_value. Для orders_index используй точное семейство из текущего разбора. Если строки нет, скажи, каких данных нет. Для фразы из исследования называй файл и лист с ячейкой или слайд. Темы ответа не являются дословной цитатой. Обозначай гипотезы явно.',
+
   'На запрос о статусе задачи, версии страницы или комментарии верни только запрошенные поля. Цитируй комментарий при закрытии дословно из issue_read.closingNote.text. У метрик, комментариев Redmine и источников Excel разное происхождение.',
   'Если запрошенный результат недоступен или шаг завершился ошибкой, сообщи об этом первым предложением, назови конкретную причину. Отдельно покажи только выполненную часть. Соблюдай запрошенные даты и детализацию; альтернативные данные подпиши отдельно.',
   'При продолжении обсуждения графика context.materials задаёт точный ряд, версию, сегмент и период. Явное уточнение пользователя определяет предмет последующих вопросов. Объясняй по observations этого материала. Сравнение будней и выходных описывает форму дневного ряда, а причина различий требует отдельных свидетельств.',
@@ -30,6 +32,12 @@ const tools = Object.entries(operations).map(([name, [description, shape]]) => {
   return { type: 'function', function: { name: name.replaceAll('-', '_'), description, parameters } };
 });
 const opNames = Object.fromEntries(Object.keys(operations).map((k) => [k.replaceAll('-', '_'), k]));
+const createIssueTool = {
+  type: 'function', function: {
+    name: 'draft', description: 'Подготовить новую задачу в текущем разборе для подтверждения человеком.',
+    parameters: z.toJSONSchema(z.object({ title: z.string(), description: z.string() })),
+  },
+};
 function concise(name, r) {
   if (name === 'issue_read') {
     const comments = (r.comments || []).map(c => ({
@@ -43,7 +51,9 @@ function concise(name, r) {
       calc: v.id,
       product: v.product,
       period: [v.base, v.pivot, v.cut],
-      summary: v.summary.map(({ rows, ...s }) => s),
+      summary: v.summary.map(({ rows, ...s }) => ({ ...s,
+        sources: rows.map(row => row.source),
+      })),
       events: v.timeline.map((f) => ({ location: f.loc, ...f.data })),
       evidence: v.evidence.map((e) => ({ source: e.source, text: e.data })),
       corrections: v.corrections,
@@ -112,6 +122,15 @@ function note(state, op, r) {
     if (/^(?:https?:\/\/|#(?:demo-issue|demo-page|knowledge-source)\/)/i.test(url || '')) {
       const sources = (state.readSources ??= []);
       if (!sources.some(s => s.url === url)) sources.push({ url, label });
+    }
+  }
+  const references = ['source_value', 'search'].includes(op) ? r : [];
+  for (const row of references.slice(0, 8)) {
+    const url = '#knowledge-source/' + row.version + '/' + encodeURIComponent(row.loc);
+    const sources = state.readSources ??= [];
+    if (!sources.some(s => s.url === url)) {
+      const label = row.file + ' · ' + row.loc;
+      sources.push({url, label, ...(op === 'source_value' && {detail: row.metric + ' = ' + row.value + ' · ' + row.date})});
     }
   }
   if (op === 'funnel') {
@@ -319,6 +338,15 @@ export async function runAssistant(
     };
     save(state);
   }
+  const createRequested = state.caseId && authorizedWrite('draft', b.question) &&
+    /(?:создай|создать|подготовь|подготовить|заведи|оформи|составь).{0,65}(?:задач|заявк|тикет|redmine)/iu.test(b.question) &&
+    !/(?:существующ|изменени|статус|приоритет|комментар|исполнител|обнови|#[0-9]|№\s*\d)/iu.test(b.question);
+  const singleIssue = createRequested && !/страниц|confluence|публикац|документаци|построй|график|создай разбор/iu.test(b.question);
+  const turnTools = singleIssue ? [
+    createIssueTool,
+    ...tools.filter(t => ['source_value','issue_search','search','view','knowledge_source','knowledge_sources'].includes(t.function.name)),
+  ] : tools;
+  const allowedOps = new Set(turnTools.map(t => opNames[t.function.name]));
   const stop = (message, warning, outcome = 'done') => {
     const identifiers = [
       ...(state.rangeIds || []).map((id) => [id, 'выделенный участок']),
@@ -344,7 +372,7 @@ export async function runAssistant(
       const start = Date.now();
       let response;
       try {
-        response = await providerCall(env, state.messages, tools, 'auto', send);
+        response = await providerCall(env, state.messages, turnTools, 'auto', send);
         if (state.issues) delete state.issues.provider;
       } catch (e) {
         state.round++;
@@ -406,7 +434,7 @@ export async function runAssistant(
         }
         const causal = state.rangeIds.length && /почему|причин|опроверг/i.test(b.question);
         const draftRequested =
-          authorizedWrite('draft', b.question) && /задач|черновик|тикет/i.test(b.question);
+          authorizedWrite('draft', b.question) && /задач|заявк|черновик|тикет/i.test(b.question);
         const missing =
           (draftRequested || /черновик.{0,25}(?:сохран[её]н|создан|подготовлен)/i.test(result)) &&
           !state.actions.some((a) => a.op === 'draft')
@@ -459,6 +487,9 @@ export async function runAssistant(
             'partial',
           );
         }
+        const draft = singleIssue && state.actions.find(action => action.op === 'draft' && action.state === 'draft');
+        if (draft)
+          return stop('Сохранён черновик «' + draft.title + '». Проверьте описание и подтвердите создание задачи.');
         return stop(result);
       }
       state.messages.push({
@@ -475,8 +506,19 @@ export async function runAssistant(
         op = opNames[call.function.name];
       let value, signature;
       try {
-        if (!op) throw Error('Неизвестная операция');
-        const args = JSON.parse(call.function.arguments || '{}');
+        if (!allowedOps.has(op)) throw Error('Операция недоступна для этого поручения');
+        let args = JSON.parse(call.function.arguments || '{}');
+        if (op === 'draft' && singleIssue) {
+          args = {caseId: state.caseId, title: args.title, description: args.description};
+          const prior = history.findLast(m => m.role === 'assistant' && m.body.caseId === state.caseId && m.body.readSources?.length);
+          const sources = (state.readSources?.length ? state.readSources : (prior?.body.readSources || []))
+            .filter(s => s.url.startsWith('#knowledge-source/') && s.label).slice(0, 5);
+          if (sources.length) {
+            const citations = sources.map(s => s.detail ? s.label + ' · ' + s.detail : s.label).join('\n');
+            args.description = (args.description || '').slice(0, Math.max(0, 3950 - citations.length)) +
+              '\n\nОснования из разбора:\n' + citations;
+          }
+        }
         if (op === 'funnel') {
           args.thread = b.thread;
           args.rangeId ||= state.anchorId;

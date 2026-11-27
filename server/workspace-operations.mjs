@@ -6,6 +6,7 @@ import {
   effect,
   search,
   facts,
+  sourceValues,
   metricStepDays,
   rankBacklog,
   updateCase,
@@ -63,6 +64,7 @@ const issueInput = {
   title: z.string().max(240).optional(),
   description: z.string().max(4000).optional(),
   key: optional,
+  includeReport: z.boolean().optional(),
   priority: optional,
   priorityId: optional,
   statusId: optional,
@@ -95,6 +97,10 @@ export const operations = {
       calc: id.optional(),
     },
   ],
+  source_value: [
+    'Найти значение показателя в исходном Excel по точной дате и продукту. Для недельного индекса заказов metric=orders_index, date — начало недели. Если строк нет, сообщи об отсутствии данных.',
+    { product: text, metric: text, date: z.string().regex(/^[0-9]{4}-[0-9]{2}-[0-9]{2}$/), segment: optional },
+  ],
   overview: ['Найти активные сигналы, разборы и беседы команды', {}],
   metrics: ['Список доступных семейств, метрик и разрезов', {}],
   view: ['Посчитать недельный индекс и контроль, открыть разбор, проверить соседние периоды', viewInput],
@@ -115,7 +121,7 @@ export const operations = {
   case_links: ['Доступные участнику задачи и страницы этого разбора', { caseId: id }],
   'knowledge-sources': ['Список загруженных Excel-книг базы знаний с названиями и точными версиями.', {}],
   'knowledge-source': ['Прочитать до 40 строк Excel из базы знаний по версии, полученной из knowledge_sources.', {
-    version: z.string().regex(/^[a-f0-9]{64}$/), offset: z.number().int().nonnegative().optional(),
+    version: z.string().regex(/^[a-f0-9]{64}$/), loc: optional, offset: z.number().int().nonnegative().optional(),
   }],
   issue_search: ['Найти задачи в проекте Redmine', { query: z.string().max(400) }],
   issue_read: [
@@ -272,7 +278,7 @@ export function workspaceOperation(
   const b = meta ? z.object(meta[1]).parse(input) : input;
   const current = () => visibleCase(db, user, b.caseId);
   if (op === 'knowledge-sources') return excelSources(db);
-  if (op === 'knowledge-source') return sourceRows(db, b.version, b.offset);
+  if (op === 'knowledge-source') return sourceRows(db, b.version, b.offset, b.loc);
   if (op === 'funnel') {
     if (!b.thread) throw Error('Укажите беседу для сохранения результата');
     const shared = thread(db, user, b.thread).scope === 'group';
@@ -303,6 +309,7 @@ export function workspaceOperation(
     return { material: ref, chart: r.requestedChart, available: r.funnelAvailable, ...researchContext(r) };
   }
   if (op === 'overview') return dashboard(db, user);
+  if (op === 'source_value') return sourceValues(db, b);
   if (op === 'metrics') {
     return {
       metrics: metricCatalog(db),
@@ -348,6 +355,8 @@ export function workspaceOperation(
   }
   if (op === 'create-case') {
     const { title, product, release, message, ...plan } = b;
+    if (env.SOURCE_ARCHIVE_SHA256 && !facts(db, 'sales').some(r => r.data.product_family === product))
+      throw Error('Выберите семейство продукта из загруженной книги.');
     let origin = null;
     if (message) {
       const m = db

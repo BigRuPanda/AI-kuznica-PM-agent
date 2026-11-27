@@ -250,7 +250,7 @@ export async function prepareTracker(store, user, kind, input, env, send, reques
   let body;
   if (kind === 'issue') {
     body = await issueDraft(client, input, target);
-    if (!input.key && !target.local && env.SIGNAL_BRIDGE_URL) {
+    if (input.includeReport && !env.SOURCE_ARCHIVE_SHA256 && !input.key && !target.local && env.SIGNAL_BRIDGE_URL) {
       if (target.bridge && !body.description.trim())
         throw Error('Укажите описание проверки для задачи с отчётом Метрики');
       body.report = await draftReport(env, send);

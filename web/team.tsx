@@ -169,7 +169,8 @@ const stepNames: Record<string, string> = {
   page_search: 'Найдены страницы',
   page_read: 'Прочитана страница',
   'knowledge-sources': 'Найдены книги Excel',
-  'knowledge-source': 'Прочитаны строки Excel',
+  'knowledge-source': 'Прочитаны строки документа',
+  source_value: 'Проверено значение в исходной книге',
   page_draft: 'Подготовлена публикация в Confluence',
   'create-case': 'Создан личный разбор',
   set_view: 'Обновлён личный экран',
@@ -520,7 +521,7 @@ function Chat({
               <p>{m.body.text}</p>
             )}
             {m.body.readSources?.map((source) => (
-              <div key={source.url}><a href={source.url}>{source.label}</a></div>
+              <div key={source.url}><a href={source.url}>{source.label}</a>{source.detail && <small> · {source.detail}</small>}</div>
             ))}
             {m.body.materials?.map((item) => (
               <MaterialCard key={item.id} item={item} />
@@ -1510,7 +1511,7 @@ function Sources({ home, action, refresh }: { home: Home; action: Action; refres
             </label>
             <div className="actions source-actions">
               <button className="primary">Загрузить и пересчитать</button>
-              <button
+              {!home.archiveOnly && <button
                 type="button"
                 onClick={() =>
                   action(async () => {
@@ -1521,7 +1522,7 @@ function Sources({ home, action, refresh }: { home: Home; action: Action; refres
                 }
               >
                 Синхронизировать Метрику
-              </button>
+              </button>}
             </div>
           </form>
         </section>
@@ -1530,9 +1531,10 @@ function Sources({ home, action, refresh }: { home: Home; action: Action; refres
         <h3>Загруженные материалы</h3>
         {home.sources.map((s) => (
           <div className="event-row" key={s.file}>
-            <b>{s.file}</b>
+            <b>{s.total > 0 && (home.bridgeEnabled || home.archiveOnly) ? <a href={'#knowledge-source/'+s.version}>{s.file}</a> : s.file}</b>
             <small>
-              Версий: {s.versions} · {new Date(s.updated).toLocaleDateString('ru-RU')}
+              {s.role === 'reference' ? 'Справочный файл · содержимое не индексируется' : 'Распознано записей: ' + s.total}
+              {' · '}Версий: {s.versions} · {new Date(s.updated).toLocaleDateString('ru-RU')}
             </small>
           </div>
         ))}
@@ -1767,7 +1769,8 @@ function Workspace({ user, onLogout }: { user: User; onLogout: () => void }) {
     [releaseRef, selectRelease] = useState(''),
     [menu, setMenu] = useState(readMenuLayout);
   const bridgePages = !!home?.bridgeEnabled;
-  const route = ['demo-page', 'knowledge', 'knowledge-source'].includes(requestedRoute) && !bridgePages ? 'cases' : requestedRoute;
+  const pageHidden = ['demo-page', 'knowledge'].includes(requestedRoute) && !bridgePages;
+  const route = pageHidden ? 'cases' : requestedRoute;
   const sidebar = useSidebarWidth();
   const settings = route === 'settings' || (route === 'cases' && id === 'settings');
   const homeVersion = useRef(0);
@@ -1886,7 +1889,7 @@ function Workspace({ user, onLogout }: { user: User; onLogout: () => void }) {
         ) : route === 'knowledge' ? (
           <Knowledge admin={home.user.role==='admin'} />
         ) : route === 'knowledge-source' ? (
-          <SourceExtract key={id} version={id} />
+          <SourceExtract key={id+selected} version={id} loc={selected && decodeURIComponent(selected)} />
         ) : settings ? (
           <Settings home={home} action={action} refresh={refresh} menu={menu} changeMenu={changeMenu} />
         ) : route === 'sources' ? (
@@ -1974,7 +1977,10 @@ function Workspace({ user, onLogout }: { user: User; onLogout: () => void }) {
                 </label>
                 <label>
                   Продукт
-                  <input name="product" required list="products" />
+                  {home.archiveOnly ? <select name="product" required defaultValue="">
+                    <option value="" disabled>Выберите из загруженных данных</option>
+                    {home.products.map(p => <option key={p}>{p}</option>)}
+                  </select> : <input name="product" required list="products" />}
                   <datalist id="products">
                     {home.products.map((p) => (
                       <option key={p}>{p}</option>

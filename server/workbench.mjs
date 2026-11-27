@@ -11,6 +11,7 @@ import {
   fmt,
   facts,
   listSales,
+  sourceValues,
   setting,
   defaultRules,
   digest,
@@ -116,7 +117,9 @@ export function dashboard(db, user) {
       .all(user.id)
       .map((chat) => ({ ...chat, canRename: canRenameThread(user, chat), canDelete: canDeleteThread(user, chat) })),
     sources: db
-      .prepare('SELECT file,count(*) versions,max(created) updated FROM documents GROUP BY file')
+      .prepare(`SELECT file, count(*) versions, max(created) updated, version,
+          json_array_length(body,'$.facts') total, json_extract(body,'$.role') role
+          FROM documents GROUP BY file ORDER BY file`)
       .all(),
     products: [...new Set(listSales(db).map((r) => r.product))],
     rules: setting(db, 'rules', defaultRules),
@@ -467,6 +470,26 @@ function factsForCards(view, cards, backlog) {
     lines.push(...view.corrections.map((x) => 'Поправка PM к ' + x.source + ': ' + x.comment));
   return lines;
 }
+function weeklySourceAnswer(db, question) {
+  const [request, ...followups] = question.toLowerCase().trim().split(/[?!.]+/u).map(s => s.trim()).filter(Boolean);
+  const lookup = request?.match(/^(?:какой|каков|чему равен|покажи|назови|скажи)\s+(?:был\s+)?индекс\s+(?:самостоятельных\s+)?заказов\s+(.+?)\s+за неделю с\s+(\d{4}-\d{2}-\d{2})$/u);
+  const citation = /^(?:укажи|покажи|назови|дай) (?:значение и )?(?:ссылку на )?(?:источник|строку|ячейку)(?: данных| в источнике| исходной книги| в книге)?$/u;
+  const checkRow = /^проверь,? есть ли (?:в (?:источнике|книге) )?строка(?: (?:за эту|на эту) дату)?$/u;
+  if (!lookup || followups.some(s => !citation.test(s) && !checkRow.test(s))) return;
+  const [, requestedProduct, date] = lookup;
+  const weeks = listSales(db).filter(r => r.product.toLowerCase() === requestedProduct);
+  if (!weeks.length) return;
+  const product = weeks[0].product;
+  const rows = sourceValues(db, { product, metric: 'orders_index', date });
+  const readSources = rows.map(r => ({
+    label: r.file + ' · ' + r.loc, url: '#knowledge-source/' + r.version + '/' + encodeURIComponent(r.loc),
+    detail: r.metric + ' = ' + r.value + ' · ' + date,
+  }));
+  const text = rows.length
+    ? rows.map(r => 'Индекс самостоятельных заказов ' + product + ' за неделю с ' + date + ' — ' + fmt(r.value) + '. ' + r.file + ' · ' + r.loc + (r.comment ? '. ' + r.comment : '')).join('\n')
+    : 'В загруженных продажах ' + product + ' нет строки за неделю с ' + date + '. Первая неделя в данных — ' + weeks[0].week + ', последняя — ' + weeks.at(-1).week + '.';
+  return { text, product, readSources, steps: ['source_value'], mode: 'source-value', outcome: 'done' };
+}
 export async function answer(store, user, b, env = process.env, send = fetch, job = randomUUID()) {
   const db = store.db;
   const { scope } = thread(db, user, b.thread);
@@ -487,6 +510,10 @@ export async function answer(store, user, b, env = process.env, send = fetch, jo
   if (focus?.id) b = { ...b, materialIds: [focus.id], screen: undefined };
   const history = recentDialogue(db, b.thread, b.questionSeq);
   if (b.caseId) visibleCase(db, user, b.caseId);
+  if (!b.rangeId && !b.materialIds?.length) {
+    const value = weeklySourceAnswer(db, b.question);
+    if (value) return { ...value, caseId: b.caseId };
+  }
   const daily = store.tx(() => dayComparison(db, user, b, history, shared));
   if (daily) return daily;
   const intent = researchIntent(b.question);
@@ -676,7 +703,7 @@ function briefConclusion(text, findings) {
 }
 
 function completeMaterials(store, user, job, b, result) {
-  if (result.mode === 'daily') return result;
+  if (result.mode === 'daily' || result.mode === 'source-value') return result;
   if (result.chartChoices) return { ...result, materials: [] };
   const db = store.db;
   const r = JSON.parse(db.prepare('SELECT body FROM job_research WHERE job=?').get(job)?.body || 'null');
