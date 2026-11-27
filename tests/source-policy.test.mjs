@@ -116,6 +116,59 @@ test('a long research digest cannot displace a focused record with the same matc
   assert.ok(rows.every(row => !row.text.includes('sensor')));
 });
 
+test('archive task identifiers come from both sides of the relationship and survive rendering', async t => {
+  const store=openStore(':memory:',{seedDemo:false});
+  t.after(()=>store.close());
+  initEvidence(store.db);
+  initSourcePolicy(store.db);
+  const facts=[
+    {kind:'releases',loc:'Calendar!A2',row:{release_id:'SHIP-41',release_date:'2026-03-03',description:'Калибровка спектрометра',related_task_ids:'LAB-813'}},
+    {kind:'backlog',loc:'Plan!A2',row:{task_id:'LAB-813',title:'Калибровка спектрометра'}},
+    {kind:'backlog',loc:'Plan!A3',row:{task_id:'LAB-205',title:'Сверка эталона',release_id:'SHIP-41, SHIP-92'}},
+    {kind:'releases',loc:'Calendar!A3',row:{release_id:'SHIP-92',release_date:'2026-05-12',description:'Очередь заявок'}},
+    {kind:'releases',loc:'Calendar!A4',row:{release_id:'SHIP-33',release_date:'2026-03-04',description:'Освещение',related_task_ids:'нет данных'}},
+  ];
+  importApproved(store,[{file:'Lab.xlsx',facts}],sourcePermission(store.db,sha,archive,'archive.zip'),false);
+  const q='Какие задачи стояли за калибровкой спектрометра?';
+  const evidence=archiveEvidence(store.db,q);
+  const reply=await archiveAnswer(store,q,evidence,{LLM_DATA_MODE:'analysis',LLM_BASE_URL:'http://localhost',LLM_MODEL:'fixture'},
+    ()=>assert.fail('The exact identifiers and titles are already available'),'test-job');
+  assert.match(reply.text,/LAB-813 — Калибровка спектрометра/);
+  assert.match(reply.text,/LAB-205 — Сверка эталона/);
+  assert.doesNotMatch(reply.text,/SHIP-92/);
+  assert.deepEqual(reply.readSources.map(s=>s.label.split(' · ')[1]).sort(),['Calendar!A2','Plan!A2','Plan!A3']);
+  assert.match(archiveEvidence(store.db,'Укажи номер задачи релиза SHIP-33').map(x=>x.text).join(' '),/не подтверждена/);
+  const contextual=archiveEvidence(store.db,'Назови номер задачи',{releaseId:'SHIP-92'});
+  assert.match(contextual.map(x=>x.text).join(' '),/LAB-205/);
+  assert.doesNotMatch(contextual.map(x=>x.text).join(' '),/LAB-813|SHIP-41/);
+  assert.deepEqual(archiveEvidence(store.db,'Какая задача у SHIP-999?'),[]);
+});
+
+test('dates and affected metric both constrain calendar evidence in a measurement answer', t => {
+  const store=openStore(':memory:',{seedDemo:false});
+  t.after(()=>store.close());
+  initEvidence(store.db);
+  initSourcePolicy(store.db);
+  const facts=[
+    {kind:'dictionary',loc:'Metric!A2',row:{metric_id:'echo',metric_name:'Эхосигналы'}},
+    {kind:'metrics',loc:'Readings!A2',row:{date:'2026-03-04',metric_id:'echo',segment:'desktop',value:25,unit:'импульсов'}},
+    ...[
+      ['EXP-21','2026-03-04','echo','Смена режима'],
+      ['EXP-31','2026-03-04','echo_noise','Эхосигналы на стенде'],
+      ['EXP-42','2026-03-05','echo','Эхосигналы'],
+    ].map(([release_id,release_date,affected_metrics,description],i)=>({kind:'releases',loc:'Calendar!A'+(i+2),row:{release_id,release_date,affected_metrics,description}})),
+  ];
+  importApproved(store,[{file:'Lab.xlsx',facts}],sourcePermission(store.db,sha,archive,'archive.zip'),false);
+  const q='Эхосигналы за 2026-03-04 с компьютеров';
+  const evidence=archiveEvidence(store.db,q+' — каким релизом можно объяснить изменение?');
+  const answer=evidence.map(x=>x.text).join(' ');
+  assert.match(answer,/25 импульсов/);
+  assert.match(answer,/EXP-21/);
+  assert.doesNotMatch(answer,/EXP-31|EXP-42/);
+  assert.deepEqual(evidence.flatMap(e=>e.refs).filter(s=>s.loc.startsWith('Calendar')).map(s=>s.loc),['Calendar!A2']);
+  assert.ok(archiveEvidence(store.db,q+'?').every(e=>e.refs.every(s=>!s.loc.startsWith('Calendar'))));
+});
+
 test('archive answers fall back to the retrieved source on timeout or an invented number', async t => {
   const store = fixture(t);
   initWorkbench(store.db);

@@ -40,7 +40,7 @@ import {
 } from './agent-research.mjs';
 import { asksToDraw, chartFindings, chartObservations, resolveChartFocus } from './chart-focus.mjs';
 import { dayComparison, explicitDayWindow } from './day-comparison.mjs';
-import { archiveAnswer, archiveEvidence, archiveInquiry } from './archive-search.mjs';
+import { archiveAnswer, archiveEvidence, archiveInquiry, asksArchiveTask } from './archive-search.mjs';
 
 const chatItemColumns = '(seq INTEGER PRIMARY KEY AUTOINCREMENT,thread TEXT,author TEXT,role TEXT,body TEXT,created INTEGER);';
 
@@ -522,7 +522,7 @@ export async function answer(store, user, b, env = process.env, send = fetch, jo
         'Какой график вы имеете в виду?\n' + focus.choices.map((c, i) => i + 1 + '. ' + c.label).join('\n'),
     };
   if (focus?.id) b = { ...b, materialIds: [focus.id], screen: undefined };
-  if (b.caseId) visibleCase(db, user, b.caseId);
+  const activeCase = b.caseId ? visibleCase(db, user, b.caseId) : undefined;
   if (!b.rangeId && !b.materialIds?.length) {
     const value = weeklySourceAnswer(db, b.question);
     if (value) return { ...value, caseId: b.caseId };
@@ -530,13 +530,24 @@ export async function answer(store, user, b, env = process.env, send = fetch, jo
   const daily = store.tx(() => dayComparison(db, user, b, history, shared));
   if (daily) return daily;
   const intent = researchIntent(b.question);
-  if (!focus && !b.rangeId && !b.materialIds?.length && !b.screen?.calc && !b.decisionReleaseId &&
-      !b.caseId && !intent.chart && archiveInquiry(b.question) && !history.at(-1)?.body.rangeId) {
+  const taskQuery = asksArchiveTask(b.question);
+  const contextualTask = taskQuery && /(?:эт[а-яё]*|текущ[а-яё]*|выбранн[а-яё]*)\s+(?:релиз|выкладк)|(?:за ним|за ней|у него|к нему)|^(?:а\s+)?(?:какая задача|(?:назови|укажи) номер задачи)[?!.\s]*$/iu.test(b.question);
+  if (!focus && !b.rangeId && !b.materialIds?.length && !b.screen?.calc &&
+      ((!b.decisionReleaseId && !b.caseId) || (taskQuery && !(shared && activeCase?.body.owner))) &&
+      !intent.chart && archiveInquiry(b.question) && !history.at(-1)?.body.rangeId) {
     const previous = history.at(-1)?.body;
-    const query = previous?.archiveQuestion && /^(?:а |тогда |уточни|а если|и что)/iu.test(b.question)
+    const query = previous?.archiveQuestion && (contextualTask || /^(?:а |тогда |уточни|а если|и что)/iu.test(b.question))
       ? previous.archiveQuestion + '\n' + b.question : b.question;
-    const evidence = archiveEvidence(db, query);
-    if (evidence.length) return { ...await archiveAnswer(store, query, evidence, env, send, job), archiveQuestion: b.question };
+    const releaseId = b.decisionReleaseId || (contextualTask ? activeCase?.body.release : undefined);
+    const evidence = archiveEvidence(db, query, {releaseId});
+    if (evidence.length && (!activeCase && !b.decisionReleaseId || evidence.some(row=>row.kind==='task-link'))) {
+      return { ...await archiveAnswer(store, query, evidence, env, send, job), archiveQuestion: b.question,
+        ...(activeCase ? {caseId:activeCase.id,product:activeCase.product} : {}) };
+    }
+    if (taskQuery && !activeCase && !b.decisionReleaseId &&
+        (contextualTask || /номер|идентификатор|б[еэ]клог|релиз|связан/iu.test(b.question)))
+      return {mode:'archive',outcome:'clarification',steps:['search'],readSources:[],
+        text:'Укажите название функции или идентификатор релиза, чтобы найти связанную задачу в архиве.'};
     if (/в архиве|по архиву|в загруженн[а-яё]* (?:книг|таблиц|источник)/iu.test(b.question))
       return { mode:'archive', outcome:'clarification', steps:['search'], readSources:[],
         text:'В загруженном архиве не нашлось совпадений. Уточните название продукта, показателя или исследования.' };
