@@ -19,7 +19,7 @@ import {
   type ChatAttachment,
   type MaterialRef,
 } from './materials';
-import React, { useState, useEffect, useLayoutEffect, useCallback, useRef } from 'react';
+import React, { useState, useEffect, useLayoutEffect, useCallback, useRef, type RefObject } from 'react';
 import { createRoot } from 'react-dom/client';
 import { flushSync } from 'react-dom';
 import { ChatScenarioMenu } from './chat-scenario-menu';
@@ -277,6 +277,7 @@ function Chat({
   caseId,
   threads,
   onThreadAction,
+  threadMenuTrigger,
   action,
   onResult,
   context,
@@ -291,6 +292,7 @@ function Chat({
   caseId?: string;
   threads: Thread[];
   onThreadAction?: (thread: Thread, action: ChatAction) => void;
+  threadMenuTrigger?: RefObject<HTMLButtonElement | null>;
   action: Action;
   onResult?: (b: Msg['body']) => void;
   context?: string;
@@ -504,7 +506,9 @@ function Chat({
           <h3>{caseId ? 'Обсудить разбор' : activeThread?.title || 'Чат'}</h3>
           <small>{isGroup ? 'Командный чат' : 'Личный чат'}</small>
         </div>
-        {activeThread && onThreadAction && <ChatMenu thread={activeThread} onAction={onThreadAction} />}
+        {activeThread && onThreadAction && (
+          <ChatMenu thread={activeThread} onAction={onThreadAction} triggerRef={threadMenuTrigger} />
+        )}
       </header>
       <div className="conversation-body">
         <div
@@ -851,19 +855,20 @@ function Chat({
 }
 function RenameChatDialog({ thread, close, onRename }: {
   thread: Thread;
-  close: () => void;
+  close: (renamed: boolean) => void;
   onRename: (renamed: ThreadTitle) => void;
 }) {
   const [saving, save] = useState(false);
   const [error, fail] = useState('');
   const field = useRef<HTMLInputElement>(null);
+  const renamed = useRef(false);
   useEffect(() => {
     field.current?.focus();
     field.current?.select();
   }, []);
 
   return (
-    <Dialog title="Переименовать чат" close={close}>
+    <Dialog title="Переименовать чат" close={() => close(renamed.current)}>
       {(dismiss) => (
         <form onSubmit={async (event) => {
           event.preventDefault();
@@ -882,6 +887,7 @@ function RenameChatDialog({ thread, close, onRename }: {
           fail('');
           try {
             onRename(await post<ThreadTitle>('rename-thread', { thread: thread.id, title }));
+            renamed.current = true;
             dismiss();
           } catch (e) {
             fail((e as Error).message);
@@ -975,6 +981,8 @@ function ChatWorkspace({ home, id, avatar, action, refresh, onRename, onDelete }
   const [creating, create] = useState(false);
   const [saving, save] = useState(false);
   const [editing, edit] = useState<{ thread: Thread; action: ChatAction } | null>(null);
+  const activeMenuTrigger = useRef<HTMLButtonElement>(null);
+  const renamedThread = useRef<string>(null);
   const { available, observe } = usePanelSpace();
   const listWidth = usePanelSize('pm-chat-list-width', 228, 164,
     available ? Math.max(164, Math.min(368, Math.floor(available - 314))) : 368);
@@ -988,6 +996,14 @@ function ChatWorkspace({ home, id, avatar, action, refresh, onRename, onDelete }
   const listHidden = wide ? listCollapsed : !listOpen;
   const activeRowAvailable = !listHidden && groups.some(group => group.threads.some(thread => thread.id === activeId));
   const openAction = (thread: Thread, action: ChatAction) => edit({ thread, action });
+
+  // The active menu can move between the row and the heading while the rename dialog is open.
+  useLayoutEffect(() => {
+    if (editing || !renamedThread.current) return;
+    const trigger = activeMenuTrigger.current;
+    if (renamedThread.current === activeId && trigger !== document.activeElement) trigger?.focus();
+    renamedThread.current = null;
+  }, [editing, activeId]);
 
   function removeChat(deleted: string) {
     try {
@@ -1045,6 +1061,7 @@ function ChatWorkspace({ home, id, avatar, action, refresh, onRename, onDelete }
                   <h2 id={'thread-group-' + group.id}>{group.title}</h2>
                   {group.threads.map(t => (
                     <ChatThreadRow key={t.id} thread={t} current={activeId === t.id}
+                      menuTrigger={activeRowAvailable && activeId === t.id ? activeMenuTrigger : undefined}
                       onSelect={() => toggleList(false)} onAction={openAction} />
                   ))}
                 </section>
@@ -1063,6 +1080,7 @@ function ChatWorkspace({ home, id, avatar, action, refresh, onRename, onDelete }
           threads={home.threads}
           onThreadAction={activeRowAvailable ? undefined : openAction}
           action={action}
+          threadMenuTrigger={activeMenuTrigger}
         />
       </div>
       {creating && (
@@ -1099,7 +1117,10 @@ function ChatWorkspace({ home, id, avatar, action, refresh, onRename, onDelete }
         </Dialog>
       )}
       {editing?.action === 'rename' && (
-        <RenameChatDialog thread={editing.thread} close={() => edit(null)} onRename={(renamed) => {
+        <RenameChatDialog thread={editing.thread} close={(renamed) => {
+          renamedThread.current = renamed ? editing.thread.id : null;
+          edit(null);
+        }} onRename={(renamed) => {
           if (!renamed.title.toLocaleLowerCase('ru').includes(term)) search('');
           onRename(renamed);
         }} />

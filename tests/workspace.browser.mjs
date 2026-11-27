@@ -740,9 +740,32 @@ test('Softline workspace, upgrade and browser journeys', async t => {
       await visible(rows(touch).getByRole('link',{name}));
       assert.equal(await actions(touch).count(),0);
 
+      const matchingTitle = 'Текст совпадает с фильтром';
+      await search.fill('совпадает с фильтром');
+      await actions(desktop).press('ArrowDown');
+      await rename(desktop).press('Enter');
+      await field(dialog,'Название').fill(matchingTitle);
+      await submit(desktop,'rename-thread',()=>role(dialog,'Сохранить').press('Enter'));
+      await dialog.waitFor({state:'hidden'});
+      const rowActions = role(rows(desktop),'Действия чата «'+matchingTitle+'»');
+      await visible(rowActions);
+      assert.ok(await rowActions.evaluate(el => el === document.activeElement),
+        'Keyboard focus follows the chat actions from the heading to the newly visible row');
+
+      await desktop.setViewportSize({width:821,height:844});
+      await desktop.reload();
+      await rowActions.press('ArrowDown');
+      await rename(desktop).press('Enter');
+      await desktop.setViewportSize({width:390,height:844});
+      await rows(desktop).waitFor({state:'hidden'});
+      await field(dialog,'Название').fill('Действия снова в заголовке');
+      await submit(desktop,'rename-thread',()=>role(dialog,'Сохранить').press('Enter'));
+      await dialog.waitFor({state:'hidden'});
+      assert.ok(await actions(desktop).evaluate(el => el === document.activeElement),
+        'Keyboard focus follows the chat actions from the now hidden row back to the heading');
+
       await go(desktop,'chats/group');
       await visible(desktop.getByRole('region',{name:'Переписка'}).getByText('Командный чат',{exact:true}));
-      await role(desktop,'Свернуть список чатов').click();
       await actions(desktop).click();
       await visible(rename(desktop));
       assert.equal(await desktop.getByRole('menuitem',{name:'Удалить чат'}).count(),0);

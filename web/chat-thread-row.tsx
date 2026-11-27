@@ -1,15 +1,16 @@
-import { useLayoutEffect, useRef, useState } from 'react';
+import { useLayoutEffect, useRef, useState, type RefObject } from 'react';
 import { ChatMenu, type ChatAction } from './chat-menu';
 import { Icon } from './icons';
 import type { Thread } from './team-data';
 
 type Placement = { top: number; left: number; width: number; wrap: boolean };
 
-export function ChatThreadRow({ thread, current, onSelect, onAction }: {
+export function ChatThreadRow({ thread, current, onSelect, onAction, menuTrigger }: {
   thread: Thread;
   current: boolean;
   onSelect: () => void;
   onAction: (thread: Thread, action: ChatAction) => void;
+  menuTrigger?: RefObject<HTMLButtonElement | null>;
 }) {
   const [hovered, setHovered] = useState(false);
   const [keyboardFocused, setKeyboardFocused] = useState(false);
@@ -95,7 +96,7 @@ export function ChatThreadRow({ thread, current, onSelect, onAction }: {
           </span>
           {highlighted && <span ref={measurement} className="sr thread-title-measure" aria-hidden="true">{thread.title}</span>}
         </a>
-        <ChatMenu thread={thread} onAction={onAction} onOpenChange={setMenuOpen} />
+        <ChatMenu thread={thread} onAction={onAction} onOpenChange={setMenuOpen} triggerRef={menuTrigger} />
       </div>
     </div>
   );

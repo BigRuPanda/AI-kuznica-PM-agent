@@ -1,19 +1,20 @@
 import { useEffect, useId, useRef, useState } from 'react';
-import type { ReactNode } from 'react';
+import type { ReactNode, RefObject } from 'react';
 import { Icon } from './icons';
 import type { Thread } from './team-data';
 
 export type ChatAction = 'rename' | 'delete';
 
-export function ChatMenu({ thread, onAction, onOpenChange }: {
+export function ChatMenu({ thread, onAction, onOpenChange, triggerRef }: {
   thread: Thread;
   onAction: (thread: Thread, action: ChatAction) => void;
   onOpenChange?: (open: boolean) => void;
+  triggerRef?: RefObject<HTMLButtonElement | null>;
 }) {
   if (!thread.canRename && !thread.canDelete) return null;
   return (
     <ChatPopupMenu label="Действия чата" triggerLabel={'Действия чата «' + thread.title + '»'} triggerContent={<Icon name="more" />}
-      triggerClass="thread-menu-trigger" onOpenChange={onOpenChange}>
+      triggerClass="thread-menu-trigger" onOpenChange={onOpenChange} triggerRef={triggerRef}>
       {close => <>
         {thread.canRename && (
           <button type="button" role="menuitem" onClick={() => { close(); onAction(thread, 'rename'); }}><Icon name="edit" />Переименовать</button>
@@ -28,17 +29,19 @@ export function ChatMenu({ thread, onAction, onOpenChange }: {
   );
 }
 
-export function ChatPopupMenu({ label, triggerLabel = label, triggerContent, triggerClass, menuClass = '', onOpenChange, children }: {
+export function ChatPopupMenu({ label, triggerLabel = label, triggerContent, triggerClass, triggerRef, menuClass = '', onOpenChange, children }: {
   label: string;
   triggerLabel?: string;
   triggerContent: ReactNode;
   triggerClass: string;
+  triggerRef?: RefObject<HTMLButtonElement | null>;
   menuClass?: string;
   onOpenChange?: (open: boolean) => void;
   children: (close: () => void) => ReactNode;
 }) {
   const id = useId();
-  const trigger = useRef<HTMLButtonElement>(null);
+  const ownTrigger = useRef<HTMLButtonElement>(null);
+  const trigger = triggerRef ?? ownTrigger;
   const popup = useRef<HTMLDivElement>(null);
   const [open, setOpen] = useState(false);
 
