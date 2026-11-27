@@ -4,7 +4,7 @@ export type CaseViewPreferences = {
   cards: string[];
   pinned: string[];
   full: boolean;
-  control: string | false;
+  control: string;
   sourceQuery: string;
 };
 
@@ -28,7 +28,7 @@ export function readCaseView(key: string): Partial<CaseViewPreferences> | undefi
     cards: list(value.cards),
     pinned: list(value.pinned),
     full: typeof value.full === 'boolean' ? value.full : undefined,
-    control: typeof value.control === 'string' || value.control === false ? value.control : undefined,
+    control: typeof value.control === 'string' ? value.control : undefined,
     sourceQuery: typeof value.sourceQuery === 'string' ? value.sourceQuery.slice(0, 400) : undefined,
   };
 }

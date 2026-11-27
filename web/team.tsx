@@ -45,6 +45,7 @@ import { InvestigationSettings } from './investigation-settings';
 import { CaseInvestigation, InvestigationSnapshot, useCaseInvestigation } from './case-investigation';
 import type { InvestigationCalculation } from './case-investigation';
 import { caseHeading, changeLabel, signalBaseline, signalPeriod } from './case-periods';
+import { CasePeriodFilter } from './case-period-filter';
 import { SignalEvidence } from './signal-evidence';
 import { Answer } from './answer';
 import { moveMenu, moveView } from './motion';
@@ -1228,7 +1229,7 @@ function Investigation({
     const previous = currentView.current;
     const before = previous.preferences || {}, after = next.preferences || {};
     if (previous.period !== next.period || previous.ratioSelections !== next.ratioSelections ||
-      (before.full ?? false) !== (after.full ?? false) || (before.control ?? '') !== (after.control ?? '') ||
+      (before.full ?? false) !== (after.full ?? false) || (before.control || '') !== (after.control || '') ||
       (before.sourceQuery || '') !== (after.sourceQuery || '')) {
       // Ignore earlier results as soon as the inputs change, before the next effect runs.
       requestVersion.current++;
@@ -1242,6 +1243,10 @@ function Investigation({
     patchCaseView(prefix, patch);
     updateViewState({ ...previous, preferences: { ...previous.preferences, ...patch } });
   }, [prefix, updateViewState]);
+  function applyPeriod(next: typeof period) {
+    localStorage.setItem(prefix + '/period', JSON.stringify(next));
+    updateViewState({ ...currentView.current, period: next });
+  }
   const load = useCallback(async () => {
     if (!active.current) return;
     const version = ++requestVersion.current;
@@ -1250,8 +1255,7 @@ function Investigation({
     fail('');
     try {
       const v = await post<Detail>('view', {
-        caseId: id, full: preferences?.full ?? false,
-        control: preferences?.control === '' ? undefined : preferences?.control,
+        caseId: id, full: preferences?.full ?? false, control: preferences?.control || undefined,
         sourceQuery: preferences?.sourceQuery || '', ratioSelections, from: period.from, through: period.through,
       });
       if (version !== requestVersion.current) return;
@@ -1313,6 +1317,7 @@ function Investigation({
   );
   const [mobileChat, chatMode] = useState(false);
   const [focusDiscussion, requestDiscussionFocus] = useState(false);
+  const caseControls = useRef<HTMLDivElement>(null);
   const discussion = useRef<HTMLDivElement>(null);
   const { available, observe } = usePanelSpace();
   const discussionWidth = usePanelSize('pm-case-chat-width', (available || 940) * .34, 232,
@@ -1320,14 +1325,20 @@ function Investigation({
   useDiscussionDock(discussion, !!d && !!tid);
   const [editingMeasurement, editMeasurement] = useState(false);
   const [advancedEffectOpen, setAdvancedEffectOpen] = useState(false);
-  const taskTitle = useRef<HTMLHeadingElement>(null);
-  useEffect(() => {
-    if (documentation === undefined || !d) return;
-    taskTitle.current?.focus();
-  }, [documentation, d?.case.id]);
+  const taskPanel = useRef<HTMLDetailsElement>(null);
   const effectSection = useRef<HTMLDetailsElement>(null);
   const detailLoaded = !!d;
   const hasWatch = !!d?.case.body.watch;
+  useEffect(() => {
+    if (documentation === undefined || !detailLoaded) return;
+    chatMode(false);
+    const frame = requestAnimationFrame(() => {
+      if (!taskPanel.current) return;
+      taskPanel.current.open = true;
+      taskPanel.current.querySelector('summary')?.focus();
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [documentation, detailLoaded]);
   useEffect(() => {
     if (selected !== 'effect' || !detailLoaded) return;
     chatMode(false);
@@ -1347,7 +1358,15 @@ function Investigation({
   }, [viewRunId, liveRunId, load]);
   useLayoutEffect(() => {
     if (!draftToFocus) return;
-    document.getElementById('case-draft-' + draftToFocus)?.focus();
+    const panel = taskPanel.current;
+    const preview = document.getElementById('case-draft-' + draftToFocus);
+    if (panel && preview) {
+      // The disclosure animation hides the preview during programmatic focus.
+      panel.dataset.revealDraft = '';
+      panel.open = true;
+      preview.focus();
+      delete panel.dataset.revealDraft;
+    }
     setDraftToFocus('');
   }, [draftToFocus]);
   useLayoutEffect(() => {
@@ -1412,16 +1431,21 @@ function Investigation({
   const openNext = () => {
     chatMode(false);
     requestAnimationFrame(() => {
-      const effectNext = showEffect || scheduleEffect;
-      if (effectNext && effectSection.current) effectSection.current.open = true;
-      const target = effectNext ? effectSection.current?.querySelector('summary') : taskTitle.current;
-      target?.focus();
+      const panel = showEffect || scheduleEffect ? effectSection.current : taskPanel.current;
+      if (!panel) return;
+      panel.open = true;
+      panel.querySelector('summary')?.focus();
     });
   };
-  const caseActions = <div className={researchAvailable ? 'actions investigation-tools' : 'actions'}>
+  const shareAsPrimary = !researchAvailable && completed;
+  const issueUnavailable = withdrawn ? 'Сигнал отозван'
+    : !redmine.local && !redmine.connected ? 'Подключите личный доступ к Redmine' : undefined;
+  const caseActions = <div className="actions case-actions" role="group" aria-label="Действия разбора">
     <span ref={setPresentationAction} />
-    {signal && !withdrawn && (redmine.local || redmine.connected) && (
-      <button disabled={updating || preparingSignalIssue} aria-busy={preparingSignalIssue} onClick={() =>
+    {signal && (
+      <button type="button" disabled={!!issueUnavailable || updating || preparingSignalIssue}
+        title={issueUnavailable} data-unavailable={issueUnavailable ? '' : undefined}
+        aria-busy={preparingSignalIssue} onClick={() =>
         action(async () => {
           setPreparingSignalIssue(true);
           try {
@@ -1433,54 +1457,62 @@ function Investigation({
         })
       }>Подготовить задачу по сигналу</button>
     )}
-    {(researchAvailable || !completed) && <button onClick={openShare} disabled={updating}>Поделиться</button>}
-    {!researchAvailable && <button className="primary arrow-action" disabled={updating && completed} onClick={completed ? openShare : openNext}>
-      {completed ? 'Поделиться' : watchNext ? 'Проверить эффект' : 'К задаче'}
+    <div className="case-share-actions">
+      <button className={shareAsPrimary ? 'primary arrow-action' : undefined} onClick={openShare} disabled={updating}>
+        Поделиться {shareAsPrimary && <Icon name="arrow" />}
+      </button>
+      <CasePeriodFilter period={period} onApply={applyPeriod} boundaryRef={caseControls} />
+    </div>
+    {!researchAvailable && !completed && <button className="primary arrow-action" onClick={openNext}>
+      {watchNext ? 'Проверить эффект' : 'К задаче'}
       <Icon name="arrow" />
     </button>}
   </div>;
-  const signalDetails = <>
-    {signal?.metric && <details>
-      <summary>Данные и источники сигнала</summary>
-      <SignalEvidence signal={signal} />
-      {v.signal?.metric && <a href={'#snapshot/' + v.id + '/signal'}>Открыть сохранённый расчёт сигнала</a>}
-    </details>}
-    {!!d.signalHistory?.length && <details className="signal-history">
-      <summary>История сигнала</summary>
-      <ol>{d.signalHistory.map((r, index, history) => <li key={r.revision}>
-        <strong>{r.event === 'withdrawn' || r.status === 'withdrawn' ? 'Отозван'
-          : r.event === 'corrected' ? 'Уточнён'
-          : r.status === 'provisional' ? 'Предварительный'
-          : !r.event && history[index + 1]?.status === 'confirmed' ? 'Данные обновлены' : 'Подтверждён'}</strong>
-        {' · '}{r.created ? new Date(r.created).toLocaleString('ru-RU', { dateStyle: 'short', timeStyle: 'short' }) : 'До введения журнала'}
-        {' · неделя с '}{new Date(r.week + 'T00:00:00Z').toLocaleDateString('ru-RU', { timeZone: 'UTC' })}
-        {r.status !== 'withdrawn' && ' · ' + num(r.value) + (r.metric ? '%' : ' п. индекса')}
-        {r.imported.map(doc => <small key={doc.version} title={doc.version}>{doc.file} · {doc.version.slice(0,10)}</small>)}
-      </li>)}</ol>
-    </details>}
-  </>;
+  const signalDetails = signal?.metric && <details>
+    <summary>Данные и источники сигнала</summary>
+    <SignalEvidence signal={signal} />
+    {v.signal?.metric && <a href={'#snapshot/' + v.id + '/signal'}>Открыть сохранённый расчёт сигнала</a>}
+  </details>;
   return (
     <>
       <a className="crumb" href="#cases">← Разборы</a>
-      <div className="page-head investigation-head" data-research={researchAvailable || undefined}>
-        <div>
-          <small>{!c.title.toLocaleLowerCase('ru').includes(c.product.toLocaleLowerCase('ru')) && c.product + ' · '}
-            {c.body.owner ? 'Личный разбор' : 'Команда'}</small>
-          <h1>{c.title}</h1>
-          {signal && !withdrawn && !research.investigation?.current?.period && <p>
-            {[signal.releaseId, signalPeriod(signal), changeLabel(signal.change, signal.changeUnit)].filter(Boolean).join(' · ')}
-          </p>}
-          <span className="state">{c.state}</span>
-          {signal?.metric && signal.status === 'provisional' && <span className="state">Предварительный сигнал</span>}
-          {withdrawn && <p role="status">Сигнал отозван после пересчёта данных. Разбор и сохранённые выводы доступны для проверки.</p>}
-          {!researchAvailable && signalDetails}
-        </div>
-        {caseActions}
-      </div>
+      <header className="page-head investigation-head">
+        <small>{!c.title.toLocaleLowerCase('ru').includes(c.product.toLocaleLowerCase('ru')) && c.product + ' · '}
+          {c.body.owner ? 'Личный разбор' : 'Команда'}</small>
+        <h1>{c.title}</h1>
+        {signal && !withdrawn && !research.investigation?.current?.period && <p>
+          {[signal.releaseId, signalPeriod(signal), changeLabel(signal.change, signal.changeUnit)].filter(Boolean).join(' · ')}
+        </p>}
+        <span className="state">{c.state}</span>
+        {signal?.metric && signal.status === 'provisional' && <span className="state">Предварительный сигнал</span>}
+        {withdrawn && <p role="status">Сигнал отозван после пересчёта данных. Разбор и сохранённые выводы доступны для проверки.</p>}
+        {!researchAvailable && signalDetails}
+      </header>
       <div className={'case-layout ' + (mobileChat && tid ? 'show-chat' : '')} ref={observe} data-discussion={!!tid} style={{
         '--discussion-width': discussionWidth.size + 'px',
       } as React.CSSProperties}>
         <div className="case-main" aria-busy={updating}>
+          <div className="case-controls" ref={caseControls}>
+            {caseActions}
+            <section className="paper case-view-settings" aria-labelledby="case-view-settings-heading">
+              <h2 id="case-view-settings-heading">Вид разбора</h2>
+              <div className="case-view-controls">
+                <label className="case-view-switch">
+                  <span>Только полные недели</span>
+                  <input type="checkbox" role="switch" className="search-switch-track" checked={full}
+                    onChange={(e) => updatePreferences({ full: e.target.checked })} />
+                </label>
+                {needsSalesContext && <label className="case-comparison">
+                  <span>Сравнить с</span>
+                  <select value={peer || v.summary[1]?.product || ''}
+                    onChange={(e) => updatePreferences({ control: e.target.value })}>
+                    {home.products.filter((p) => p !== c.product).map((p) => <option key={p}>{p}</option>)}
+                  </select>
+                </label>}
+                <button type="button" className="text-action" onClick={() => confirm('reset')}>Сбросить вид</button>
+              </div>
+            </section>
+          </div>
           {research.investigation && <CaseInvestigation investigation={research.investigation} error={research.error}
             refresh={research.refresh} userId={home.user.id} canExplore={!withdrawn && !completed}
             canPublish={!withdrawn && !completed && !c.body.owner}
@@ -1500,54 +1532,9 @@ function Investigation({
               Исходный ответ и расчёт
             </a>
           </p>}
-          {researchAvailable && (signal?.metric || !!d.signalHistory?.length) && <div className="paper investigation-signal-details">
+          {researchAvailable && signalDetails && <div className="paper">
             {signalDetails}
           </div>}
-          <details className="paper">
-            <summary>Период расчёта</summary>
-            <form key={id + '/' + (period.from || '') + '/' + (period.through || '')} onSubmit={e => {
-              e.preventDefault();
-              const fields = new FormData(e.currentTarget);
-              const from = String(fields.get('from') || '') || undefined;
-              const through = String(fields.get('through') || '') || undefined;
-              if (from && through && from > through) { fail('Начало периода должно быть не позже конца.'); return; }
-              const next = {from, through};
-              localStorage.setItem(prefix + '/period', JSON.stringify(next));
-              updateViewState({ ...currentView.current, period: next });
-            }}>
-              <label>Начало периода<input type="date" name="from" defaultValue={period.from} /></label>
-              <label>Срез по дату включительно<input type="date" name="through" defaultValue={period.through} /></label>
-              <button>Применить период</button>
-            </form>
-          </details>
-          <div className="toolbar">
-            <label>
-              <input
-                type="checkbox"
-                checked={full}
-                onChange={(e) => updatePreferences({ full: e.target.checked })}
-              />{' '}
-              Только полные недели
-            </label>
-            {needsSalesContext && <label className="case-comparison">
-              Сравнить с{' '}
-              <select value={peer === false ? '' : peer || v.summary[1]?.product || ''}
-                onChange={(e) => updatePreferences({ control: e.target.value || false })}>
-                <option value="">Без сравнения</option>
-                {home.products
-                  .filter((p) => p !== c.product)
-                  .map((p) => (
-                    <option key={p}>{p}</option>
-                  ))}
-              </select>
-            </label>}
-            <button
-              onClick={() => confirm('reset')}
-            >
-              Сбросить вид
-            </button>
-          </div>
-          <InterviewSearch caseId={id} asOf={v.requested?.through} key={id + '/' + (v.requested?.through || '')} />
           <Cards
             view={v}
             cards={caseCards}
@@ -1595,7 +1582,7 @@ function Investigation({
           )}
           <PinnedMaterials caseId={id} />
           <PresentationMaterials key={id} caseId={id} actionSlot={presentationAction} versionFromChat={versionFromChat} />
-          <Tracking headingRef={taskTitle}
+          <Tracking panelRef={taskPanel}
             documentation={documentation}
             caseId={id}
             product={c.product}
@@ -1719,6 +1706,20 @@ function Investigation({
               ))}
             </section>
           )}
+          <InterviewSearch caseId={id} asOf={v.requested?.through} key={id + '/' + (v.requested?.through || '')} />
+          {!!d.signalHistory?.length && <details className="paper signal-history">
+            <summary>История сигнала</summary>
+            <ol>{d.signalHistory.map((r, index, history) => <li key={r.revision}>
+              <strong>{r.event === 'withdrawn' || r.status === 'withdrawn' ? 'Отозван'
+                : r.event === 'corrected' ? 'Уточнён'
+                : r.status === 'provisional' ? 'Предварительный'
+                : !r.event && history[index + 1]?.status === 'confirmed' ? 'Данные обновлены' : 'Подтверждён'}</strong>
+              {' · '}{r.created ? new Date(r.created).toLocaleString('ru-RU', { dateStyle: 'short', timeStyle: 'short' }) : 'До введения журнала'}
+              {' · неделя с '}{new Date(r.week + 'T00:00:00Z').toLocaleDateString('ru-RU', { timeZone: 'UTC' })}
+              {r.status !== 'withdrawn' && ' · ' + num(r.value) + (r.metric ? '%' : ' п. индекса')}
+              {r.imported.map(doc => <small key={doc.version} title={doc.version}>{doc.file} · {doc.version.slice(0,10)}</small>)}
+            </li>)}</ol>
+          </details>}
         </div>
         {tid && (
           <div id="case-discussion" className="case-discussion" ref={discussion}>
@@ -1733,7 +1734,7 @@ function Investigation({
               action={action}
               context={ctx}
               attachment={attachment}
-              screen={{ calc: v.id, full, control: v.summary[1]?.product, cards: caseCards }}
+              screen={{ calc: v.id, full, control: peer || v.summary[1]?.product, cards: caseCards }}
               clearContext={() => {
                 ask('');
                 attach(undefined);

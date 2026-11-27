@@ -465,8 +465,6 @@ p {
 .toolbar select {
   max-width: 160px;
 }
-.toolbar .case-comparison { min-width: 0; }
-.case-comparison select { max-width: min(18rem, 100%); }
 .toolbar button {
   font-size: 0.78rem;
 }
@@ -601,21 +599,18 @@ p {
 .mobile-toggle {
   display: none;
 }
-.login-top,
-.investigation-head .actions {
+.login-top {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 10px;
 }
 .login-box form .primary { width: 100%; margin-top: 7px; }
-.investigation-head > div:first-child { min-width: 0; }
 .signal-evidence { overflow-wrap: anywhere; }
-.investigation-head .actions { flex: none; }
 .signal-history { margin-top: 0.75rem; }
 .signal-history ol { margin: 0.5rem 0 0; padding-inline-start: 1.35rem; font-size: 0.9rem; }
 .signal-history li + li { margin-top: 0.45rem; }
-.signal-history small { margin: 0.15rem 0 0; overflow-wrap: anywhere; }
+.signal-history small { display: block; margin: 0.15rem 0 0; overflow-wrap: anywhere; }
 .arrow-action .ui-icon,
 .case-value .ui-icon {
   transition: transform var(--panel-motion) var(--ease-out);
@@ -694,7 +689,7 @@ p {
   margin-top: 14px;
 }
 .coverage-note { display: block; margin-top: 8px; }
-.analysis-card h3, .task-panel h3 { font-size: 1.2rem; }
+.analysis-card h3 { font-size: 1.2rem; }
 .analysis-card .row-between { margin-bottom: 7px; }
 .sources-grid {
   display: grid;
@@ -740,12 +735,6 @@ p {
 .metric-source-table th:last-child { width: 36%; }
 .source-table small { display: block; margin-top: 4px; color: var(--fg-muted); }
 .task-panel form, .effect-panel form { margin-bottom: 14px; }
-.task-panel {
-  background-image: repeating-linear-gradient(135deg, transparent 0 16px, var(--brand-line) 16px 17px, transparent 17px 24px);
-  background-size: min(29%, 260px) 108px;
-  background-position: top right;
-  background-repeat: no-repeat;
-}
 .task-panel textarea { overflow-wrap: anywhere; }
 .task-panel .issue-key { color: var(--accent-text); background: var(--accent-soft); }
 .source-actions { gap: 12px; margin-top: 6px; }
@@ -870,7 +859,8 @@ p {
   .case-layout.show-chat > .case-discussion {
     display: block;
   }
-  .case-layout.show-chat .case-main > :not(.case-investigation, .mobile-toggle, [role='alert']) {
+  .case-layout.show-chat .case-main > :not(.case-controls, .case-investigation, .mobile-toggle, [role='alert']),
+  .case-layout.show-chat .case-view-settings {
     display: none;
   }
   .mobile-toggle {
