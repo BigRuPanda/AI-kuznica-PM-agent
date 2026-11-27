@@ -380,14 +380,23 @@ test('release decisions preserve the historical cutoff, cited cells and manual i
   const journalLink = page.getByRole('navigation', { name: 'Основные разделы' })
     .getByRole('link', { name: 'Релизы', exact: true });
   const journalHeading = page.getByRole('heading', { name: 'Журнал релизов', exact: true });
-  const assessmentHeading = page.getByRole('heading', { name: 'Оценка релиза', exact: true });
+  const releaseHeading = page.getByRole('heading', { name: 'Разбор релиза', exact: true });
   const releaseLink = page.getByRole('link', { name: /DEC-2 · .*Поздний релиз Kaspersky/ });
   await journalLink.click();
   await releaseLink.click();
   await page.waitForURL('**/#release-decision/DEC-2');
-  await visible(assessmentHeading);
   const releaseSelect = field(page.locator('.decision-filters'), 'Релиз');
   assert.equal(await releaseSelect.inputValue(), 'DEC-2');
+  const evidenceCards = page.locator('.decision-evidence > section');
+  await visible(evidenceCards.last());
+  for (const width of [1440, 980, 390]) {
+    await page.setViewportSize({ width, height: 900 });
+    const heights = await evidenceCards.evaluateAll(cards => cards.map(card => card.getBoundingClientRect().height));
+    assert.equal(heights.length, 3);
+    assert.ok(Math.max(...heights) - Math.min(...heights) < 1, `Uneven evidence cards at ${width}px: ${heights.join(', ')}`);
+  }
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await visible(releaseHeading);
   await page.getByRole('link', { name: '← Журнал релизов', exact: true }).click();
   await visible(journalHeading);
 
@@ -455,7 +464,7 @@ test('release decisions preserve the historical cutoff, cited cells and manual i
 
   await page.goto(base + '/#release-detail/DEC-2');
   await page.waitForURL('**/#release-decision/DEC-2');
-  await visible(assessmentHeading);
+  await visible(releaseHeading);
   await role(page, 'Открыть чат разбора').click();
   await visible(page.getByRole('heading', { name: 'Чат разбора · DEC-2' }));
   await role(page, 'Найти задачу и проверить дубли').click();

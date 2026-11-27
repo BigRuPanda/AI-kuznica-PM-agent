@@ -232,7 +232,7 @@ export function ReleaseDecision({
   const release = data?.release;
   return <div className="release-decision">
     <a className="crumb" href="#releases-list">← Журнал релизов</a>
-    <div className="page-head"><h1>Оценка релиза</h1></div>
+    <div className="page-head"><h1>Разбор релиза</h1></div>
     {data && <form className="paper decision-filters" onSubmit={event => {
       event.preventDefault();
       if (cut) select({ product: data.product, through: cut, releaseId: release && release.date <= cut ? release.id : undefined });

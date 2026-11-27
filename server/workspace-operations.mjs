@@ -476,7 +476,7 @@ export function workspaceOperation(
       return store.tx(() => {
         const current = releaseDecision(db, user, b);
         const linked = current.caseId && visibleCase(db, user, current.caseId);
-        const title = ('Оценка релиза ' + b.releaseId + ' · ' + current.product).slice(0, 240);
+        const title = ('Разбор релиза ' + b.releaseId + ' · ' + current.product).slice(0, 240);
         const caseId = linked?.body.release === b.releaseId ? linked.id :
           createPersonalCase(db, user, { title, product: current.product, release: b.releaseId }).id;
         if (current.scope !== 'account') bindReleaseThreadCase(db, user, b.releaseId, caseId, current.product);
