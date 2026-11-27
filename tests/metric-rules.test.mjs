@@ -1,10 +1,14 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { openStore } from '../server/store.mjs';
-import { initEvidence, importDocs, scan, setSetting, setting } from '../server/evidence.mjs';
+import { digest, initEvidence, importDocs, scan, setSetting, setting } from '../server/evidence.mjs';
 import { getMetricEpisodes, metricRuleStatus, saveMetricRule } from '../server/metric-rules.mjs';
 import { deliver, initWorkbench } from '../server/workbench.mjs';
 import { workspaceOperation } from '../server/workspace-operations.mjs';
+import { grant } from '../server/chart-ranges.mjs';
 
 const DAY = 86400000;
 const date = n => new Date(Date.UTC(2025, 0, 6) + n * DAY).toISOString().slice(0,10);
@@ -180,4 +184,69 @@ test('first CTR episode exposes its measured sources and delivers one actionable
   assert.match(messages[0].text,new RegExp('/#case/'+id+'$'));
   assert.equal(workspaceOperation(store,user,'view',{caseId:id}).case.body.signal.status,'confirmed');
   assert.equal(workspaceOperation(store,user,'calc',{id:first.view.id}).signal.week,date(35));
+});
+
+test('an upgraded case links its exact archived signal rows after an unchanged import', t => {
+  const folder = mkdtempSync(join(tmpdir(),'signal-evidence-upgrade-'));
+  const path = join(folder,'workspace.sqlite');
+  const user = {id:'member',role:'member',space:'team'};
+  const file = 'Отчёт.xlsx';
+  const doc = {file, facts:[
+    release(ctr),
+    {kind:'dictionary',loc:'Metrics!A2',row:{metric_id:'unrelated'}},
+    ...[10,10,10,10,4,2].flatMap((n,i) => weeklyCounts(ctr,i,n)
+      .map(f => ({...f,loc:'Metrics!A'+(i+2)}))),
+  ]};
+  const open = () => {
+    const store = openStore(path,{seedDemo:false});
+    initEvidence(store.db);
+    initWorkbench(store.db);
+    return store;
+  };
+
+  let store = open();
+  t.after(() => {
+    store.close();
+    rmSync(folder,{recursive:true,force:true});
+  });
+  importDocs(store,[doc],{notify:false});
+  const {id:caseId,body} = store.db.prepare('SELECT id,body FROM cases').get();
+  const {id:initialId,...initialView} = workspaceOperation(store,user,'view',{caseId}).view;
+  const legacyCase = JSON.parse(body);
+  for (const sample of [...legacyCase.signal.evidence.baseline,legacyCase.signal.evidence.latest]) {
+    for (const row of sample.rows) {
+      delete row.file;
+      delete row.loc;
+    }
+  }
+  const caseBody = JSON.stringify(legacyCase);
+  const snapshotBody = JSON.stringify({...initialView,signal:legacyCase.signal});
+  const snapshotId = digest(snapshotBody);
+  importDocs(store,[{file,facts:weeklyCounts(ctr,5,6).map(f => ({...f,loc:'Metrics!C9'}))}],{notify:false});
+  store.db.prepare('UPDATE cases SET body=? WHERE id=?').run(caseBody,caseId);
+  store.db.prepare('UPDATE evidence_calcs SET id=?,body=? WHERE id=?').run(snapshotId,snapshotBody,initialId);
+  grant(store.db,snapshotId,'user',user.id);
+  store.close();
+
+  store = open();
+  assert.equal(importDocs(store,[doc],{notify:false}).inserted,0);
+  assert.equal(store.db.prepare("SELECT loc FROM facts WHERE kind='metrics' AND json_extract(body,'$.date')=?")
+    .get(date(35)).loc,'Metrics!C9');
+  const current = workspaceOperation(store,user,'view',{caseId});
+  const saved = workspaceOperation(store,user,'calc',{id:current.view.id});
+  const legacyLatest = legacyCase.signal.evidence.latest.rows[0];
+  const resolvedLatest = {...legacyLatest,file,loc:'Metrics!A7'};
+  for (const signal of [current.case.body.signal,current.view.signal,saved.signal]) {
+    assert.deepEqual(signal.evidence.latest.rows,[resolvedLatest]);
+    const [ambiguous,unique] = signal.evidence.baseline;
+    assert.deepEqual(ambiguous.rows,legacyCase.signal.evidence.baseline[0].rows);
+    assert.equal(unique.rows[0].loc,'Metrics!A3');
+  }
+  const {rows:[archived]} = workspaceOperation(store,user,'knowledge-source',
+    {version:resolvedLatest.version,loc:resolvedLatest.loc});
+  assert.deepEqual([archived.loc,archived.value.numerator],['Metrics!A7',2]);
+  assert.notEqual(current.view.id,snapshotId);
+  assert.equal(store.db.prepare('SELECT body FROM cases WHERE id=?').get(caseId).body,caseBody);
+  assert.deepEqual(workspaceOperation(store,user,'calc',{id:snapshotId}).signal,legacyCase.signal);
+  assert.equal(store.db.prepare('SELECT body FROM evidence_calcs WHERE id=?').get(snapshotId).body,snapshotBody);
 });

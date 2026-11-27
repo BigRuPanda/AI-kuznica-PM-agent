@@ -6,6 +6,7 @@ import { initInvestigations, syncInvestigations } from './case-investigations.mj
 import { getMetricEpisodes } from './metric-rules.mjs';
 import { aggregateMetric, defaultStepDays, normalizeObservation, observationKey } from './metric-observations.mjs';
 import { backlogRecommendations } from './backlog.mjs';
+import { withArchivedSignalSources } from './knowledge.mjs';
 export const digest = (value) => createHash('sha256').update(value).digest('hex');
 export function productFamily(value = '') {
   const p = value.toLowerCase().trim();
@@ -210,7 +211,9 @@ export function cases(db) {
 export function getCase(db, id) {
   const r = db.prepare('SELECT * FROM cases WHERE id=?').get(id);
   if (!r) throw Error('Разбор не найден');
-  return { ...r, body: JSON.parse(r.body) };
+  const body = JSON.parse(r.body);
+  if (body.signal) body.signal = withArchivedSignalSources(db,body.signal);
+  return { ...r, body };
 }
 export function updateCase(db, c) {
   // A PM can save a plan or note from a case opened before the latest source correction.
