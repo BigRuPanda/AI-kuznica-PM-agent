@@ -2,7 +2,7 @@ import { SourceExtract } from './knowledge-source';
 import { Knowledge } from './knowledge';
 import { ReleaseDecision } from './release-decision';
 import { ReleaseAnalytics } from './app';
-import { CalendarRelease, ReleaseJournal } from './release-journal';
+import { ReleaseJournal, releaseAssessmentHref } from './release-journal';
 import { MetrikaJournal } from './metrika-status';
 import { ChatTrackerPreview, Connections, DemoObject, Tracking } from './tracking';
 import type { TrackerPreview } from './tracking';
@@ -2268,11 +2268,12 @@ function Workspace({ user, onLogout, onUpdate }: { user: User; onLogout: () => v
   const settings = route === 'settings' || (route === 'cases' && id === 'settings');
   const settingsScope = route === 'settings' && id === 'personal' ? 'personal' : 'team';
   const homeVersion = useRef(0);
-  const refresh = useCallback(async () => {
+  const refresh = useCallback(async (onLoad?: (data: Home) => void) => {
     const version = ++homeVersion.current;
     const next = await post<Home>('overview');
     if (homeVersion.current !== version) return;
     setHome(next);
+    onLoad?.(next);
   }, []);
   function updateThreads(update: (threads: Thread[]) => Thread[]) {
     homeVersion.current++;
@@ -2283,7 +2284,11 @@ function Workspace({ user, onLogout, onUpdate }: { user: User; onLogout: () => v
   }
   useEffect(() => {
     let active = true;
-    refresh().catch((e) => {
+    refresh(next => {
+      if (!active || route !== 'release-detail') return;
+      const release = next.releases.find(entry => entry.release_id === id);
+      location.replace(release?.decisionAvailable ? releaseAssessmentHref(id) : '#releases-list');
+    }).catch((e) => {
       if (active) fail(e.message);
     });
     return () => { active = false; };
@@ -2362,7 +2367,7 @@ function Workspace({ user, onLogout, onUpdate }: { user: User; onLogout: () => v
             await post('logout');
             onLogout();
           })} />
-        ) : !home ? (
+        ) : !home || route === 'release-detail' ? (
           <p className="empty" role="status">Загрузка…</p>
         ) : route === 'demo-page' || route === 'demo-issue' ? (
           <DemoObject key={route+id} service={route} id={id}/>
@@ -2407,16 +2412,14 @@ function Workspace({ user, onLogout, onUpdate }: { user: User; onLogout: () => v
           />
         ) : route === 'releases-list' || route === 'releases' ? (
           <ReleaseJournal calendar={home.releases} initialFilter={route === 'releases' ? 'metrics' : 'all'}
-            admin={user.role === 'admin'} archiveOnly={Boolean(home.archiveOnly)} />
-        ) : route === 'release-detail' ? (
-          <CalendarRelease release={home.releases.find(release => release.release_id === id)}
-            onPlan={() => {
-              showCaseForm(id);
+            admin={user.role === 'admin'} archiveOnly={Boolean(home.archiveOnly)}
+            onPlan={releaseId => {
+              showCaseForm(releaseId);
               jump('cases');
             }}
-            renderCases={() => {
-              const linked = home.cases.filter(item => caseReleaseId(item) === id);
-              return linked.length ? <CaseList items={linked} /> : <p className="muted">Связанных разборов пока нет.</p>;
+            renderCases={releaseId => {
+              const linked = home.cases.filter(item => caseReleaseId(item) === releaseId);
+              return linked.length ? <CaseList items={linked} /> : null;
             }} />
         ) : route === 'cases' ? (
           <>

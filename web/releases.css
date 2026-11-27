@@ -1,4 +1,4 @@
-.release-journal, .calendar-release, .release-workspace {
+.release-journal, .release-workspace {
   min-width: 0;
 }
 
@@ -75,18 +75,20 @@
 }
 .release-table tbody tr + tr > * { border-block-start: 1px solid var(--border); }
 .release-table small { display: block; }
-.release-journal-table thead th:first-child { width: 64%; }
-.release-journal-table tbody th a { font-weight: 650; }
-.release-journal-table tbody th small { margin-block-start: 3px; color: var(--fg-muted); font-weight: 400; }
+.release-journal-table > thead th:first-child { width: 64%; }
+.release-row > th > a { font-weight: 650; }
+.release-row > th > small { margin-block-start: 3px; color: var(--fg-muted); font-weight: 400; }
 .release-journal-table time { white-space: nowrap; }
+.release-row-actions { margin-block-start: 4px; }
+.release-row-actions button.text-action { min-height: 36px; text-align: start; }
+.release-related-row > td { background: var(--surface-subtle); }
+.release-related-row section + section { margin-block-start: 16px; }
+.release-related-row h3 { margin: 0 0 8px; }
+.release-related-row .release-table th:first-child { width: 18%; }
+.release-related-row .release-table th:last-child { width: 23%; }
 .release-list-status { margin-block-end: 12px; }
 .release-list-status p { margin: 0; }
 
-.calendar-release .page-head { display: grid; align-items: start; gap: 8px; }
-.calendar-release .page-head :is(h1, small) { margin: 0; }
-.calendar-release .page-head small { color: var(--fg-muted); }
-.calendar-release .page-head .actions { margin-block-start: 5px; }
-.calendar-release .paper h2 { margin-block-start: 0; }
 .release-task-ids { display: flex; flex-wrap: wrap; gap: 8px 24px; padding-inline-start: 1.1rem; }
 
 .release-workspace > .report-head { margin-block-start: 12px; }
@@ -145,6 +147,6 @@
   .release-management-actions { inset-inline: 0 auto; }
   .release-table :is(th, td) { padding: 9px 7px; font-size: .8rem; }
   .release-table thead th { font-size: .76rem; }
-  .release-journal-table thead th:first-child { width: 49%; }
-  .release-journal-table thead th:nth-child(2) { width: 27%; }
+  .release-journal-table > thead th:first-child { width: 49%; }
+  .release-journal-table > thead th:nth-child(2) { width: 27%; }
 }

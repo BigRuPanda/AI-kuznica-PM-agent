@@ -92,7 +92,7 @@ test('release decisions and saved calculations present the result before its pro
     const next = page.getByText('Сверить события с заказами', { exact: true });
     await next.waitFor();
     assert.equal(await page.getByRole('heading', { level: 2 }).first().textContent(), 'Проверить сбор событий');
-    assert.equal(await page.getByRole('link', { name: /карточке релиза/ }).getAttribute('href'), '#release-detail/R%201%2F2');
+    assert.equal(await page.getByRole('link', { name: '← Журнал релизов' }).getAttribute('href'), '#releases-list');
     const interview = page.getByText('Интервью покупателей', { exact: true });
     const excerpt = page.getByText('«Не нашёл годовую подписку»');
     assert.equal(await excerpt.isVisible(), false);

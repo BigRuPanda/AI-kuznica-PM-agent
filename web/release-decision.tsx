@@ -291,8 +291,7 @@ export function ReleaseDecision({
   </form>;
   return <div className="release-decision">
     <nav className="decision-breadcrumbs" aria-label="Путь к разбору релиза">
-      {release && <a className="crumb" href={'#release-detail/' + encodeURIComponent(release.id)}>← К карточке релиза</a>}
-      <a className="crumb" href="#releases-list">{release ? 'К релизам' : '← К релизам'}</a>
+      <a className="crumb" href="#releases-list">← Журнал релизов</a>
     </nav>
     <div className="page-head"><h1>Разбор релиза</h1></div>
     {error ? <p role="alert">{error}</p> : loading ? <p role="status">Читаем источники…</p> : data && <>

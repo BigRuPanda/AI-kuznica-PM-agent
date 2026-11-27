@@ -11,11 +11,14 @@ import { fixtureEnv, seedWorkspace } from './workspace-fixture.mjs';
 
 test('the release journal sorts both sources and keeps their routes distinct', async t => {
   const { app, page, origin } = await openWorkspace(t);
-  importDocs(app.space('team'), [{
+  const store = app.space('team');
+  const calendarTitle = 'Календарная запись R-001 для Kaspersky';
+  importDocs(store, [{
     file: 'Дополнение к календарю.xlsx',
     facts: [
       { kind: 'releases', loc: 'Релизы!A2', row: {
-        release_id: 'R-001', release_date: '2026-11-08', description: 'Календарная запись R-001',
+        release_id: 'R-001', release_date: '2026-11-08', description: calendarTitle,
+        release_type: 'major', status: 'выпущен',
         related_task_ids: 'DOC-1; DOC-3',
       } },
       { kind: 'releases', loc: 'Релизы!A3', row: {
@@ -25,30 +28,34 @@ test('the release journal sorts both sources and keeps their routes distinct', a
       { kind: 'backlog', loc: 'Бэклог!A3', row: { task_id: 'DOC-2', title: 'Проверить публикацию', status: 'New', release_id: 'R-001' } },
     ],
   }], { notify: false });
+  store.db.prepare('INSERT INTO cases VALUES (?,?,?,?,?)').run('related-case', 'Kaspersky',
+    'Проверка календарного релиза', 'Исследуем', JSON.stringify({ release: 'R-001' }));
   await page.route('**/api/journal', route => route.fulfill({
     status: 503, json: { error: 'Журнал временно недоступен' },
   }), { times: 1 });
   await page.goto(origin + '/#releases-list');
   const table = page.getByRole('table', { name: 'Журнал релизов' });
   await table.waitFor();
-  await table.getByRole('link', { name: 'Календарная запись R-001' }).waitFor();
+  await table.getByRole('link', { name: calendarTitle, exact: true }).waitFor();
   await page.getByRole('button', { name: 'Повторить', exact: true }).click();
   await table.getByRole('link', { name: 'Кнопка «Скачать счёт»' }).waitFor();
-  const rows = table.locator('tbody tr');
-  assert.deepEqual(await rows.getByRole('link').allTextContents(), [
-    'Календарная запись R-001', 'Кнопка «Скачать счёт»', 'Новая форма заказа', 'Тестовый конфигуратор Kaspersky',
-    'Релиз без даты',
-  ]);
+  const rows = table.locator(':scope > tbody > tr.release-row');
+  assert.deepEqual(await rows.locator('th small').allTextContents(), ['R-001', 'R-002', 'R-001', 'DEMO-R', 'R-NODATE']);
   await rows.last().getByRole('cell', { name: 'Не указана' }).waitFor();
-  assert.equal(await rows.nth(0).getByRole('link').getAttribute('href'), '#release-detail/R-001');
+  assert.equal(await rows.nth(0).getByRole('link').getAttribute('href'), '#release-decision/R-001');
   assert.equal(await rows.nth(2).getByRole('link').getAttribute('href'), '#release/R-001');
+  assert.equal(await rows.last().getByRole('link').count(), 0);
   await page.getByRole('button', { name: 'Из календаря', exact: true }).click();
   assert.equal(await rows.count(), 3);
-  await rows.first().getByRole('link').click();
+  await rows.first().getByRole('button', { name: 'Связанные задачи и разборы R-001' }).click();
   const tasks = page.getByRole('table', { name: 'Связанные задачи' });
   await tasks.getByRole('cell', { name: 'Обновить документацию' }).waitFor();
   await tasks.getByRole('cell', { name: 'Проверить публикацию' }).waitFor();
   await page.getByRole('listitem').filter({ hasText: 'DOC-3' }).waitFor();
+  await page.getByRole('link', { name: /Проверка календарного релиза/ }).waitFor();
+  await rows.first().getByRole('link', { name: calendarTitle, exact: true }).click();
+  await page.getByRole('heading', { name: 'Разбор релиза', exact: true }).waitFor();
+  await page.waitForURL('**/#release-decision/R-001');
   await page.goto(origin + '/#releases');
   await page.getByRole('button', { name: 'С метриками', exact: true, pressed: true }).waitFor();
   await table.getByRole('link', { name: 'Кнопка «Скачать счёт»' }).waitFor();

@@ -382,10 +382,8 @@ test('release decisions preserve the historical cutoff, cited cells and manual i
   const journalHeading = page.getByRole('heading', { name: 'Журнал релизов', exact: true });
   const releaseHeading = page.getByRole('heading', { name: 'Разбор релиза', exact: true });
   const releaseLink = page.getByRole('link', { name: 'Поздний релиз Kaspersky', exact: true });
-  const openAssessment = () => page.getByRole('link', { name: 'Разбор релиза', exact: true }).click();
   await journalLink.click();
   await releaseLink.click();
-  await openAssessment();
   await page.waitForURL('**/#release-decision/DEC-2');
   const releaseSelect = field(page.locator('.decision-filters'), 'Релиз');
   assert.equal(await releaseSelect.inputValue(), 'DEC-2');
@@ -399,31 +397,29 @@ test('release decisions preserve the historical cutoff, cited cells and manual i
   }
   await page.setViewportSize({ width: 1440, height: 900 });
   await visible(releaseHeading);
-  await page.getByRole('link', { name: /К релизам/ }).click();
+  await page.getByRole('link', { name: '← Журнал релизов' }).click();
   await visible(journalHeading);
 
   const compoundId = page.locator('.decision-hero').getByText('DEC K/1 · 01.10.2026', { exact: true });
-  await page.locator('a[href="#release-detail/DEC%20K%2F1"]').click();
-  await openAssessment();
+  await page.locator('a[href="#release-decision/DEC%20K%2F1"]').click();
   await compoundId.waitFor({ state: 'visible', timeout: 5000 });
   assert.equal(await releaseSelect.inputValue(), 'DEC K/1');
   await page.goto(base + '/#release-detail/DEC%20K/1');
-  await openAssessment();
   await page.waitForURL('**/#release-decision/DEC%20K%2F1', { timeout: 5000 });
   await visible(compoundId);
 
   imported[0].facts.push(release('DEC-LATE', '2026-10-01', 'Дополнение к выпуску Astra', 10));
   importDocs(store, imported, { notify: false });
   await page.goto(base + '/#release-detail/DEC-LATE');
-  await openAssessment();
   await page.waitForURL('**/#release-decision/DEC-LATE', { timeout: 5000 });
   await visible(page.locator('.decision-hero').getByText('DEC-LATE · 01.10.2026', { exact: true }));
 
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto(base + '/#release-detail/DEC-TECH');
+  await page.waitForURL('**/#releases-list');
   const scheduleButton = role(page, 'Запланировать разбор DEC-TECH');
   await visible(scheduleButton);
-  assert.equal(await page.getByRole('link', { name: 'Разбор релиза', exact: true }).count(), 0);
+  assert.equal(await page.getByRole('row').filter({ hasText: 'DEC-TECH' }).getByRole('link').count(), 0);
   assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
   assert.equal(await scheduleButton.innerText(), 'Запланировать разбор');
   await scheduleButton.click();
@@ -432,7 +428,6 @@ test('release decisions preserve the historical cutoff, cited cells and manual i
   await page.setViewportSize({ width: 1440, height: 900 });
   await journalLink.click();
   await releaseLink.click();
-  await openAssessment();
 
   await field(page, 'Семейство или раздел').selectOption('Kaspersky');
   await page.getByText('Интервью покупателей', { exact: true }).click();
@@ -470,7 +465,6 @@ test('release decisions preserve the historical cutoff, cited cells and manual i
   assert.equal(await page.getByText('Частные выводы Astra', { exact: true }).count(), 0);
 
   await page.goto(base + '/#release-detail/DEC-2');
-  await openAssessment();
   await page.waitForURL('**/#release-decision/DEC-2');
   await visible(releaseHeading);
   await role(page, 'Открыть чат разбора').click();
@@ -911,7 +905,6 @@ test('Softline workspace, upgrade and browser journeys', async t => {
   await journey('a new case started from the case list does not inherit a previous release', async () => {
     try {
       await admin.getByRole('navigation',{name:'Основные разделы'}).getByRole('link',{name:'Релизы',exact:true}).click();
-      await admin.getByRole('link', { name: 'Тестовый конфигуратор Kaspersky', exact: true }).click();
       await role(admin, 'Запланировать разбор DEMO-R').click();
       const releaseSelect = field(admin,'Связанный релиз');
       assert.equal(await releaseSelect.inputValue(), 'DEMO-R');
