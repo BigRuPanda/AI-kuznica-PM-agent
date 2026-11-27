@@ -333,6 +333,25 @@ test('direct demo Redmine checks the boolean AI field, keeps the saved ID and fi
   }
 });
 
+test('a direct Redmine write rechecks the saved project after asynchronous preflight', async () => {
+  const store = dbAt(), remote = siteMock(), s = scenario(store, remote);
+  try {
+    await s.connect('redmine');
+    const draft = await s.draft('draft', { title: 'Проверить назначение', description: 'Описание' });
+    const send = remote.send;
+    remote.send = async (url, init) => {
+      const response = await send(url, init);
+      if (new URL(url).pathname === '/pm/projects/store.json')
+        configure(store.db, owner, { ...config.redmine, scope: 'changed-project' });
+      return response;
+    };
+    await assert.rejects(s.confirm(draft), /Назначение изменилось/);
+    assert.equal(remote.issues.length, 0);
+  } finally {
+    store.close();
+  }
+});
+
 test('unverified Redmine origin keeps the created ID and repairs one issue after a restart', async () => {
   const store = dbAt(), m = siteMock(), s = scenario(store, m);
   try {

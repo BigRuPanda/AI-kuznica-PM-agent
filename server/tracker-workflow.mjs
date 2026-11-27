@@ -368,8 +368,16 @@ export async function confirmTracker(store, user, row, revision, env, send) {
       throw e;
     }
   }
-  function beforeWrite(addMapping) {
+  function checkWriteAccess() {
     checkVersion();
+    const owner = getCase(db, row.case_id).body.owner;
+    if (owner && owner !== user.id) throw Error('Разбор недоступен');
+    const target = b.receipt && b.issue ? b.issue.target : b.target;
+    if (!target.local && !sameTarget(db, user, target, env))
+      throw Error('Назначение изменилось. Подготовьте новый черновик.');
+  }
+  function beforeWrite(addMapping) {
+    checkWriteAccess();
     const checkpoint = () => {
       b.inFlight = b.receipt ? 'backlink' : 'main';
       persist('sending');
@@ -413,7 +421,7 @@ export async function confirmTracker(store, user, row, revision, env, send) {
       let result;
       if (uncertain) {
         result =
-          b.kind === 'page' ? await api.recover(b.key, b.title, marker) : await api.recover(b.key, marker);
+          b.kind === 'page' ? await api.recover(b.key, b.title, marker) : await api.recover(b.key, marker, checkWriteAccess);
         if (!result)
           throw Error('Запись пока не подтверждена сервисом. Повторите сверку после проверки результата.');
       } else {

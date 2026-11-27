@@ -60,6 +60,11 @@ export function bridgeTracker(db, user, env, send) {
     return row;
   }
   const path = row => '/tasks/' + encodeURIComponent(row.reference);
+  function receipt(task, reference, report) {
+    if (task.reference !== reference || task.report_id !== report || !Number.isInteger(task.redmine_id))
+      throw Error('Ответ Redmine не совпал с черновиком');
+    return { key: 'Redmine #' + task.redmine_id, url: task.url };
+  }
   function search(query, _all = false, origin) {
     const q = query.trim().toLowerCase();
     return visibleRows()
@@ -89,9 +94,7 @@ export function bridgeTracker(db, user, env, send) {
       confirmed: true,
       fields: { priorityId, assigneeId, trackerId },
     });
-    if (task.reference !== reference || task.report_id !== report || !Number.isInteger(task.redmine_id))
-      throw Error('Ответ Redmine не совпал с черновиком');
-    return { key: 'Redmine #' + task.redmine_id, url: task.url };
+    return receipt(task, reference, report);
   }
   return {
     async read(key) {
@@ -117,7 +120,7 @@ export function bridgeTracker(db, user, env, send) {
       beforeWrite();
       return bridge(env, send, endpoint, { changes, marker, confirmed: true });
     },
-    async recover(key, marker) {
+    async recover(key, marker, beforeRetry) {
       if (key) {
         const issue = await bridge(env, send, path(selected(key)) + '/details');
         return issue.comments.some((c) => c.text.split(/\r?\n/).includes(marker)) ? issue : null;
@@ -126,8 +129,16 @@ export function bridgeTracker(db, user, env, send) {
       const draft = db
         .prepare('SELECT body FROM draft_actions WHERE id=? AND user=?')
         .get(marker.slice(3), user.id);
-      const stored = db.prepare('SELECT 1 FROM redmine_drafts WHERE draft=?').get(marker.slice(3));
-      if (draft && stored) return create(JSON.parse(draft.body).changes, marker);
+      const stored = db.prepare('SELECT reference,report FROM redmine_drafts WHERE draft=?').get(marker.slice(3));
+      if (!draft || !stored) return;
+      try {
+        beforeRetry?.();
+      } catch (error) {
+        const task = await bridge(env, send, path(stored)).catch(() => null);
+        if (task?.redmine_id) return receipt(task, stored.reference, stored.report || '');
+        throw error;
+      }
+      return create(JSON.parse(draft.body).changes, marker);
     },
   };
 }
