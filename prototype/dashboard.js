@@ -31,8 +31,13 @@
   let saved = {};
   try { saved = JSON.parse(localStorage.getItem(storageKey)) || {}; } catch {}
   const linkId = () => location.hash.slice(1);
-  let id = ids.includes(linkId()) ? linkId() : ids.includes(saved.id) ? saved.id : ids[0];
-  const initialRelease = id;
+  const entryRelease = () => linkId() || history.state?.releaseDemoId;
+  const initialRelease = [entryRelease(), saved.id].find(key => ids.includes(key)) ?? ids[0];
+  let id = initialRelease;
+  // Keep the root entry tied to its release when another history entry is reloaded.
+  if (!linkId() && history.state?.releaseDemoId !== id) {
+    try { history.replaceState({ ...history.state, releaseDemoId: id }, ''); } catch {}
+  }
   const views = {}, chats = {}, drafts = {};
   for (const key of ids) {
     const v = saved.views?.[key];
@@ -122,7 +127,7 @@
     render();save();
     if(returnFromList)slot('title').focus();
   }
-  window.addEventListener('hashchange',()=>switchRelease(linkId()||initialRelease));
+  window.addEventListener('hashchange',()=>switchRelease(entryRelease()||initialRelease));
   const links=ids.map(key=>{
     const link=make('a',undefined,'release-link');
     link.href='#'+key;

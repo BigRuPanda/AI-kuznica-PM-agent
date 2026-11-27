@@ -105,6 +105,28 @@ test('standalone demo preserves release selection, filters, themes and discussio
   assert.equal(await date.inputValue(),'7');
   assert.equal(await segment.inputValue(),'returning');
   assert.ok(await fitScreen());
+
+  const rootUrl = new URL('/',url).href;
+  await demo.goto(rootUrl);
+  assert.equal(await title.textContent(),releaseTwoTitle);
+  await releases.press('Space');
+  await demo.getByRole('link',{name:/R-001/}).press('Enter');
+  await demo.locator('.release-link[href="#R-001"][aria-current="page"]').waitFor({state:'attached'});
+  await date.selectOption('10');
+  await segment.selectOption('new');
+  await demo.reload();
+  assert.match(demo.url(),/#R-001$/);
+  await demo.goBack();
+  assert.equal(demo.url(),rootUrl);
+  await demo.locator('.release-link[href="#R-002"][aria-current="page"]').waitFor({state:'attached'});
+  assert.equal(await title.textContent(),releaseTwoTitle);
+  assert.equal(await date.inputValue(),'7');
+  assert.equal(await segment.inputValue(),'returning');
+  await demo.goForward();
+  assert.match(demo.url(),/#R-001$/);
+  await demo.locator('.release-link[href="#R-001"][aria-current="page"]').waitFor({state:'attached'});
+  assert.equal(await date.inputValue(),'10');
+  assert.equal(await segment.inputValue(),'new');
   assert.equal(teamApiRequests,0);
   assert.deepEqual(failedAssets,[]);
 });
