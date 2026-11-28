@@ -1,220 +1,368 @@
-import React,{useEffect,useRef,useState} from 'react';
-import {api,calcHref,contextQuery,date,dayDate,fmt,metricNames,segmentNames} from './types';
-import type {Release,Report,Journal,Segment,Message,Board} from './types';
-import {MetricCard} from './charts';
-import {CalculationPage,SavedChart} from './calculations';
-import {DataForm} from './forms';
-import {Answer} from './answer';
-import {Icon} from './icons';
-import {ProfileAvatar} from './profile';
-import type {User} from './team-data';
+import { useEffect, useRef, useState, type FormEvent } from 'react';
+import { api, contextQuery, date, dayDate, fmt, metricNames, segmentNames } from './types';
+import type { Release, Report, Journal, Segment, Message, Board, Card, Context } from './types';
+import { MetricCard, MetricChart, MetricEvidence } from './charts';
+import { CalculationPage, CalculationPreview, SavedChart } from './calculations';
+import { Dialog } from './dialog';
+import { metricSample } from './metric-values';
+import { Answer } from './answer';
+import { Icon } from './icons';
+import { useDiscussionDock } from './panel-size';
+import { ProfileAvatar } from './profile';
+import { ReleaseHelp, releaseCutHelp } from './release-help';
+import type { User } from './team-data';
 import './style.css';
+import './releases.css';
 
-function stored(key:string){try{return localStorage.getItem('release-v1/'+key)||'';}catch{return '';}}
-function remember(key:string,value:string){try{localStorage.setItem('release-v1/'+key,value);}catch{}}
-const clock=new Intl.DateTimeFormat('ru-RU',{hour:'2-digit',minute:'2-digit',timeZone:'Europe/Moscow'});
-function Headline({report:r}:{report:Report}){
-  const c=r.cards[r.release.target],{before,after}=c.series.all;
-  if(c.status!=='ready'||before.value===null||after.value===null)return <p className="lead">{r.overview}</p>;
-  const subjects=['Конверсия','Доля оплаченных счетов','Сумма оплат','Средний чек','Доля своевременных продлений'];
-  const masculine=c.metric===3;
-  const verb=after.value>before.value?(masculine?'вырос':'выросла'):(masculine?'снизился':'снизилась');
-  const value=(v:number)=>fmt(v,c.unit).replace(/\s+%/u,'%');
-  const change=after.value===before.value?' '+(masculine?'сохранился':'сохранилась')+' на уровне '+value(after.value):
-    ' '+verb+' с '+value(before.value)+' до '+value(after.value);
-  const explanation=r.overview.startsWith(c.caption)?r.overview.slice(c.caption.length).trim():'';
-  const supportingFact=explanation.split(/(?<=[.!?])\s+(?=[А-ЯЁ])/u).at(-1);
-  return <p className="lead">{subjects[c.metric]}{change}.{supportingFact&&<span>{supportingFact.replace(/\s+%/gu,'%')}</span>}</p>;
+function stored(key: string) {
+  try { return localStorage.getItem('release-v1/' + key) || ''; } catch { return ''; }
 }
+function remember(key: string, value: string) {
+  try { localStorage.setItem('release-v1/' + key, value); } catch { /* Storage is optional. */ }
+}
+const clock = new Intl.DateTimeFormat('ru-RU', { hour: '2-digit', minute: '2-digit', timeZone: 'Europe/Moscow' });
+type ReleaseResult =
+  | { kind: 'chart'; card: Card; report: Report }
+  | { kind: 'comparison'; card: Card; report: Report; context: Context }
+  | { kind: 'saved'; id: string; title?: string };
+
 export function ReleaseAnalytics({ route, requestedId, user }: {
   route: string; requestedId?: string; user: User;
 }) {
-  const admin = user.role === 'admin';
+  return <section className="release-workspace">
+    {route === 'calc' ? <CalculationPage id={requestedId || ''}/> :
+      <ReleaseReport id={requestedId || ''} user={user}/>}
+  </section>;
+}
+
+function ReleaseReport({ id, user }: { id: string; user: User }) {
   const [journal, setJournal] = useState<Journal | null>(null);
-  const [error, fail] = useState('');
-  const [form, setForm] = useState<'import' | 'release' | null>(null);
-  const [generation, bump] = useState(0);
+  const [error, setError] = useState('');
   useEffect(() => {
     let active = true;
     api<Journal>('journal').then(data => { if (active) setJournal(data); })
-      .catch(e => { if (active) fail(e.message); });
+      .catch(error => { if (active) setError(error.message); });
     return () => { active = false; };
-  }, [generation]);
-  const id = route === 'release' ? requestedId :
-    journal?.releases.find(r => r.id === stored('last'))?.id || journal?.releases[0]?.id;
-  useEffect(() => {
-    if (id && journal?.releases.some(r => r.id === id)) remember('last', id);
-  }, [id, journal]);
-  return <section className="release-workspace">
+  }, []);
+  const release = journal?.releases.find(release => release.id === id);
+  return <>
     <a className="crumb" href="#releases-list">← Журнал релизов</a>
-    {error && <p role="alert">{error}</p>}
-    {route === 'calc' ? <CalculationPage id={requestedId || ''}/> :
-      journal && id ? <Releases key={id} id={id} journal={journal} user={user}
-        generation={generation} onForm={admin ? setForm : undefined}/> :
-      <p role="status">{journal ? 'В журнале пока нет релизов.' : 'Загрузка журнала…'}</p>}
-    {admin && form && journal && <DataForm kind={form} journal={journal} close={() => setForm(null)}
-      onDone={next => { setForm(null); bump(n => n + 1); if (next) location.hash = 'release/' + next; }}/>}
-  </section>;
+    {error ? <p role="alert">{error}</p> : !journal ? <p role="status">Загрузка релиза…</p> : release ?
+      <ReleasePanels release={release} mode={journal.mode} user={user}/> :
+      <p role="alert">Релиз не найден.</p>}
+  </>;
 }
-function Releases({id,journal,user,generation,onForm}:{id:string;journal:Journal;user:User;generation:number;onForm?:(s:'import'|'release')=>void}){
-  const [day,setDay]=useState<number|undefined>(stored(id+'/day')?Number(stored(id+'/day')):undefined),[seg,setSeg]=useState<Segment>((stored(id+'/seg')||'all') as Segment);
-  const [r,setReport]=useState<Report|null>(null),[error,fail]=useState(''),[metric,select]=useState<number|null>(null);
-  const [messages,setMessages]=useState<Message[]|null>(null),[boards,setBoards]=useState<Board[]>([]),[board,setBoard]=useState(''),[question,write]=useState(''),[busy,wait]=useState(false);
-  const [left,showLeft]=useState(stored('left')!=='false'),[right,showRight]=useState(stored('right')!=='false'),[pane,setPane]=useState('main');
-  const [lw,setLw]=useState(()=>Number(stored('lw'))||Math.max(200,Math.min(280,Math.round(innerWidth*.18)))),[rw,setRw]=useState(()=>Number(stored('rw'))||Math.max(270,Math.min(420,Math.round(innerWidth*.26))));
-  const [narrow,setNarrow]=useState(()=>matchMedia('(max-width: 850px)').matches);
-  const chatLog=useRef<HTMLDivElement>(null),chatFlow=useRef<HTMLDivElement>(null),followChat=useRef(true);
-  const [history,setHistory]=useState<{day:number;start:number}|null>(null);
-  const lastActivity=useRef('');
-  const [refresh,rerun]=useState(0);const initial=useRef(new Set<string>()),activitySeq=useRef(0),alive=useRef(true);
-  const requestId=useRef(''),chatBox=useRef<HTMLTextAreaElement>(null);
-  useEffect(()=>{alive.current=true;return()=>{alive.current=false;};},[]);
-  useEffect(()=>{
-    const media=matchMedia('(max-width: 850px)');
-    const changed=()=>setNarrow(media.matches);
-    media.addEventListener('change',changed);return()=>media.removeEventListener('change',changed);
-  },[]);
-  useEffect(()=>{
-    const log=chatLog.current,flow=chatFlow.current;
-    if(!log||!flow)return;
-    const observer=new ResizeObserver(()=>{
-      if(followChat.current&&!document.querySelector('dialog[open]'))log.scrollTop=log.scrollHeight;
+
+function ReleaseResultDialog({ result, close }: { result: ReleaseResult; close: () => void }) {
+  const [related, setRelated] = useState<string | null>(null);
+  const opener = useRef<HTMLElement | SVGElement | null>(null);
+  function showRelated(id: string) {
+    const active = document.activeElement;
+    opener.current = active instanceof HTMLElement || active instanceof SVGElement ? active : null;
+    setRelated(id);
+  }
+  function goBack() {
+    setRelated(null);
+    requestAnimationFrame(() => opener.current?.focus({ preventScroll: true }));
+  }
+  const title = related ? 'Расчёт' : result.kind === 'chart' ? 'График: ' + result.card.title :
+    result.kind === 'comparison' ? 'Расчёт: ' + result.card.title : result.title ? 'Расчёт: ' + result.title : 'Расчёт';
+  return <Dialog title={title} wide close={close}>
+    <div hidden={related !== null}>
+      {result.kind === 'chart' ? <div className="release-chart release-metric-dialog">
+        <MetricChart card={result.card} report={result.report} openCalculation={showRelated}/>
+      </div> : result.kind === 'comparison' ? <CalculationPreview source={result.context}>
+        <MetricEvidence card={result.card} report={result.report} openCalculation={showRelated}/>
+      </CalculationPreview> : <CalculationPreview source={result.id} showTitle={!result.title}/>}
+    </div>
+    {related && <>
+      <button type="button" className="text-action" autoFocus onClick={goBack}>
+        {result.kind === 'chart' ? '← К графику' : '← К расчёту'}
+      </button>
+      <CalculationPreview source={related} showTitle/>
+    </>}
+  </Dialog>;
+}
+
+function ReleasePanels({ release, mode, user }: { release: Release; mode: string; user: User }) {
+  const { id } = release;
+  const [day, setDay] = useState<number | undefined>(() => stored(id + '/day') ? Number(stored(id + '/day')) : undefined);
+  const [segment, setSegment] = useState<Segment>(() => (stored(id + '/seg') || 'all') as Segment);
+  const [report, setReport] = useState<Report | null>(null);
+  const [reportError, setReportError] = useState('');
+  const [refresh, rerun] = useState(0);
+  const [metric, setMetric] = useState<number | null>(null);
+  const [dialog, setDialog] = useState<ReleaseResult | null>(null);
+  const [messages, setMessages] = useState<Message[] | null>(null);
+  const [boards, setBoards] = useState<Board[]>([]);
+  const [board, setBoard] = useState('');
+  const [question, setQuestion] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [chatError, setChatError] = useState('');
+  const [activityError, setActivityError] = useState('');
+  const [history, setHistory] = useState<{ day: number; start: number } | null>(null);
+  const discussion = useRef<HTMLElement>(null);
+  const chatLog = useRef<HTMLDivElement>(null);
+  const chatFlow = useRef<HTMLDivElement>(null);
+  const chatBox = useRef<HTMLTextAreaElement>(null);
+  const followChat = useRef(true);
+  const lastActivity = useRef('');
+  const initial = useRef(new Set<string>());
+  const activitySeq = useRef(0);
+  const alive = useRef(true);
+  const requestId = useRef('');
+  useDiscussionDock(discussion, true);
+
+  useEffect(() => {
+    alive.current = true;
+    return () => { alive.current = false; };
+  }, []);
+  useEffect(() => {
+    const log = chatLog.current;
+    const flow = chatFlow.current;
+    if (!log || !flow) return;
+    const observer = new ResizeObserver(() => {
+      if (followChat.current && !document.querySelector('dialog[open]')) log.scrollTop = log.scrollHeight;
     });
-    observer.observe(flow);return()=>observer.disconnect();
-  },[]);
-  useEffect(()=>{let active=true;fail('');setReport(null);
-    api<Report>('report?'+contextQuery({releaseId:id,segment:seg,day})).then(p=>{
-      if(!active)return;
-      setReport(p);
-    }).catch(e=>{if(active)fail(e.message);});
-    return()=>{active=false;};},[id,day,seg,generation,refresh]);
-  async function activity(){
-    const seq=++activitySeq.current;
-    try{
-      const a=await api<{messages:Message[];boards:Board[]}>('activity?'+contextQuery({releaseId:id}));
-      if(!alive.current||seq!==activitySeq.current)return;
-      const snapshot=JSON.stringify(a);
-      if(lastActivity.current!==snapshot){lastActivity.current=snapshot;setMessages(a.messages);setBoards(a.boards);}
+    observer.observe(flow);
+    return () => observer.disconnect();
+  }, []);
+  useEffect(() => {
+    let active = true;
+    setReportError('');
+    setReport(current => current && current.context.segment === segment &&
+      (day === undefined || current.context.day === day) ? current : null);
+    api<Report>('report?' + contextQuery({ releaseId: id, segment, day }))
+      .then(data => { if (active) setReport(data); })
+      .catch(error => { if (active) setReportError(error.message); });
+    return () => { active = false; };
+  }, [id, day, segment, refresh]);
+
+  async function activity() {
+    const seq = ++activitySeq.current;
+    try {
+      const next = await api<{ messages: Message[]; boards: Board[] }>('activity?' + contextQuery({ releaseId: id }));
+      if (!alive.current || seq !== activitySeq.current) return;
+      setActivityError('');
+      const snapshot = JSON.stringify(next);
+      if (lastActivity.current === snapshot) return;
+      lastActivity.current = snapshot;
+      setMessages(next.messages);
+      setBoards(next.boards);
+    } catch (error) {
+      if (alive.current && seq === activitySeq.current) setActivityError((error as Error).message);
     }
-    catch(e){if(alive.current)fail((e as Error).message);}
   }
-  useEffect(()=>{
-    const check=()=>{if(!document.hidden)void activity();};
-    void activity();const t=setInterval(check,2500);document.addEventListener('visibilitychange',check);
-    return()=>{clearInterval(t);document.removeEventListener('visibilitychange',check);};
-  },[id]);
-  useEffect(()=>{
-    if(!r||r.report||['offline','local'].includes(journal.mode)||r.cards[r.release.target].status!=='ready')return;
-    const key=r.context.version+'/'+r.context.day;if(initial.current.has(key))return;initial.current.add(key);
-    api('initial',{...r.context,segment:'all'}).then(()=>{if(alive.current)rerun(n=>n+1);}).catch(e=>{if(alive.current)fail(e.message);});
-  },[r,journal.mode]);
-  async function ask(e:React.FormEvent){
-    e.preventDefault();if(!r||busy||!question.trim())return;wait(true);fail('');
-    if(!requestId.current)requestId.current=crypto.randomUUID();
-    try{await api('chat',{...r.context,metric:metric??r.release.target,author:user.name,question,requestId:requestId.current});write('');requestId.current='';followChat.current=true;await activity();if(alive.current)rerun(v=>v+1);}
-    catch(ex){fail((ex as Error).message);}finally{if(alive.current)wait(false);}
+  useEffect(() => {
+    const check = () => { if (!document.hidden) void activity(); };
+    void activity();
+    const timer = window.setInterval(check, 2500);
+    document.addEventListener('visibilitychange', check);
+    return () => { window.clearInterval(timer); document.removeEventListener('visibilitychange', check); };
+  }, [id]);
+  useEffect(() => {
+    if (!report || report.report || ['offline', 'local'].includes(mode) ||
+        report.cards[report.release.target].status !== 'ready') return;
+    const key = report.context.version + '/' + report.context.day;
+    if (initial.current.has(key)) return;
+    initial.current.add(key);
+    api('initial', { ...report.context, segment: 'all' })
+      .then(() => { if (alive.current) rerun(n => n + 1); })
+      .catch(error => { if (alive.current) setReportError(error.message); });
+  }, [report, mode]);
+
+  const cutoff = report?.context.day ?? day;
+  const eligible = messages?.filter(message => cutoff !== undefined && message.context.day <= cutoff) ?? [];
+  const latestQuestion = Math.max(0, eligible.map(message => message.role).lastIndexOf('user'));
+  const historyStart = history && history.day === cutoff ? history.start : latestQuestion;
+  useEffect(() => {
+    if (cutoff !== undefined && eligible.length && history?.day !== cutoff) {
+      setHistory({ day: cutoff, start: latestQuestion });
+    }
+  }, [cutoff, eligible.length, history?.day, latestQuestion]);
+
+  async function ask(event: FormEvent) {
+    event.preventDefault();
+    if (!report || busy || !question.trim()) return;
+    setBusy(true);
+    setChatError('');
+    if (!requestId.current) requestId.current = crypto.randomUUID();
+    try {
+      await api('chat', { ...report.context, metric: metric ?? release.target,
+        author: user.name, question, requestId: requestId.current });
+      if (!alive.current) return;
+      setQuestion('');
+      requestId.current = '';
+      followChat.current = true;
+      await activity();
+      if (alive.current) rerun(n => n + 1);
+    } catch (error) {
+      if (alive.current) setChatError((error as Error).message);
+    } finally {
+      if (alive.current) setBusy(false);
+    }
   }
-  function grip(side:'left'|'right'){
-    const value=side==='left'?lw:rw,sign=side==='left'?1:-1,min=side==='left'?130:205;
-    const resize=(n:number)=>{const v=Math.min(side==='left'?280:420,Math.max(min,n));(side==='left'?setLw:setRw)(v);remember(side==='left'?'lw':'rw',String(v));};
-    return <div className={'grip '+side} role="separator" aria-label={side==='left'?'Ширина списка':'Ширина чата'} aria-orientation="vertical" aria-valuemin={min} aria-valuemax={side==='left'?280:420} aria-valuenow={value} tabIndex={0}
-      onKeyDown={e=>{if(e.key==='ArrowLeft'||e.key==='ArrowRight'){e.preventDefault();resize(value+(e.key==='ArrowRight'?12:-12)*sign);}}}
-      onPointerDown={e=>{const el=e.currentTarget,x=e.clientX;el.setPointerCapture(e.pointerId);el.onpointermove=p=>resize(value+(p.clientX-x)*sign);el.onlostpointercapture=()=>{el.onpointermove=null;};}}/>;
+  function showHistory() {
+    if (cutoff === undefined) return;
+    followChat.current = false;
+    setHistory({ day: cutoff, start: 0 });
+    requestAnimationFrame(() => chatLog.current?.scrollTo(0, 0));
   }
-  function toggle(side:string){
-    if(narrow){setPane(pane===side?'main':side);return;}
-    if(side==='left'){showLeft(!left);remember('left',String(!left));}else{showRight(!right);remember('right',String(!right));}
+  function openMetric(kind: 'chart' | 'comparison', card: Card) {
+    if (!report) return;
+    setMetric(card.metric);
+    setDialog(kind === 'chart' ? { kind, card, report } :
+      { kind, card, report, context: { ...report.context, metric: card.metric } });
   }
-  const rel=r?.release||journal.releases.find(e=>e.id===id),names=[...new Set(boards.map(b=>b.name))];
-  const cutoff=r?.context.day??day;
-  const eligible=messages?.filter(m=>cutoff!==undefined&&m.context.day<=cutoff)??[];
-  const latestQuestion=Math.max(0,eligible.map(m=>m.role).lastIndexOf('user'));
-  const historyStart=history&&history.day===cutoff?history.start:latestQuestion;
-  useEffect(()=>{
-    if(cutoff!==undefined&&eligible.length&&history?.day!==cutoff)setHistory({day:cutoff,start:latestQuestion});
-  },[cutoff,eligible.length,history?.day,latestQuestion]);
-  function showHistory(){
-    if(cutoff===undefined)return;
-    followChat.current=false;setHistory({day:cutoff,start:0});
-    requestAnimationFrame(()=>chatLog.current?.scrollTo(0,0));
+  function openCalculation(id: string, title?: string) {
+    setDialog({ kind: 'saved', id, title });
   }
-  const viewMetric=metric??rel?.target??0;
-  function foldButton(side:'left'|'right'){
-    const open=narrow?pane===side:(side==='left'?left:right);
-    const label=narrow?'К разбору':(open?'Свернуть ':'Открыть ')+(side==='left'?'список релизов':'обсуждение');
-    return <button type="button" className="icon-button fold-button" aria-label={label} title={label} aria-controls={side+'-content'} aria-expanded={open} onClick={()=>toggle(side)}><Icon name={(side==='left')===open?'left':'right'}/></button>;
-  }
-  return <div className="layout" data-pane={pane} style={{'--lw':left?lw+'px':'44px','--rw':right?rw+'px':'44px','--lg':left?'6px':'1px','--rg':right?'6px':'1px'} as React.CSSProperties}>
-    <aside className={'sidebar'+(!left&&!narrow?' folded':'')} aria-label="Список релизов"><header className="side-heading"><h2>Релизы</h2>{foldButton('left')}</header>
-    <div className="side-body" id="left-content"><div className="release-list">{journal.releases.map(v=><a href={'#release/'+v.id} key={v.id} aria-current={id===v.id?'page':undefined} className={'release-link '+(id===v.id?'chosen':'')} onClick={()=>setPane('main')}><small>{v.id} · {date(v.launch)}</small><strong>{v.title}</strong></a>)}</div>
-    {onForm&&<div className="side-actions"><button onClick={()=>onForm('release')}><Icon name="plus"/>Добавить релиз</button><button onClick={()=>onForm('import')}><Icon name="download"/>Импорт CSV</button></div>}</div></aside>{left&&grip('left')}
-    <section className="dashboard" aria-label="Аналитика релиза"><div className="report-head"><div className="mobile-switch"><button onClick={()=>toggle('left')}>‹ Список релизов</button><button onClick={()=>toggle('right')}>Обсуждение ›</button></div>
-    <small className="eyebrow">{id}{rel?' · '+date(rel.launch):''}{r?' · '+({ready:'Разбор готов',missing:'Нужны данные',preliminary:'Предварительный разбор'}[r.cards[r.release.target].status]):''}</small><h1>{rel?.title||'Релиз'}</h1>
-    {error&&<p role="alert" className="error">{error}</p>}
-    {r&&<Headline report={r}/>}</div>
-    {r?<><div className="filter-area">
-    <div className="filters"><label className="icon-select" title="Данные на дату"><Icon name="calendar"/><select aria-label="Данные на" value={r.context.day} onChange={e=>{setDay(+e.target.value);remember(id+'/day',e.target.value);}}>{Array.from({length:r.last+1},(_,j)=><option key={j} value={j}>{dayDate(r.release.launch,j)}</option>)}</select></label>
-    <label className="icon-select" title="Сегмент клиентов"><Icon name="people"/><select aria-label="Клиенты" value={seg} onChange={e=>{setSeg(e.target.value as Segment);remember(id+'/seg',e.target.value);}}>{Object.entries(segmentNames).map(([v,l])=><option key={v} value={v}>{l}</option>)}</select></label>
-    {names.length>0&&<label>Дашборд <select value={board} onChange={e=>setBoard(e.target.value)}><option value="">Основной обзор</option>{names.map(n=><option key={n}>{n}</option>)}</select></label>}</div>
-    <details className="about"><summary>О релизе</summary><p>{r.release.description}</p><p>Аудитория · {r.release.audience}</p><p>Главный вопрос · {r.release.question}</p>
-    {r.report?.summaryMetric===r.release.target&&r.report.version===r.context.version&&<details><summary>Первый разбор · {dayDate(r.release.launch,r.report.day)}</summary><Answer text={r.report.answer}/><a href={calcHref(r.report.calc)}>Открыть расчёт</a></details>}</details></div>
-    {board?<section><h2>{board}</h2>{boards.filter(b=>b.name===board).map(b=><SavedChart key={b.calc} id={b.calc}/>)}</section>:<>
-    <p className="period">Сравнение за семь суток до и после запуска. Границы периодов в {clock.format(r.release.launch)} МСК.</p>
-    {r.cards.map(c=><MetricCard key={r.context.version+'/'+seg+'/'+r.context.day+'/'+c.metric} card={c} report={r} select={()=>select(c.metric)}/>)}</>}</>:!error&&<p>Загружаем расчёты…</p>}</section>
-    {right&&grip('right')}
-    <aside className={'thread'+(!right&&!narrow?' folded':'')} aria-label="Обсуждение релиза">
-      <header className="conversation-heading">
-        <span className="chat-avatar" aria-hidden="true"><Icon name="people"/></span>
-        <div className="conversation-title"><h2>Обсуждение релиза</h2><small>{id} · общая ветка</small></div>
-        {foldButton('right')}
-      </header>
-      <div className="thread-body" id="right-content">
+
+  const names = [...new Set(boards.map(item => item.name))];
+  const target = report?.cards.find(item => item.metric === release.target);
+  const insight = target && report?.overview.startsWith(target.caption) ?
+    report.overview.slice(target.caption.length).trim() : report?.overview;
+  const selectedBoard = names.includes(board) ? board : names[0];
+  const firstAnalysis = report?.report;
+  const viewMetric = metric ?? release.target;
+
+  return <>
+    <header className="report-head">
+      <small className="eyebrow">{id} · {date(release.launch)}</small>
+      <h1>{release.title}</h1>
+    </header>
+    <div className="release-columns">
+      <section className="release-metrics" aria-label="Метрики релиза">
+        {reportError && <p role="alert">{reportError}</p>}
+        {report && target ? <>
+          <div className="filters release-report-filters">
+            <div className="release-help-label">
+              <label>Дата среза<select value={report.context.day} onChange={event => {
+                setDay(Number(event.target.value));
+                remember(id + '/day', event.target.value);
+              }}>
+                {Array.from({ length: report.last + 1 }, (_, offset) =>
+                  <option key={offset} value={offset}>{dayDate(release.launch, offset)}</option>)}
+              </select></label>
+              <ReleaseHelp text={releaseCutHelp} />
+            </div>
+            <label>Сегмент<select value={segment} onChange={event => {
+              setSegment(event.target.value as Segment);
+              remember(id + '/seg', event.target.value);
+            }}>
+              {Object.entries(segmentNames).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
+            </select></label>
+          </div>
+          <MetricCard key={report.context.version + '/' + segment + '/' + report.context.day}
+            card={target} report={report} openComparison={() => openMetric('comparison', target)}
+            openCalculation={openCalculation} insight={insight}/>
+          {report.cards.length > 1 && <details className="paper release-other">
+            <summary>Другие метрики</summary>
+            <table className="release-table" aria-label="Другие метрики">
+              <thead><tr><th scope="col">Показатель</th><th scope="col">До</th><th scope="col">После</th></tr></thead>
+              <tbody>{report.cards.filter(card => card.metric !== release.target).map(card => {
+                const { before, after } = card.series.all;
+                return <tr key={card.metric}>
+                  <th scope="row">{card.title}
+                    <div className="actions metric-row-actions">
+                      <button type="button" aria-haspopup="dialog" aria-label={'График: ' + card.title}
+                        title={'Показать динамику метрики «' + card.title + '» по дням.'}
+                        onClick={() => openMetric('chart', card)}>График</button>
+                      <button type="button" aria-haspopup="dialog" aria-label={'Расчёт: ' + card.title}
+                        title={'Сравнить значения метрики «' + card.title + '» до и после выпуска.'}
+                        onClick={() => openMetric('comparison', card)}>Расчёт</button>
+                    </div>
+                  </th>
+                  {[before, after].map((value, index) => <td key={index}>{fmt(value.value, card.unit)}
+                    <small className="table-basis">{metricSample(value, card.metric) ||
+                      (card.status === 'missing' ? 'Нет данных' : '')}</small>
+                    {index === 1 && card.status === 'preliminary' && <small className="table-basis">Предварительно</small>}
+                  </td>)}
+                </tr>;
+              })}</tbody>
+            </table>
+          </details>}
+          <details className="paper release-about">
+            <summary>О релизе</summary>
+            <p>{release.description}</p>
+            <p>Аудитория · {release.audience}</p>
+            <p>Главный вопрос · {release.question}</p>
+            {firstAnalysis && firstAnalysis.summaryMetric === release.target && firstAnalysis.version === report.context.version &&
+              <details><summary>Первый разбор · {dayDate(release.launch, firstAnalysis.day)}</summary>
+                <Answer text={firstAnalysis.answer}/>
+                <button type="button" className="text-action" aria-haspopup="dialog"
+                  onClick={() => openCalculation(firstAnalysis.calc)}>Открыть расчёт</button>
+              </details>}
+          </details>
+        </> : !reportError && <p role="status">Загружаем расчёты…</p>}
+        {names.length > 0 && <details className="paper release-saved">
+          <summary>Сохранённые графики</summary>
+          <label>Дашборд<select value={selectedBoard} onChange={event => setBoard(event.target.value)}>
+            {names.map(name => <option key={name}>{name}</option>)}</select></label>
+          {boards.filter(item => item.name === selectedBoard).map(item => <SavedChart key={item.calc} id={item.calc}/>)}
+        </details>}
+      </section>
+      <aside ref={discussion} className="thread release-discussion" aria-label="Обсуждение релиза">
+        <header className="conversation-heading">
+          <span className="chat-avatar" aria-hidden="true"><Icon name="people"/></span>
+          <div className="conversation-title"><h2>Обсуждение релиза</h2><small>Командный чат</small></div>
+        </header>
         <div className="conversation-body">
-          <div className="chat-history" ref={chatLog} onScroll={e=>{
-            const el=e.currentTarget;followChat.current=el.scrollHeight-el.scrollTop-el.clientHeight<28;
+          <div className="chat-history" ref={chatLog} onScroll={event => {
+            const log = event.currentTarget;
+            followChat.current = log.scrollHeight - log.scrollTop - log.clientHeight < 28;
           }}>
             <div className="chat-flow" ref={chatFlow}>
-              {messages===null&&!error&&<p className="chat-loading muted" role="status">Загрузка переписки…</p>}
-              {messages&&r&&!eligible.length&&!error&&!busy&&<div className="chat-empty"><h4>Что проверить?</h4></div>}
-              {historyStart>0&&<button type="button" className="earlier" onClick={showHistory}>Предыдущие сообщения <span>{historyStart}</span></button>}
-              {eligible.slice(historyStart).map((m,j)=><article key={j+historyStart} className={'bubble '+m.role}>
+              {messages === null && !activityError && <p className="chat-loading muted" role="status">Загрузка переписки…</p>}
+              {messages && report && !eligible.length && !activityError && !busy && <div className="chat-empty"><h4>Что проверить?</h4></div>}
+              {historyStart > 0 && <button type="button" className="earlier" onClick={showHistory}>Предыдущие сообщения <span>{historyStart}</span></button>}
+              {eligible.slice(historyStart).map((message, index) => <article key={index + historyStart} className={'bubble ' + message.role}>
                 <header className="message-author">
-                  {m.role==='assistant' ? <span className="chat-avatar" aria-hidden="true"><Icon name="agent"/></span> :
-                    <ProfileAvatar className="chat-avatar" name={m.author} avatar={m.own ? user.avatar : null}/>}
-                  <strong>{m.author}</strong>
-                  <time dateTime={new Date(m.created).toISOString()} title={new Date(m.created).toLocaleString('ru-RU',{timeZone:'Europe/Moscow'})+' МСК'}>{clock.format(m.created)}</time>
+                  {message.role === 'assistant' ? <span className="chat-avatar" aria-hidden="true"><Icon name="agent"/></span> :
+                    <ProfileAvatar className="chat-avatar" name={message.author} avatar={message.own ? user.avatar : null}/>}
+                  <strong>{message.author}</strong>
+                  <time dateTime={new Date(message.created).toISOString()}
+                    title={new Date(message.created).toLocaleString('ru-RU', { timeZone: 'Europe/Moscow' }) + ' МСК'}>{clock.format(message.created)}</time>
                 </header>
-                <Answer text={m.text} compact={m.role==='assistant'&&m.refs?.some(ref=>ref.op==='build_chart')}/>
-                {m.refs?.filter(ref=>ref.op==='build_chart').map(ref=><SavedChart key={ref.id} id={ref.id} preview author={user.name} suggested={names} onSave={()=>void activity()}/>)}
-                {m.refs?.filter(ref=>ref.op!=='build_chart').map(ref=><a href={calcHref(ref.id)} key={ref.id}>{ref.title} ↗</a>)}
-                <small className="message-context">{segmentNames[m.context.segment]} · срез на {rel?dayDate(rel.launch,m.context.day):''}</small>
+                <Answer text={message.text} compact={message.role === 'assistant' && message.refs?.some(ref => ref.op === 'build_chart')}/>
+                {message.refs?.filter(ref => ref.op === 'build_chart').map(ref =>
+                  <SavedChart key={ref.id} id={ref.id} author={user.name} suggested={names} onSave={() => void activity()}/>)}
+                {message.refs?.filter(ref => ref.op !== 'build_chart').map(ref =>
+                  <button key={ref.id} type="button" className="text-action" aria-haspopup="dialog"
+                    onClick={() => openCalculation(ref.id, ref.title)}>{ref.title}</button>)}
+                <small className="message-context">{segmentNames[message.context.segment]} · срез на {dayDate(release.launch, message.context.day)}</small>
               </article>)}
-              {narrow&&error&&<p role="alert">{error}</p>}
+              {activityError && <p role="alert">{activityError}</p>}
             </div>
           </div>
         </div>
         <form className="chat-composer" onSubmit={ask}>
-          {journal.mode==='offline'&&<p className="hint">Для ответа подключите модель в серверном .env.</p>}
-          {journal.mode==='local'&&<p className="hint">Локальный режим. В ответе доступны расчёт выбранной метрики и его источник.</p>}
-          <button type="button" className="text-action suggest" onClick={()=>{
-            write('Сколько дней обычно проходит от выставления счёта до оплаты? Построй график медианы.');
-            requestId.current='';chatBox.current?.focus();
+          {mode === 'offline' && <p className="hint">Модель не подключена.</p>}
+          {mode === 'local' && <p className="hint">Доступны расчёт метрики и его источник.</p>}
+          <button type="button" className="text-action suggest" onClick={() => {
+            setQuestion('Сколько дней обычно проходит от выставления счёта до оплаты? Построй график медианы.');
+            requestId.current = '';
+            chatBox.current?.focus();
           }}>Исследовать скорость оплаты</button>
           <small className="chat-typing" role="status">
             {busy ? <><span aria-hidden="true"><i/><i/><i/></span> Агент проверяет данные…</> :
-              `${metricNames[viewMetric]} · ${segmentNames[seg]}`}
+              metricNames[viewMetric] + ' · ' + segmentNames[segment]}
           </small>
+          {chatError && <p role="alert">{chatError}</p>}
           <div className="composer-row">
             <textarea ref={chatBox} aria-label="Спросить агента" required maxLength={1500} rows={1} value={question}
-              placeholder="Спросить агента…" onChange={e=>{write(e.target.value);requestId.current='';}}
-              onKeyDown={e=>{
-                if(e.key!=='Enter'||e.shiftKey||e.ctrlKey||e.altKey||e.metaKey||e.nativeEvent.isComposing)return;
-                e.preventDefault();
-                if(r&&!busy&&question.trim())e.currentTarget.form?.requestSubmit();
+              placeholder="Спросить агента…" onChange={event => { setQuestion(event.target.value); requestId.current = ''; }}
+              onKeyDown={event => {
+                if (event.key !== 'Enter' || event.shiftKey || event.ctrlKey || event.altKey || event.metaKey || event.nativeEvent.isComposing) return;
+                event.preventDefault();
+                if (report && !busy && question.trim()) event.currentTarget.form?.requestSubmit();
               }}/>
-            <button type="submit" className="primary chat-send" aria-label="Отправить вопрос" title="Отправить вопрос (Enter)" disabled={!r||busy||!question.trim()}><Icon name="arrowUp"/></button>
+            <button type="submit" className="primary chat-send" aria-label="Отправить вопрос" title="Отправить вопрос (Enter)"
+              disabled={!report || busy || !question.trim()}><Icon name="arrowUp"/></button>
           </div>
         </form>
-      </div>
-    </aside></div>;
+      </aside>
+    </div>
+    {dialog && <ReleaseResultDialog result={dialog} close={() => setDialog(null)}/>}
+  </>;
 }

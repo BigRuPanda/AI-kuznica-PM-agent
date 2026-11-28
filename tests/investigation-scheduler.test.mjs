@@ -15,7 +15,7 @@ function setup(t, initialLimit) {
   const spaces=new Map(), starts=[], held=[];
   let limit=initialLimit, peak=0;
   for(const id of ['team','judge']) {
-    const store=openStore(':memory:',{seedDemo:false});
+    const store=openStore(':memory:');
     initEvidence(store.db); spaces.set(id,store);
   }
   const scheduler=createInvestigationScheduler({spaces,env,getLimit:()=>limit,options:{

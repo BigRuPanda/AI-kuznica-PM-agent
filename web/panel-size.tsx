@@ -11,7 +11,7 @@ export function usePanelSpace() {
   return { available, observe };
 }
 
-export function useDiscussionDock(ref: RefObject<HTMLDivElement | null>, mounted: boolean) {
+export function useDiscussionDock(ref: RefObject<HTMLElement | null>, mounted: boolean) {
   useLayoutEffect(() => {
     const dock = ref.current;
     const layout = dock?.parentElement;

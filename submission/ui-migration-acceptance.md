@@ -1,6 +1,6 @@
 # Приёмка нового UI с профилями
 
-Проверен коммит `13a676ca0ee9c51480a1d3691ef7b704f79c64be` ветки `codex/full-ui-profile-migration`. В основу вошли локальный `main@d90bf9f`, UI с профилями `2f7a3c0` и функции интеграционной ветки `e662119`. [Утверждённый план](../docs/superpowers/plans/2026-11-27-full-ui-and-profile-migration.md).
+Проверен коммит `13a676ca0ee9c51480a1d3691ef7b704f79c64be` ветки `codex/full-ui-profile-migration`. В основу вошли локальный `main@d90bf9f`, UI с профилями `2f7a3c0` и функции интеграционной ветки `e662119`.
 
 Код каждой из 17 задач плана прошёл отдельное ревью. При сведении проверок трёх доноров сохранены все 187 имён тестов локального main и 175 имён UI-ветки. Для интеграционной ветки 106 из 119 имён совпадают, остальные 13 сопоставлены с тестами-преемниками. Число имён включает вложенные сценарии и отличается от числа исполненных проверок.
 
@@ -60,6 +60,6 @@
 ## Воспроизведение
 
 1. Установить зависимости командой `pnpm install --frozen-lockfile` и выполнить `pnpm build`.
-2. Подготовить три комплекта через `scripts/ui-migration-fixtures.mjs`, как описано в T17 плана. Задать абсолютный путь к результату в `PM_MIGRATION_FIXTURES`.
-3. Выполнить `node --test --test-concurrency=1 demo/versions.test.mjs "tests/*.test.mjs"` и `node --test --test-concurrency=1 "tests/*.browser.mjs"`. На Windows при необходимости задать `PYTHON_BIN` и `PM_BROWSER_PATH`.
+2. Запустить `node scripts/ui-migration-fixtures.mjs --local <checkout> --ui <checkout> --integration <checkout> --out <empty-directory>`. Передать пути к рабочим копиям трёх исходных ревизий и пустому каталогу для результата. Задать абсолютный путь к результату в `PM_MIGRATION_FIXTURES`.
+3. Выполнить `node --test --test-concurrency=1 "tests/*.test.mjs"` и `node --test --test-concurrency=1 "tests/*.browser.mjs"`. На Windows при необходимости задать `PYTHON_BIN` и `PM_BROWSER_PATH`.
 4. Выполнить `python integrations/signal-bridge/verify.py -v`; прогнать обе [проверки пилота](pilot.md) на изолированном стенде. Для исходного ZIP задать `SIGNAL_RELEASE_ARCHIVE` и `SIGNAL_RELEASE_BROWSER=1`.

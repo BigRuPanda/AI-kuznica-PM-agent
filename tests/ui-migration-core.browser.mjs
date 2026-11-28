@@ -38,7 +38,7 @@ test('profile photo, renamed case chat and ordinary chart attachments work toget
     ['Обзор', 'Чаты', 'Релизы', 'Разборы']);
   const releases = sections.getByRole('link', { name: 'Релизы', exact: true });
   await releases.click();
-  await page.getByRole('heading', { name: 'Журнал релизов' }).waitFor();
+  await page.getByRole('heading', { name: 'Релизы', exact: true }).waitFor();
   assert.equal(await releases.getAttribute('aria-current'), 'page');
   await page.goto(origin + '/#profile');
   const profileLink = page.getByRole('link', { name: 'Профиль', exact: true });

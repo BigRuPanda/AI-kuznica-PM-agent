@@ -165,7 +165,7 @@ test('an explicit request to stay offline overrides the internet checkbox', () =
 });
 
 test('carousel chat links the release, its task and actual clicks from the imported workbook', async t => {
-  const store = openStore(':memory:', { seedDemo:false });
+  const store = openStore(':memory:');
   t.after(() => store.close());
   initEvidence(store.db);
   initWorkbench(store.db);
@@ -225,7 +225,7 @@ test('carousel chat links the release, its task and actual clicks from the impor
 });
 
 test('carousel chat on a saved screen admits only the selected metric versions and calendar window', async t => {
-  const store=openStore(':memory:',{seedDemo:false});
+  const store=openStore(':memory:');
   t.after(()=>store.close());
   initEvidence(store.db);
   initWorkbench(store.db);
@@ -268,7 +268,7 @@ test('carousel chat on a saved screen admits only the selected metric versions a
 });
 
 test('released-decision chart preparation applies the signed cutoff before saving source rows', async t => {
-  const store=openStore(':memory:',{seedDemo:false});
+  const store=openStore(':memory:');
   t.after(()=>store.close());
   initEvidence(store.db);
   initWorkbench(store.db);

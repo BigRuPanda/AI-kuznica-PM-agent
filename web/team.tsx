@@ -2,6 +2,7 @@ import { SourceExtract } from './knowledge-source';
 import { Knowledge } from './knowledge';
 import { ReleaseDecision } from './release-decision';
 import { ReleaseAnalytics } from './app';
+import { ReleaseJournal, releaseAssessmentHref } from './release-journal';
 import { MetrikaJournal } from './metrika-status';
 import { ChatTrackerPreview, Connections, DemoObject, Tracking } from './tracking';
 import type { TrackerPreview } from './tracking';
@@ -46,6 +47,7 @@ import { CaseInvestigation, InvestigationSnapshot, useCaseInvestigation } from '
 import type { InvestigationCalculation } from './case-investigation';
 import { caseHeading, changeLabel, signalBaseline, signalPeriod } from './case-periods';
 import { CasePeriodFilter } from './case-period-filter';
+import { CaseStatusMenu, type ManualCaseState } from './case-status-menu';
 import { SignalEvidence } from './signal-evidence';
 import { Answer } from './answer';
 import { moveMenu, moveView } from './motion';
@@ -63,7 +65,9 @@ import './tracking.css';
 import './chat.css';
 
 type Action = (fn: () => Promise<void>) => void;
+type CaseStatusWrite = { pending: boolean; revision: number };
 type ThreadTitle = Pick<Thread, 'id' | 'title'>;
+
 function currentRoute() {
   if (location.hash.length > 1) return location.hash.slice(1);
   const params = new URLSearchParams(location.search);
@@ -77,7 +81,13 @@ function useRoute() {
     window.addEventListener('hashchange', change);
     return () => window.removeEventListener('hashchange', change);
   }, []);
-  return route.split('/');
+  const [page, ...segments] = route.split('/');
+  if (segments.length && (page === 'release-detail' || page === 'release-decision')) {
+    const releaseId = segments.join('/');
+    try { return [page, decodeURIComponent(releaseId)]; }
+    catch { return [page, releaseId]; }
+  }
+  return [page, ...segments];
 }
 function Login({ onLogin, joinCode }: { onLogin: (user: User) => void; joinCode?: string }) {
   const [register, mode] = useState(joinCode !== undefined),
@@ -147,29 +157,62 @@ function Login({ onLogin, joinCode }: { onLogin: (user: User) => void; joinCode?
     </main>
   );
 }
-function CaseList({ items }: { items: Case[] }) {
+const caseTypeLabels = {
+  all: 'Все',
+  signal: 'Сигналы',
+  release: 'Релизы',
+  standalone: 'Самостоятельные',
+} as const;
+type CaseType = keyof typeof caseTypeLabels;
+
+function caseReleaseId(item: Case) {
+  return item.body.release || item.body.signal?.releaseId;
+}
+
+function matchesCaseType(item: Case, type: CaseType) {
+  switch (type) {
+    case 'signal': return Boolean(item.body.signal);
+    case 'release': return Boolean(caseReleaseId(item));
+    case 'standalone': return !item.body.signal && !caseReleaseId(item);
+    case 'all': return true;
+  }
+}
+
+function CaseList({
+  items, showTypes = false, emptyMessage = 'Разборы появятся после загрузки данных или нового поручения.',
+}: { items: Case[]; showTypes?: boolean; emptyMessage?: string }) {
   return (
     <div className="case-list">
       {items.length ? (
-        items.map((c) => (
-          <a key={c.id} href={'#case/' + c.id}>
-            <div>
-              <span className="state">{c.state}</span>
-              {c.body.signal?.status === 'withdrawn' && <span className="state">Сигнал отозван</span>}
-              <h3>{c.title}</h3>
-              <small>{c.body.signal?.week || c.product}</small>
-            </div>
-            <div className="case-value" data-negative={(c.body.signal?.change ?? 0) < 0}>
-              {c.body.signal?.status === 'withdrawn' ? '—' : c.body.signal?.rule === 'relative'
-                ? changeLabel(c.body.signal.change)
-                : c.body.signal
-                  ? num(c.body.signal.value) + (c.body.signal.metric ? '%' : ' п.')
-                  : <Icon name="arrow" />}
-            </div>
-          </a>
-        ))
+        items.map((c) => {
+          const releaseId = showTypes ? caseReleaseId(c) : undefined;
+          return (
+            <a key={c.id} href={'#case/' + c.id}>
+              <div>
+                <div className="case-badges">
+                  <span className="state">{c.state}</span>
+                  {showTypes && c.body.signal && <span className="state">сигнал</span>}
+                  {releaseId && <span className="state">релиз</span>}
+                  {c.body.signal?.status === 'withdrawn' && <span className="state">Сигнал отозван</span>}
+                </div>
+                <h3>{c.title}</h3>
+                <small>
+                  {c.body.signal?.week || c.product}
+                  {releaseId && ' · ' + releaseId}
+                </small>
+              </div>
+              <div className="case-value" data-negative={(c.body.signal?.change ?? 0) < 0}>
+                {c.body.signal?.status === 'withdrawn' ? '—' : c.body.signal?.rule === 'relative'
+                  ? changeLabel(c.body.signal.change)
+                  : c.body.signal
+                    ? num(c.body.signal.value) + (c.body.signal.metric ? '%' : ' п.')
+                    : <Icon name="arrow" />}
+              </div>
+            </a>
+          );
+        })
       ) : (
-        <p className="empty">Разборы появятся после загрузки данных или нового поручения.</p>
+        <p className="empty">{emptyMessage}</p>
       )}
     </div>
   );
@@ -230,8 +273,6 @@ function Overview({ home, onAsk }: { home: Home; onAsk: () => void }) {
           {home.user.role === 'judge' && <span className="state">Демо</span>}
         </div>
         <div className="overview-actions">
-          {(home.products.length > 0 || home.releases.some(release => release.decisionAvailable)) &&
-            <a className="primary arrow-action" href="#release-decision">Решение по релизу <Icon name="arrow" /></a>}
           <button onClick={onAsk}>Спросить помощника</button>
         </div>
       </div>
@@ -285,6 +326,7 @@ function Chat({
   id,
   userId,
   avatar,
+  title,
   caseId,
   threads,
   onThreadAction,
@@ -303,6 +345,7 @@ function Chat({
   id: string;
   userId: string;
   avatar: User['avatar'];
+  title?: string;
   caseId?: string;
   threads: Thread[];
   onThreadAction?: (thread: Thread, action: ChatAction) => void;
@@ -522,7 +565,7 @@ function Chat({
       <header className="conversation-heading">
         <span className="chat-avatar" aria-hidden="true"><Icon name={isGroup ? 'people' : 'agent'} /></span>
         <div className="conversation-title">
-          <h3>{caseId ? 'Обсудить разбор' : activeThread?.title || 'Чат'}</h3>
+          <h3>{title ?? (caseId ? 'Обсудить разбор' : activeThread?.title || 'Чат')}</h3>
           <small>{isGroup ? 'Командный чат' : 'Личный чат'}</small>
         </div>
         {activeThread && onThreadAction && (
@@ -593,7 +636,7 @@ function Chat({
                 s.source === 'metric' ? (
                   <Snapshot key={s.calc} id={s.calc} previewTitle={s.title} />
                 ) : s.source === 'release' ? (
-                  <SavedChart key={s.calc} id={s.calc} preview />
+                  <SavedChart key={s.calc} id={s.calc} />
                 ) : (
                   <a
                     key={s.calc}
@@ -1190,6 +1233,8 @@ function Investigation({
   avatar,
   action,
   refresh,
+  statusWrite,
+  saveCaseStatus,
 }: {
   id: string;
   selected?: string;
@@ -1198,6 +1243,8 @@ function Investigation({
   avatar: User['avatar'];
   action: Action;
   refresh: () => Promise<void>;
+  statusWrite?: CaseStatusWrite;
+  saveCaseStatus: (caseId: string, state: ManualCaseState) => Promise<void>;
 }) {
   const prefix = 'pm-view/' + home.user.id + '/' + id;
   const [viewState, setViewState] = useState(() => ({
@@ -1209,6 +1256,8 @@ function Investigation({
   const currentView = useRef(viewState);
   const requestVersion = useRef(0);
   const active = useRef(false);
+  const savingStatus = statusWrite?.pending ?? false;
+  const statusRevision = statusWrite?.revision ?? 0;
   const { period, preferences, inputsVersion } = viewState;
   const { cards = initialCards, pinned = [], full = false, control: peer = '' } = preferences || {};
   const [d, set] = useState<Detail | null>(null),
@@ -1293,7 +1342,7 @@ function Investigation({
   }, []);
   useEffect(() => {
     void load().catch(() => {});
-  }, [load, inputsVersion]);
+  }, [load, inputsVersion, statusRevision]);
   useEffect(() => {
     let valid = true;
     post<{ id: string }>('case-thread', { caseId: id })
@@ -1379,6 +1428,7 @@ function Investigation({
   const v = d.view,
     c = d.case;
   const signal = c.body.signal;
+  const releaseLinked = Boolean(caseReleaseId(c));
   const redmine = home.integrations.redmine;
   const watchNext = c.state === 'Наблюдаем эффект';
   const specified = c.body.plan?.measurement;
@@ -1411,6 +1461,9 @@ function Investigation({
   const planAccepted = d.drafts.some(draft => draft.state === 'done' &&
     readyRuns.some(run => run?.status === 'ready' && run.id === draft.investigationId));
   const scheduleEffect = !completed && !needsReconfirmation && planAccepted;
+  const effectActionHint = releaseLinked
+    ? (showEffect ? 'Открыть результаты проверки эффекта.' : 'Открыть форму назначения проверки эффекта.')
+    : undefined;
   const measurementEditor = (run: InvestigationRun) => {
     if (!signal || !agreementMetric || withdrawn || completed || c.body.watch || watchNext ||
       run.revision !== (signal.revision ?? 0) || (specified && !agreement)) return undefined;
@@ -1463,9 +1516,11 @@ function Investigation({
       <button className={shareAsPrimary ? 'primary arrow-action' : undefined} onClick={openShare} disabled={updating}>
         Поделиться {shareAsPrimary && <Icon name="arrow" />}
       </button>
-      <CasePeriodFilter period={period} onApply={applyPeriod} boundaryRef={caseControls} />
+      <CasePeriodFilter period={period} onApply={applyPeriod} boundaryRef={caseControls}
+        triggerTitle={releaseLinked ? 'Выбрать даты расчёта для этого разбора.' : undefined} />
     </div>
-    {!researchAvailable && !completed && <button className="primary arrow-action" onClick={openNext}>
+    {!researchAvailable && !completed && <button className="primary arrow-action" onClick={openNext}
+      title={watchNext ? effectActionHint : undefined}>
       {watchNext ? 'Проверить эффект' : 'К задаче'}
       <Icon name="arrow" />
     </button>}
@@ -1485,7 +1540,10 @@ function Investigation({
         {signal && !withdrawn && !research.investigation?.current?.period && <p>
           {[signal.releaseId, signalPeriod(signal), changeLabel(signal.change, signal.changeUnit)].filter(Boolean).join(' · ')}
         </p>}
-        <span className="state">{c.state}</span>
+        <CaseStatusMenu state={c.state} busy={savingStatus || updating} releaseLinked={releaseLinked} onSelect={state => {
+          if (state === 'Завершено') confirm('finish');
+          else action(() => saveCaseStatus(id, state));
+        }} />
         {signal?.metric && signal.status === 'provisional' && <span className="state">Предварительный сигнал</span>}
         {withdrawn && <p role="status">Сигнал отозван после пересчёта данных. Разбор и сохранённые выводы доступны для проверки.</p>}
         {!researchAvailable && signalDetails}
@@ -1522,7 +1580,8 @@ function Investigation({
             canDraft={!!(redmine.local || redmine.connected)} onDraft={draftId => action(() => onDraft(draftId))}
             measurement={measurementEditor}
             next={!withdrawn && (showEffect || scheduleEffect) ? {
-              label: showEffect ? 'Посмотреть результат проверки эффекта' : 'Назначить проверку эффекта', open: openNext,
+              label: showEffect ? 'Посмотреть результат проверки эффекта' : 'Назначить проверку эффекта',
+              title: effectActionHint, open: openNext,
             } : undefined} />}
           {tid && (
             <button className="mobile-toggle" aria-expanded={mobileChat} onClick={() => moveView(() => chatMode(!mobileChat))}>
@@ -1597,7 +1656,7 @@ function Investigation({
             reload={load}
           />
           <details className="paper effect-panel" ref={effectSection}>
-            <summary>Проверка эффекта</summary>
+            <summary title={releaseLinked ? 'Открыть план и результаты проверки эффекта.' : undefined}>Проверка эффекта</summary>
             {useArchiveForm ? <EffectPlan key={id + '/' + (archiveMonitoring?.plan.revision || 0)}
               caseId={id} saved={archiveMonitoring?.result ?? null} archiveOnly={home.archiveOnly}
               readOnly={completed} reload={async () => { await load(); await refresh(); }} /> : <>
@@ -1646,12 +1705,11 @@ function Investigation({
                 <a href={'#snapshot/' + item.calc + '/watch'}>Версия {item.revision}{item.deployed && ' · ' + item.deployed}</a>
               </li>)}</ul>
             </details>}
-            <button
-              onClick={() => confirm('finish')}
-              disabled={completed}
-            >
-              Завершить разбор
-            </button>
+            <footer className="effect-finish">
+              <button type="button" onClick={() => confirm('finish')} disabled={completed || savingStatus || updating}>
+                Завершить разбор
+              </button>
+            </footer>
           </details>
           <details className="paper">
             <summary>Поправка к источнику</summary>
@@ -1765,11 +1823,7 @@ function Investigation({
                     updatePreferences({ cards: initialCards, pinned: [], full: false, control: '', sourceQuery: '' });
                     return;
                   }
-                  action(async () => {
-                    await post('decide', { caseId: id, state: 'Завершено' });
-                    await load();
-                    await refresh();
-                  });
+                  action(() => saveCaseStatus(id, 'Завершено'));
                 })}>{confirmation === 'reset' ? 'Сбросить' : 'Завершить'}</button>
               </footer>
             </div>
@@ -2219,8 +2273,11 @@ function Workspace({ user, onLogout, onUpdate }: { user: User; onLogout: () => v
     [home, setHome] = useState<Home | null>(null),
     [err, fail] = useState(''),
     [filter, setFilter] = useState(''),
+    [caseType, setCaseType] = useState<CaseType>('all'),
     [newCaseRelease, showCaseForm] = useState<string | null>(null),
     [menu, setMenu] = useState(readMenuLayout);
+  const [caseStatusWrites, setCaseStatusWrites] = useState(() => new Map<string, CaseStatusWrite>());
+  const pendingCaseStatusWrites = useRef(new Set<string>());
   const sidebar = useSidebarWidth();
   const bridgePages = Boolean(home?.bridgeEnabled);
   const route = home && !bridgePages && ['knowledge', 'demo-page'].includes(requestedRoute) ? 'cases' : requestedRoute;
@@ -2229,11 +2286,27 @@ function Workspace({ user, onLogout, onUpdate }: { user: User; onLogout: () => v
   const settings = route === 'settings' || (route === 'cases' && id === 'settings');
   const settingsScope = route === 'settings' && id === 'personal' ? 'personal' : 'team';
   const homeVersion = useRef(0);
-  const refresh = useCallback(async () => {
+  const refresh = useCallback(async (onLoad?: (data: Home) => void) => {
     const version = ++homeVersion.current;
     const next = await post<Home>('overview');
-    if (homeVersion.current === version) setHome(next);
+    if (homeVersion.current !== version) return;
+    setHome(next);
+    onLoad?.(next);
   }, []);
+  async function saveCaseStatus(caseId: string, state: ManualCaseState) {
+    if (pendingCaseStatusWrites.current.has(caseId)) return;
+    pendingCaseStatusWrites.current.add(caseId);
+    let revision = caseStatusWrites.get(caseId)?.revision ?? 0;
+    setCaseStatusWrites(current => new Map(current).set(caseId, { pending: true, revision }));
+    try {
+      await post('decide', { caseId, state });
+      revision++;
+      await refresh();
+    } finally {
+      pendingCaseStatusWrites.current.delete(caseId);
+      setCaseStatusWrites(current => new Map(current).set(caseId, { pending: false, revision }));
+    }
+  }
   function updateThreads(update: (threads: Thread[]) => Thread[]) {
     homeVersion.current++;
     setHome((current) => current && ({
@@ -2242,7 +2315,15 @@ function Workspace({ user, onLogout, onUpdate }: { user: User; onLogout: () => v
     }));
   }
   useEffect(() => {
-    refresh().catch((e) => fail(e.message));
+    let active = true;
+    refresh(next => {
+      if (!active || route !== 'release-detail') return;
+      const release = next.releases.find(entry => entry.release_id === id);
+      location.replace(release?.decisionAvailable ? releaseAssessmentHref(id) : '#releases-list');
+    }).catch((e) => {
+      if (active) fail(e.message);
+    });
+    return () => { active = false; };
   }, [refresh, route, id]);
   useLayoutEffect(() => {
     window.scrollTo(0, 0);
@@ -2318,7 +2399,7 @@ function Workspace({ user, onLogout, onUpdate }: { user: User; onLogout: () => v
             await post('logout');
             onLogout();
           })} />
-        ) : !home ? (
+        ) : !home || route === 'release-detail' ? (
           <p className="empty" role="status">Загрузка…</p>
         ) : route === 'demo-page' || route === 'demo-issue' ? (
           <DemoObject key={route+id} service={route} id={id}/>
@@ -2326,16 +2407,14 @@ function Workspace({ user, onLogout, onUpdate }: { user: User; onLogout: () => v
           <section className="paper">
             <MaterialDetail id={id} />
           </section>
-        ) : ['releases', 'release', 'calc'].includes(route) ? (
+        ) : ['release', 'calc'].includes(route) ? (
           <ReleaseAnalytics route={route} requestedId={id} user={user} />
         ) : route === 'release-decision' ? (
-          <ReleaseDecision key={id} action={action} initialRelease={id || undefined} renderChat={(thread, caseId, releaseId, product, decisionContext) => (
-            <Chat key={thread} id={thread} caseId={caseId} decisionReleaseId={releaseId} decisionContext={decisionContext} product={product}
-              userId={user.id} avatar={user.avatar} threads={home.threads} action={action} />
-          )} />
+          <ReleaseDecision key={id} action={action} initialRelease={id || undefined} />
         ) : route === 'case' ? (
           <Investigation key={home.user.id + '/' + id} id={id} selected={selected} documentation={documentation}
-            home={home} avatar={user.avatar} action={action} refresh={refresh} />
+            home={home} avatar={user.avatar} action={action} refresh={refresh}
+            statusWrite={caseStatusWrites.get(id)} saveCaseStatus={saveCaseStatus} />
         ) : route === 'range' ? (
           <RangeResult id={id} />
         ) : route === 'snapshot' ? (
@@ -2361,51 +2440,17 @@ function Workspace({ user, onLogout, onUpdate }: { user: User; onLogout: () => v
             ))}
             onDelete={(deleted) => updateThreads((threads) => threads.filter((thread) => thread.id !== deleted))}
           />
-        ) : route === 'releases-list' ? (
-          <>
-            <div className="page-head releases-head">
-              <h1>Журнал релизов</h1>
-              <a className="primary" href="#releases">Аналитика по событиям CSV</a>
-            </div>
-            <section className="paper release-calendar">
-              <h2>Календарь из источников</h2>
-              {!home.releases.length && <p>В загруженных источниках пока нет релизов.</p>}
-              {home.releases.map((r) => (
-                <a className="release-row" href={'#release-detail/' + r.release_id} key={r.release_id}>
-                  <small>
-                    {r.release_id} · {r.release_date}
-                  </small>
-                  {r.description}
-                </a>
-              ))}
-            </section>
-          </>
-        ) : route === 'release-detail' ? (
-          (() => {
-            const r = home.releases.find((x) => x.release_id === id);
-            if (!r) return <p role="alert">Запись календаря не найдена. <a href="#releases-list">Журнал релизов</a></p>;
-            return (
-              <>
-                <a href="#releases-list">← Журнал релизов</a>
-                <h1>{r?.release_id}</h1>
-                <section className="paper">
-                  <small>{r?.release_date}</small>
-                  <p>{r?.description}</p>
-                  <p>Связанные задачи: {r?.related_task_ids}</p>
-                  {r.decisionAvailable && <a href={'#release-decision/' + r.release_id}>Решение по релизу</a>}
-                  <button
-                    onClick={() => {
-                      showCaseForm(id);
-                      jump('cases');
-                    }}
-                  >
-                    Запланировать оценку
-                  </button>
-                </section>
-                <CaseList items={home.cases.filter((c) => c.body.release === id)} />
-              </>
-            );
-          })()
+        ) : route === 'releases-list' || route === 'releases' ? (
+          <ReleaseJournal calendar={home.releases} initialFilter={route === 'releases' ? 'metrics' : 'all'}
+            admin={user.role === 'admin'} archiveOnly={Boolean(home.archiveOnly)}
+            onPlan={releaseId => {
+              showCaseForm(releaseId);
+              jump('cases');
+            }}
+            renderCases={releaseId => {
+              const linked = home.cases.filter(item => caseReleaseId(item) === releaseId);
+              return linked.length ? <CaseList items={linked} /> : null;
+            }} />
         ) : route === 'cases' ? (
           <>
             <div className="page-head">
@@ -2470,7 +2515,15 @@ function Workspace({ user, onLogout, onUpdate }: { user: User; onLogout: () => v
                 <button>Создать личный разбор</button>
               </form>
             )}
-            <div className="toolbar">
+            <div className="toolbar case-filters">
+              <label>
+                Тип{' '}
+                <select value={caseType} onChange={(e) => setCaseType(e.target.value as CaseType)}>
+                  {Object.entries(caseTypeLabels).map(([value, label]) => (
+                    <option value={value} key={value}>{label}</option>
+                  ))}
+                </select>
+              </label>
               <label>
                 Состояние{' '}
                 <select value={filter} onChange={(e) => setFilter(e.target.value)}>
@@ -2482,7 +2535,11 @@ function Workspace({ user, onLogout, onUpdate }: { user: User; onLogout: () => v
                 </select>
               </label>
             </div>
-            <CaseList items={home.cases.filter((c) => !filter || c.state === filter)} />
+            <CaseList
+              items={home.cases.filter((c) => (!filter || c.state === filter) && matchesCaseType(c, caseType))}
+              showTypes
+              emptyMessage={filter || caseType !== 'all' ? 'По выбранным фильтрам разборов нет.' : undefined}
+            />
           </>
         ) : (
           <Overview

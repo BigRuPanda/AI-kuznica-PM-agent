@@ -118,8 +118,7 @@ test('weekly ranges use frozen rows, unequal windows, common weeks and explicit 
 test('release ranges recompute unique companies, median and P90 over observations on the original version', () => {
   const s = open();
   try {
-    const release = s.release('R-001'),
-      origin = release.launch,
+    const origin = Date.parse('2026-10-05T07:00:00Z'),
       time = (i, h = 0) => new Date(origin + i * day + h * 3600000).toISOString();
     const csv = [
       'company_id,order_id,invoice_id,event_type,event_at,amount_rub',
@@ -129,7 +128,10 @@ test('release ranges recompute unique companies, median and P90 over observation
       ]),
     ].join('\n');
     const ds = s.importCSV({ name: 'Fixture', csv, completeThrough: time(18) }),
-      rel = s.create({ ...release, dataset: ds.dataset, sourceKey: '', activatedAt: time(0) });
+      rel = s.create({
+        title: 'Оплаты по дням', description: 'Изменение оформления заказа', audience: 'Компании',
+        question: 'Как изменились оплаты?', dataset: ds.dataset, activatedAt: time(0),
+      });
     for (const [metric, stat, expected] of [
       ['0', null, 100],
       ['derived', 'median', 25],

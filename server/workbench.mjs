@@ -3,6 +3,7 @@ import { archiveEvidence, archiveInquiry, archiveAnswer, archiveIdStatus, asksAr
 import { briefConversation, caseBrief, caseBriefKind } from './chat-brief.mjs';
 import { weeklySourceAnswer } from './weekly-source-chat.mjs';
 import { checkReleaseReferencePeriod, checkReleaseSourceVersions } from './release-chat-scope.mjs';
+import { findReleaseCaseId } from './release-cases.mjs';
 import { initRanges, access, grant, compareRanges, readRange, readSnapshot } from './chart-ranges.mjs';
 import { randomUUID } from 'node:crypto';
 import {
@@ -139,6 +140,8 @@ export function dashboard(db, user) {
   const releases = new Map(db.prepare(`SELECT r.* FROM release_threads r JOIN conversations c ON c.id=r.thread
     WHERE c.owner=? AND c.scope='private'`).all(user.id).map(row=>[row.thread,row]));
   const products = [...new Set(listSales(db).map((r) => r.product))];
+  const backlog = facts(db, 'backlog').map(fact => fact.data);
+  const splitIds = value => String(value ?? '').split(/[,;]/u).map(id => id.trim()).filter(Boolean);
   return {
     user,
     cases: visibleCases.map(c => ({ ...c, effect: effect(db, c) })),
@@ -157,7 +160,18 @@ export function dashboard(db, user) {
     products,
     rules: setting(db, 'rules', defaultRules),
     alerts: db.prepare('SELECT id,week,case_id FROM alerts ORDER BY week DESC').all(),
-    releases: facts(db, 'releases').map((f) => ({ ...f.data, decisionAvailable: canDecideRelease(f, products) })),
+    releases: facts(db, 'releases').map(fact => {
+      const release = fact.data;
+      const linkedIds = new Set(splitIds(release.related_task_ids));
+      const relatedTasks = backlog
+        .filter(task => linkedIds.has(String(task.task_id)) ||
+          splitIds(task.release_id).includes(String(release.release_id)))
+        .map(task => ({
+          id: String(task.task_id), title: String(task.title ?? '').trim(), status: String(task.status ?? '').trim(),
+        }));
+      return { ...release, relatedTasks, decisionAvailable: canDecideRelease(fact, products),
+        releaseCaseId: findReleaseCaseId(db, release.release_id) };
+    }),
     deliveries: db.prepare('SELECT channel,state,count(*) n FROM deliveries GROUP BY channel,state').all(),
   };
 }
@@ -254,7 +268,7 @@ export function saveReleaseDecisionContext(db, user, decision) {
 }
 export function readReleaseDecisionContext(db, user, id) {
   const row = typeof id === 'string' && db.prepare('SELECT body FROM release_decision_context WHERE id=? AND owner=?').get(id, user.id);
-  if (!row) throw Error('Срез релиза недоступен. Откройте решение по релизу снова.');
+  if (!row) throw Error('Срез релиза недоступен. Откройте разбор релиза снова.');
   const context = JSON.parse(row.body);
   if (context.decision.caseId) visibleCase(db, user, context.decision.caseId);
   return context;

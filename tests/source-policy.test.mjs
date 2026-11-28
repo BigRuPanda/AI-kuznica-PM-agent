@@ -63,7 +63,7 @@ const report = (file, keys) => ({ file, facts: keys.map((metric_id, i) => ({
 })) });
 
 function fixture(t, docs = [report(first, ['visits']), report(second, ['cart'])]) {
-  const store = openStore(':memory:', { seedDemo: false });
+  const store = openStore(':memory:');
   initEvidence(store.db);
   initSourcePolicy(store.db);
   t.after(() => store.close());
@@ -150,7 +150,7 @@ test('reindexing an original archive preserves superseding revisions, old links,
 });
 
 test('a long research digest cannot displace a focused record with the same matching words', t => {
-  const store = openStore(':memory:', {seedDemo:false});
+  const store = openStore(':memory:');
   t.after(() => store.close());
   initEvidence(store.db);
   initSourcePolicy(store.db);
@@ -167,7 +167,7 @@ test('a long research digest cannot displace a focused record with the same matc
 });
 
 test('archive task identifiers come from both sides of the relationship and survive rendering', async t => {
-  const store=openStore(':memory:',{seedDemo:false});
+  const store=openStore(':memory:');
   t.after(()=>store.close());
   initEvidence(store.db);
   initSourcePolicy(store.db);
@@ -195,7 +195,7 @@ test('archive task identifiers come from both sides of the relationship and surv
 });
 
 test('dates and affected metric both constrain calendar evidence in a measurement answer', t => {
-  const store=openStore(':memory:',{seedDemo:false});
+  const store=openStore(':memory:');
   t.after(()=>store.close());
   initEvidence(store.db);
   initSourcePolicy(store.db);

@@ -30,13 +30,16 @@ export function ChatMenu({ thread, onAction, onOpenChange, triggerRef }: {
   );
 }
 
-export function ChatPopupMenu({ label, triggerLabel = label, triggerContent, triggerClass, triggerRef, menuClass = '', onOpenChange, children }: {
+export function ChatPopupMenu({ label, triggerLabel = label, triggerTitle = label, triggerContent,
+  triggerClass, triggerRef, menuClass = '', disabled, onOpenChange, children }: {
   label: string;
   triggerLabel?: string;
+  triggerTitle?: string | null;
   triggerContent: ReactNode;
   triggerClass: string;
   triggerRef?: RefObject<HTMLButtonElement | null>;
   menuClass?: string;
+  disabled?: boolean;
   onOpenChange?: (open: boolean) => void;
   children: (close: () => void) => ReactNode;
 }) {
@@ -82,7 +85,8 @@ export function ChatPopupMenu({ label, triggerLabel = label, triggerContent, tri
         type="button"
         className={triggerClass}
         aria-label={triggerLabel}
-        title={label}
+        title={triggerTitle ?? undefined}
+        disabled={disabled}
         aria-haspopup="menu"
         aria-controls={id}
         aria-expanded={open}

@@ -21,7 +21,7 @@ export async function checkSyntheticCtr(live = false, transport = fetch) {
     PROXYAPI_API_KEY: live ? liveModelEnv.PROXYAPI_API_KEY : '',
   };
   if (live && !env.PROXYAPI_API_KEY) throw Error('Для синтетической проверки задайте PROXYAPI_API_KEY.');
-  const store = openStore(':memory:', {seedDemo: false});
+  const store = openStore(':memory:');
   const api = new McpServer({name:'synthetic-ctr', version:'1'});
   const client = new Client({name:'synthetic-ctr-reviewer', version:'1'});
   const usage = [], answers = [];

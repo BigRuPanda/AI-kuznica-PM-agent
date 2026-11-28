@@ -13,7 +13,7 @@ async function collect(dir) {
     else if (entry.isFile()) paths.push(name);
   }
 }
-for (const dir of ['server','web','scripts','pilot','tests','demo','prototype']) await collect(dir);
+for (const dir of ['server','web','scripts','pilot','tests','prototype']) await collect(dir);
 const digest = createHash('sha256');
 for (const name of paths.sort()) {
   const raw = await readFile(join(root,name));

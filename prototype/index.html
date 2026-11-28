@@ -14,11 +14,10 @@
 <div id="release-dashboard">
   <header class="demo-header">
     <strong class="demo-brand">Софтлайн Решения</strong>
-    <nav class="top" aria-label="Разделы">
+    <nav class="top" data-slot="navigation" aria-label="Разделы" hidden>
       <button type="button" data-tab="workspace">Обзор</button>
       <button type="button" data-tab="releases" aria-pressed="true">Релизы</button>
     </nav>
-    <span class="demo-label">Демонстрационные данные</span>
     <button class="theme-switch" type="button" data-theme-toggle aria-label="Тёмная тема">
       <svg class="theme-moon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M20.5 15.2A8.5 8.5 0 0 1 8.8 3.5 8.5 8.5 0 1 0 20.5 15.2Z"/></svg>
       <svg class="theme-sun" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2m0 16v2M2 12h2m16 0h2M5 5l1.5 1.5m11 11L19 19M5 19l1.5-1.5m11-11L19 5"/></svg>
@@ -26,11 +25,14 @@
     </button>
   </header>
   <section class="placeholder" data-slot="workspace" hidden>
-    <h2>Демонстрационные релизы</h2>
+    <h2>Обзор релизов</h2>
     <p>Откройте релиз, чтобы сравнить показатели и обсудить результат.</p>
     <button type="button" data-tab="releases">Вернуться к релизам</button>
   </section>
-  <section class="release-workspace" data-slot="releases" aria-label="Релизы">
+  <main class="placeholder" data-slot="empty">
+    <h1>Нет данных о релизах</h1>
+  </main>
+  <section class="release-workspace" data-slot="releases" aria-label="Релизы" hidden>
     <div class="view-switch">
       <button type="button" data-toggle="left" aria-controls="release-list">Список релизов</button>
       <button type="button" data-toggle="right" aria-controls="release-chat">Обсуждение</button>
@@ -89,7 +91,6 @@
     </div>
   </section>
 </div>
-<script src="data.js"></script>
 <script src="metrics.js"></script>
 <script src="dashboard.js"></script>
 </body>

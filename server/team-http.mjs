@@ -1,5 +1,6 @@
 import { initSourcePolicy, approveSource, sourcePermission, importApproved, sourceHistory, protectedSources, protectedProducts } from './source-policy.mjs';
 import { operations as catalog, workspaceOperation } from './workspace-operations.mjs';
+import { openReleaseCase } from './release-cases.mjs';
 import { knowledge } from './knowledge.mjs';
 import { createServer } from 'node:http';
 import { dirname, join } from 'node:path';
@@ -92,7 +93,7 @@ export function createTeamApp({
     getLimit:() => readInvestigationLimit(spaces.get('team').db)});
   function space(id) {
     if (!spaces.has(id)) {
-      const s = openStore(workspacePath(base, id),{seedDemo:!env.SOURCE_ARCHIVE_SHA256});
+      const s = openStore(workspacePath(base, id));
       initEvidence(s.db);
       if (id === 'team') configureSignalAudience(s.db, () => notificationAudience(env, accounts.db));
       initWorkbench(s.db, env);
@@ -109,7 +110,7 @@ export function createTeamApp({
     return spaces.get(id);
   }
   space('team');
-  function seedDemo(id) {
+  function prepareJuryWorkspace(id) {
     const db = space('team').db,
       versions = setting(db, 'demo_versions', []);
     const docs = versions.map((v) =>
@@ -396,7 +397,7 @@ export function createTeamApp({
           }
           authAttempts.set(key, attempt);
           if (++attempt.n > 40) return reply(429, { error: 'Повторите через минуту' });
-          const result = op === 'login' ? await accounts.login(b) : await accounts.register(b, env, seedDemo);
+          const result = op === 'login' ? await accounts.login(b) : await accounts.register(b, env, prepareJuryWorkspace);
           return reply(200, safeUser(result.user), { 'Set-Cookie': tokenCookie(result.token) });
         }
         if (op === 'profile') return reply(200, safeUser(accounts.updateProfile(user.id, b)));
@@ -485,6 +486,7 @@ export function createTeamApp({
           return reply(200, { threshold });
         }
         if (op === 'case-thread') return reply(200, { id: openCaseThread(db, user, b.caseId) });
+        if (op === 'ensure-release-case') return reply(200, openReleaseCase(store, b));
         if (op === 'release_decision') {
           const decision = workspaceOperation(store, user, op, b, env, send);
           return reply(200, { ...decision, decisionContext: saveReleaseDecisionContext(db, user, decision) });

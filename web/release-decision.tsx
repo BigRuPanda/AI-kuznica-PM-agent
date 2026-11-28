@@ -1,5 +1,7 @@
-import React, { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Icon } from './icons';
+import { ReleaseCaseLink } from './release-case-link';
+import { ReleaseHelp, releaseCutHelp } from './release-help';
 import { post } from './team-data';
 import { PreviewCard, type TrackerPreview } from './tracking';
 import './release-decision.css';
@@ -13,10 +15,10 @@ type Trend =
   | { available: true; baseline: Period; current: Period; change: number | null }
   | { available: false; reason: string };
 type Decision = {
-  decisionContext?: string;
   scope?: 'account';
   accountEvidence?: { lines: string[]; sources: Citation[] };
-  caseId: string | null;
+  releaseCaseId: string | null;
+  releaseCaseProduct: string | null;
   product: string;
   products: string[];
   asOf: string;
@@ -32,7 +34,7 @@ type Decision = {
   customer: Citation & { tags: string; excerpt: string | null } | null;
   backlog: Task | null;
   measurement: Citation & { title: string; metric: string; comment: string; formula: string } | null;
-  recommendation: { title: string; reason: string | null; next: string; uncertainty: string };
+  recommendation: { title: string; reason?: string | null; next: string; uncertainty?: string };
   measurementIssue: boolean;
 };
 type TrackerSearch = {
@@ -81,7 +83,8 @@ function CurrentOffer({ offer }: { offer: NonNullable<Decision['competitor']> })
   }
   return <div className="offer-check">
     {offer.url && <a href={offer.url} target="_blank" rel="noreferrer">Карточка из исследования ↗</a>}
-    <button type="button" disabled={busy} onClick={() => void refresh()}>{busy ? 'Проверяем предложение…' : 'Проверить предложение сегодня'}</button>
+    <button type="button" disabled={busy} title="Проверить, доступно ли это предложение сейчас."
+      onClick={() => void refresh()}>{busy ? 'Проверяем предложение…' : 'Проверить предложение сегодня'}</button>
     {error && <p role="alert">{error}</p>}
     {check && <div role="status">
       <strong>Веб-проверка · {new Date(check.checkedAt).toLocaleString('ru-RU')}</strong>
@@ -92,9 +95,10 @@ function CurrentOffer({ offer }: { offer: NonNullable<Decision['competitor']> })
   </div>;
 }
 
-function WeeklyIndex({ trend }: { trend: Trend }) {
+function WeeklyIndex({ trend, caveat }: { trend: Trend; caveat?: string }) {
   return <section className="paper decision-trend">
     <h2>Недельный индекс заказов</h2>
+    <ReleaseHelp text="Среднее за последние четыре полные недели сравнивается со средним за предыдущие двенадцать недель." />
     {trend.available ? <>
       <div className="decision-values">
         <div><small>Предыдущие 12 недель</small><strong>{number(trend.baseline.mean)}</strong>
@@ -106,26 +110,62 @@ function WeeklyIndex({ trend }: { trend: Trend }) {
           {trend.change > 0 ? '+' : trend.change < 0 ? '−' : ''}{number(Math.abs(trend.change))}%
         </span>}
       </div>
-      <p>Среднее по каждому периоду. Изменение в процентах равно (среднее за 4 недели / среднее за 12 недель − 1) × 100.</p>
+      {caveat && <p className="decision-caveat">{caveat}</p>}
       <details>
         <summary>16 недель и исходные строки</summary>
-        <ul className="decision-weeks">
-          {[...trend.baseline.rows, ...trend.current.rows].map(week => <li key={week.date}>
-            <span>{date(week.date)} · <b>{number(week.value)}</b></span>
-            <Source source={week} />
-          </li>)}
-        </ul>
+        <p>Изменение в процентах равно (среднее за 4 недели / среднее за 12 недель − 1) × 100.</p>
+        <div className="table-scroll" role="region" aria-label="Недельные значения и источники" tabIndex={0}>
+          <table className="numbers decision-table decision-weeks">
+            <thead><tr><th scope="col">Неделя</th><th scope="col">Значение</th><th scope="col">Источник</th></tr></thead>
+            <tbody>{[...trend.baseline.rows, ...trend.current.rows].map(week => <tr key={week.date}>
+              <th scope="row"><time dateTime={week.date}>{date(week.date)}</time></th>
+              <td>{number(week.value)}</td>
+              <td><Source source={week} /></td>
+            </tr>)}</tbody>
+          </table>
+        </div>
       </details>
     </> : <p>{trend.reason}</p>}
   </section>;
 }
 
-function TrackerActions({ product, releaseId, action }: { product: string; releaseId: string; action: Action }) {
+function CompetitorPrices({ offer, historical }: { offer: Decision['competitor']; historical: boolean }) {
+  const terms = offer && [offer.sku && 'Артикул ' + offer.sku, offer.license?.replace(/^\//, ''), offer.terms].filter(Boolean).join(' · ');
+  const partial = offer?.match === 'Частично';
+  return <section className="paper decision-market">
+    <h2>Проверка у конкурента</h2>
+    {offer ? <>
+      <p><strong>{offer.product}</strong> · Проверено <time dateTime={offer.checked}>{date(offer.checked)}</time></p>
+      <div className="table-scroll" role="region" aria-label="Цены продавцов" tabIndex={0}>
+        <table className="numbers decision-table">
+          <thead><tr><th scope="col">Продавец</th><th scope="col">Цена</th></tr></thead>
+          <tbody>
+            <tr><th scope="row">{offer.merchant}</th><td>{money.format(offer.competitorPrice)}</td></tr>
+            <tr><th scope="row">store.softline.ru</th><td>{money.format(offer.storePrice)}</td></tr>
+          </tbody>
+        </table>
+      </div>
+      {partial && <p className="decision-caveat">В источнике указана частичная сопоставимость. Для вывода о разнице цен нужно сверить лицензии.</p>}
+      <Source source={offer} />
+      <details>
+        <summary>Условия сравнения</summary>
+        {terms && <p>{terms}</p>}
+        {partial && !terms && <p>Артикул, лицензия и условия в источнике отсутствуют.</p>}
+        {!partial && <p>Источник отмечает предложения сопоставимыми. Цены относятся к этой позиции.</p>}
+      </details>
+      {!historical && <CurrentOffer key={offer.version + offer.loc} offer={offer} />}
+    </> : <p>К этой дате нет проверенной строки с обеими ценами для семейства.</p>}
+  </section>;
+}
+
+function TrackerActions({ product, releaseId, caseId, action }: {
+  product: string; releaseId: string; caseId: string | null; action: Action;
+}) {
   const [search, setSearch] = useState<TrackerSearch>();
   const [draft, setDraft] = useState<TrackerPreview>();
   const [pending, setPending] = useState(false);
   const [error, setError] = useState('');
-  const payload = { product, releaseId };
+  const payload = { product, releaseId, caseId: caseId ?? undefined };
   const hasExact = search?.items.some(item => item.exact);
   const canDraft = !hasExact || search?.items.some(item => item.exact && item.canComment);
   async function run(op: 'search' | 'case' | 'draft', key?: string) {
@@ -133,7 +173,7 @@ function TrackerActions({ product, releaseId, action }: { product: string; relea
     setError('');
     try {
       if (op === 'case' && search) {
-        const { caseId } = await post<{ caseId: string }>('release-tracker-case', payload);
+        const { caseId } = await post<{ caseId: string }>('release-tracker-case', { product, releaseId });
         setSearch({ ...search, caseId });
       } else if (op === 'draft' && search?.caseId) {
         setDraft(await post<TrackerPreview>('release-tracker-draft', { ...payload, caseId: search.caseId, key }));
@@ -148,7 +188,8 @@ function TrackerActions({ product, releaseId, action }: { product: string; relea
   }
   return <section className="paper">
     <h3>Задача по решению</h3>
-    <button type="button" disabled={pending} onClick={() => void run('search')}>
+    <button type="button" disabled={pending} title="Найти связанные задачи и совпадения по названию."
+      onClick={() => void run('search')}>
       {pending && !search ? 'Ищем…' : search ? 'Повторить поиск' : 'Найти задачу и проверить дубли'}
     </button>
     {error && <p role="alert">{error}</p>}
@@ -162,15 +203,17 @@ function TrackerActions({ product, releaseId, action }: { product: string; relea
               !item.canComment && 'Доступна для просмотра в Redmine'].filter(Boolean).join(' · ')}</small>
           </div>
           {search.caseId && item.canComment && (!hasExact || item.exact) && <button
-            type="button" disabled={pending} onClick={() => void run('draft', item.key)}
+            type="button" disabled={pending} title="Подготовить черновик комментария к выбранной задаче."
+            onClick={() => void run('draft', item.key)}
           >Подготовить комментарий</button>}
         </li>)}
       </ul>
       {!search.caseId && canDraft && <button
-        type="button" disabled={pending} onClick={() => void run('case')}
+        type="button" disabled={pending} title="Создать разбор для задачи по этому релизу." onClick={() => void run('case')}
       >Создать связанный разбор</button>}
       {search.caseId && !hasExact && <button
-        type="button" disabled={pending} onClick={() => void run('draft')}
+        type="button" disabled={pending} title="Подготовить задачу для проверки перед добавлением в трекер."
+        onClick={() => void run('draft')}
       >Подготовить черновик задачи</button>}
     </>}
     {draft && <PreviewCard item={draft} action={action} reload={async () => {}} />}
@@ -178,111 +221,100 @@ function TrackerActions({ product, releaseId, action }: { product: string; relea
 }
 
 export function ReleaseDecision({
-  action, renderChat, initialRelease,
+  action, initialRelease,
 }: {
   action: Action;
   initialRelease?: string;
-  renderChat: (thread: string, caseId: string | undefined, releaseId: string, product: string,
-    decisionContext: string | undefined) => React.ReactNode;
 }) {
   const [criteria, setCriteria] = useState<Criteria>(() => history.state?.releaseDecision ?? { releaseId: initialRelease });
   const [data, setData] = useState<Decision>();
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [cut, setCut] = useState(criteria.through || '');
-  const [thread, setThread] = useState('');
-  const [opening, setOpening] = useState(false);
-  const chatAnchor = useRef<HTMLDivElement>(null);
+  const request = useRef(0);
+
   useEffect(() => {
-    let active = true;
-    post<Decision>('release_decision', criteria).then(result => {
-      if (active) setData(result);
-    }).catch(err => {
-      if (active) setError(err.message);
-    }).finally(() => {
-      if (active) setLoading(false);
-    });
-    return () => { active = false; };
+    const current = ++request.current;
+    async function load() {
+      try {
+        const decision = await post<Decision>('release_decision', criteria);
+        if (request.current === current) setData(decision);
+      } catch (err) {
+        if (request.current === current) setError((err as Error).message);
+      } finally {
+        if (request.current === current) setLoading(false);
+      }
+    }
+    void load();
+    return () => { request.current++; };
   }, [criteria]);
-  useEffect(() => {
-    if (thread) chatAnchor.current?.scrollIntoView({ block: 'start' });
-  }, [thread]);
+
   function select(next: typeof criteria) {
-    setThread('');
+    request.current++;
     setError('');
     setLoading(true);
     history.replaceState({ ...history.state, releaseDecision: next }, '');
     setCriteria(next);
   }
-  async function openChat(releaseId: string) {
-    if (thread) {
-      chatAnchor.current?.scrollIntoView({ block: 'start' });
-      return;
-    }
-    setOpening(true);
-    try {
-      const result = await post<{ id: string }>('release-thread', {
-        product: data?.product, releaseId, decisionContext: data?.decisionContext,
-      });
-      setThread(result.id);
-    } finally {
-      setOpening(false);
-    }
-  }
+
   const release = data?.release;
-  return <div className="release-decision">
-    <a className="crumb" href="#overview">← Обзор</a>
-    <div className="page-head"><h1>Решение по релизу</h1></div>
-    {data && <form className="paper decision-filters" onSubmit={event => {
-      event.preventDefault();
-      if (cut) select({ product: data.product, through: cut, releaseId: release && release.date <= cut ? release.id : undefined });
-    }}>
-      <label>Семейство или раздел
-        <select value={criteria.product || data.product} disabled={opening} onChange={event =>
-          select({ product: event.target.value, through: criteria.through })}>
-          {data.products.map(product => <option key={product} value={product}>{product === 'ЛК' ? 'Личный кабинет' : product}</option>)}
-        </select>
-      </label>
-      <label>Релиз
-        <select value={criteria.releaseId || release?.id || ''} disabled={opening || loading || !data.releases.length} onChange={event =>
-          select({ product: data.product, through: criteria.through, releaseId: event.target.value })}>
-          {!data.releases.length && <option value="">Нет выпущенных функций</option>}
-          {data.releases.map(row => <option key={row.id} value={row.id}>{row.id} · {date(row.date)}</option>)}
-        </select>
-      </label>
-      <label>Дата среза <input type="date" value={cut} disabled={opening} onChange={event => setCut(event.target.value)} /></label>
-      <button type="submit" disabled={!cut || opening}>Показать на дату</button>
-      {criteria.through && <button type="button" disabled={opening} onClick={() => {
-        setCut('');
-        select({ product: data.product, releaseId: release?.id });
-      }}>Вернуться к текущему срезу</button>}
-    </form>}
+  const indexCaveat = data?.trend?.available && !data.measurementIssue ? data.recommendation.uncertainty : undefined;
+  const selectedProduct = criteria.product ?? data?.product;
+  const productReleases = data?.product === selectedProduct ? data?.releases : undefined;
+  const selectedRelease = productReleases?.find(row => row.id === (criteria.releaseId ?? release?.id));
+  const filters = data && <form className="paper decision-filters" onSubmit={event => {
+    event.preventDefault();
+    if (cut) select({ product: selectedProduct, through: cut,
+      releaseId: selectedRelease && selectedRelease.date <= cut ? selectedRelease.id : undefined });
+  }}>
+    <label>Семейство или раздел
+      <select value={selectedProduct} onChange={event =>
+        select({ product: event.target.value, through: criteria.through })}>
+        {data.products.map(product => <option key={product} value={product}>{product === 'ЛК' ? 'Личный кабинет' : product}</option>)}
+      </select>
+    </label>
+    <label>Релиз
+      <select value={criteria.releaseId || release?.id || ''} disabled={loading || !productReleases?.length} onChange={event =>
+        select({ product: selectedProduct, through: criteria.through, releaseId: event.target.value })}>
+        {!data.releases.length && <option value="">Нет выпущенных функций</option>}
+        {data.releases.map(row => <option key={row.id} value={row.id}>{row.id} · {date(row.date)}</option>)}
+      </select>
+    </label>
+    <div className="release-help-label">
+      <label>Дата среза <input type="date" value={cut} onChange={event => setCut(event.target.value)} /></label>
+      <ReleaseHelp text={releaseCutHelp} />
+    </div>
+    <button type="submit" disabled={!cut} title="Применить выбранную дату среза.">Показать на дату</button>
+    {criteria.through && <button type="button" title="Показать последние доступные данные." onClick={() => {
+      setCut('');
+      select({ product: selectedProduct, releaseId: selectedRelease?.id });
+    }}>Вернуться к текущему срезу</button>}
+  </form>;
+  const details = <>
     {error ? <p role="alert">{error}</p> : loading ? <p role="status">Читаем источники…</p> : data && <>
       <section className="signal-panel decision-hero" aria-labelledby="decision-subject">
-        <div>
+        <div className="decision-next">
           <span className="state">{data.historical ? 'Исторический срез' : 'Срез загруженных данных'} · {date(data.asOf)}</span>
-          <h2 id="decision-subject">{data.scope === 'account' ? 'Личный кабинет' : data.product}</h2>
+          <h2 id="decision-subject">{data.recommendation.title}</h2>
+          {data.recommendation.reason && <p>{data.recommendation.reason}</p>}
+          <div>
+            <strong>Следующий шаг</strong>
+            <p>{data.recommendation.next}</p>
+          </div>
+        </div>
+        <div className="decision-context">
+          <h3>{data.scope === 'account' ? 'Личный кабинет' : data.product}</h3>
           {release ? <>
-            <p><b>{release.id} · {date(release.date)}</b></p>
+            <p><strong>{release.id} · {date(release.date)}</strong></p>
             <p>{release.description}</p>
             <Source source={release} />
-            {!!data.delivered.length && <p>Связанные задачи: {data.delivered.map(task => <span key={task.id}>
-              {task.id} · {task.title} <Source source={task} />
-            </span>)}</p>}
+            {!!data.delivered.length && <details>
+              <summary>Связанные задачи</summary>
+              <ul>{data.delivered.map(task => <li key={task.id}>{task.id} · {task.title} <Source source={task} /></li>)}</ul>
+            </details>}
           </> : <p>К этой дате в календаре нет выпущенной функции семейства.</p>}
         </div>
-        <div className="decision-next">
-          <h3>{data.recommendation.title}</h3>
-          <p>{data.recommendation.next}</p>
-          {release && <>
-            <button type="button" className="primary" disabled={opening} onClick={() => action(() => openChat(release.id))}>
-              {opening ? 'Открываем чат…' : 'Открыть чат разбора'}
-            </button>
-            {data.caseId && !data.historical && <a href={'#case/' + data.caseId + '/effect'}>Настроить проверку эффекта <Icon name="arrow" /></a>}
-          </>}
-        </div>
       </section>
-      {data.historical && <p className="muted">Срез по датам событий в загруженной версии архива. Для части источников дата публикации неизвестна.</p>}
       {data.scope === 'account' && <section className="paper">
         <h2>Переходы из рекомендаций</h2>
         {data.accountEvidence ? <>
@@ -292,10 +324,26 @@ export function ReleaseDecision({
           </ul></details>}
         </> : <p>Для выбранной функции в календаре не указан показатель визитов с кликом по рекомендациям.</p>}
       </section>}
-      {data.trend && <WeeklyIndex trend={data.trend} />}
+      {data.trend && <WeeklyIndex trend={data.trend} caveat={indexCaveat} />}
+    </>}
+    {!error && !loading && data?.historical && <p className="muted">Срез по датам событий в загруженной версии архива. Для части источников дата публикации неизвестна.</p>}
+    {filters}
+    {!error && !loading && data && <>
       {data.scope !== 'account' && <div className="decision-evidence">
-        <section className="paper">
-          <h2>Измерение и бэклог</h2>
+        <CompetitorPrices offer={data.competitor} historical={data.historical} />
+        <section className="paper"><details>
+          <summary>Интервью покупателей</summary>
+          {data.customer?.excerpt ? <>
+            <blockquote>«{data.customer.excerpt}»</blockquote>
+            <p>Фрагмент интервью без даты в источнике.</p>
+          </> : <p>{data.historical ? 'В архиве нет датированного интервью для этого среза.'
+            : data.customer ? 'В источнике доступны темы ответа; безопасная дословная цитата отсутствует.'
+              : 'В загруженных интервью нет подтверждённой фразы для этого семейства.'}</p>}
+          {data.customer && <Source source={data.customer} />}
+          {!indexCaveat && data.recommendation.uncertainty && <p>{data.recommendation.uncertainty}</p>}
+        </details></section>
+        <section className="paper"><details>
+          <summary>Бэклог и измерение</summary>
           {data.backlog ? <>
             <p><b>{data.backlog.id} · {data.backlog.title}</b> · {data.backlog.status}</p>
             {data.backlog.description && <p>{data.backlog.description}</p>}
@@ -307,43 +355,21 @@ export function ReleaseDecision({
             <details><summary>Как считается показатель</summary><p>{data.measurement.formula}</p></details>
             <Source source={data.measurement} />
           </>}
-        </section>
-        <section className="paper">
-          <h2>Опыт покупателей</h2>
-          {data.customer?.excerpt ? <>
-            <blockquote>«{data.customer.excerpt}»</blockquote>
-            <p>Фрагмент интервью без даты в источнике.</p>
-          </> : <p>{data.historical ? 'В архиве нет датированного интервью для этого среза.'
-            : data.customer ? 'В источнике доступны темы ответа; безопасная дословная цитата отсутствует.'
-              : 'В загруженных интервью нет подтверждённой фразы для этого семейства.'}</p>}
-          {data.customer && <Source source={data.customer} />}
-          <p>{data.recommendation.uncertainty}</p>
-        </section>
-        <section className="paper">
-          <h2>Проверка у конкурента</h2>
-          {data.competitor ? <>
-            <p><b>{data.competitor.product}</b></p>
-            <p>{[data.competitor.sku && 'Артикул ' + data.competitor.sku,
-              data.competitor.license?.replace(/^\//, ''), data.competitor.terms].filter(Boolean).join(' · ')}</p>
-            <dl className="decision-prices">
-              <div><dt>{data.competitor.merchant}</dt><dd>{money.format(data.competitor.competitorPrice)}</dd></div>
-              <div><dt>store.softline.ru</dt><dd>{money.format(data.competitor.storePrice)}</dd></div>
-            </dl>
-            <p>Проверено {date(data.competitor.checked)}. {data.competitor.match === 'Частично'
-              ? 'В источнике указана частичная сопоставимость. Для вывода о разнице цен нужно сверить лицензии.'
-              : 'Источник отмечает предложения сопоставимыми. Цены относятся к этой позиции.'}</p>
-            <Source source={data.competitor} />
-            {!data.historical && <CurrentOffer key={data.competitor.version + data.competitor.loc} offer={data.competitor} />}
-          </> : <p>К этой дате нет проверенной строки с обеими ценами для семейства.</p>}
-        </section>
+        </details></section>
       </div>}
-      {thread && release && <div className="decision-chat" ref={chatAnchor}>
-        <h2>Чат разбора · {release.id}</h2>
-        <div className="decision-chat-grid">
-          {!data.historical && <TrackerActions key={data.product + '/' + release.id} product={data.product} releaseId={release.id} action={action} />}
-          {renderChat(thread, data.caseId || undefined, release.id, data.product, data.decisionContext)}
-        </div>
+      {release && (data.releaseCaseId || !data.historical) && <div>
+        <ReleaseCaseLink key={release.id} releaseId={release.id} caseId={data.releaseCaseId} className="primary" />
       </div>}
+      {release && !data.historical && <TrackerActions key={data.product + '/' + release.id}
+        product={data.product} releaseId={release.id}
+        caseId={data.releaseCaseProduct === data.product ? data.releaseCaseId : null} action={action} />}
     </>}
+  </>;
+  return <div className="release-decision">
+    <nav className="decision-breadcrumbs" aria-label="Путь к данным релиза">
+      <a className="crumb" href="#releases-list">← Журнал релизов</a>
+    </nav>
+    <div className="page-head"><h1>Данные релиза</h1></div>
+    <div className="decision-main">{details}</div>
   </div>;
 }

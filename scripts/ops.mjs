@@ -140,7 +140,7 @@ async function main() {
     }
     return;
   }
-  const store = openStore(base,{seedDemo:!env.SOURCE_ARCHIVE_SHA256});
+  const store = openStore(base);
   try {
     initEvidence(store.db);
     initSourcePolicy(store.db);

@@ -13,7 +13,7 @@ const before = '2026-04-06', after = '2026-04-20';
 const caseId = 'astra-case';
 
 function workspace(t, { extra = false, incomplete = false, empty = false, watch } = {}) {
-  const store = openStore(':memory:', { seedDemo:false });
+  const store = openStore(':memory:');
   t.after(() => store.close());
   initEvidence(store.db);
   const sales = (product, kind, values) => values.map((value, i) => ({kind:'sales', loc:kind + '!A' + (i+2),

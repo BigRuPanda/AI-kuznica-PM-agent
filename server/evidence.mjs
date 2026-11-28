@@ -8,6 +8,8 @@ import { getMetricEpisodes } from './metric-rules.mjs';
 import { aggregateMetric, defaultStepDays, normalizeObservation, observationKey } from './metric-observations.mjs';
 import { backlogRecommendations } from './backlog.mjs';
 import { withArchivedSignalSources } from './knowledge.mjs';
+import { released } from './release-decision.mjs';
+import { ensureReleaseCase, releaseInvestigationInput } from './release-cases.mjs';
 export const digest = (value) => createHash('sha256').update(value).digest('hex');
 export function productFamily(value = '') {
   const p = value.toLowerCase().trim();
@@ -86,6 +88,8 @@ export function importDocs(store, docs, { notify = true, onImported, guard } = {
   return store.tx(() => {
     const imported = [];
     if (guard?.(db) === false) return {inserted:0, documents:db.prepare("SELECT count(*) n FROM documents").get().n};
+    const releaseBefore = db.prepare("SELECT body FROM facts WHERE kind='releases' AND key=?");
+    const previouslyReleased = new Map();
     for (const doc of docs) {
       if (!Array.isArray(doc.facts) || typeof doc.file !== 'string') throw Error('Некорректный документ');
       const version = digest(JSON.stringify(doc));
@@ -117,12 +121,22 @@ export function importDocs(store, docs, { notify = true, onImported, guard } = {
         )
           throw Error('Проверьте дату и индекс продаж в ' + f.loc);
         const body = f.kind === 'metrics' ? normalizeObservation(f.row, doc.file) : f.row ?? f.text;
-        save.run(f.kind, f.kind === 'metrics' ? observationKey(body) : identity(f, doc.file), version, doc.file, f.loc, JSON.stringify(body));
+        const key = f.kind === 'metrics' ? observationKey(body) : identity(f, doc.file);
+        if (f.kind === 'releases' && !previouslyReleased.has(key)) {
+          const previous = releaseBefore.get(key);
+          previouslyReleased.set(key, previous ? released({ data: JSON.parse(previous.body) }) : false);
+        }
+        save.run(f.kind, key, version, doc.file, f.loc, JSON.stringify(body));
       }
       indexResearchFile(db, doc.file);
       if (researchOnly) db.prepare('INSERT OR REPLACE INTO research_file_versions VALUES(?,?)').run(doc.file, version);
       else db.prepare('DELETE FROM research_file_versions WHERE file=?').run(doc.file);
       imported.push({file:doc.file, version});
+    }
+    for (const [releaseId, wasReleased] of previouslyReleased) {
+      if (wasReleased) continue;
+      const input = releaseInvestigationInput(db, releaseId);
+      if (input) ensureReleaseCase(db, input);
     }
     if (imported.length) scan(db, notify, imported);
     onImported?.();

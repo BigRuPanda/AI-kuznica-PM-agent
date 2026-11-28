@@ -17,7 +17,7 @@ const anna = { id: 'anna', name: 'Анна' };
 const dima = { id: 'dima', name: 'Дима' };
 const enabled = { LLM_BASE_URL: 'https://example.invalid', LLM_MODEL: 'queue-test', LLM_DATA_MODE: 'analysis' };
 function open(path = ':memory:') {
-  const store = openStore(path, { seedDemo: false });
+  const store = openStore(path);
   initEvidence(store.db);
   initWorkbench(store.db);
   initInvestigations(store.db);

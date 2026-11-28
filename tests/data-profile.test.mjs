@@ -16,6 +16,7 @@ import { openStore } from '../server/store.mjs';
 import { createTeamApp } from '../server/team-http.mjs';
 import { createThread, enqueue, initWorkbench, messages, workJobs } from '../server/workbench.mjs';
 import { workspaceOperation } from '../server/workspace-operations.mjs';
+import { seedReleaseMetrics } from './release-metrics-fixture.mjs';
 
 const gemini = {
   LLM_BACKEND: 'gemini', LLM_MODEL: 'gemini-3.5-flash-lite', LLM_API_KEY: 'fixture', LLM_DATA_MODE: 'analysis',
@@ -52,6 +53,7 @@ test('the local profile blocks model payloads before transport or ADC even with 
     countCall, { getRequestHeaders: countCall }), /локальная/);
   const store = openStore(':memory:');
   try {
+    seedReleaseMetrics(store);
     const agent = makeAgent(store, { env: { ...env, LLM_BACKEND: 'codex' }, send: countCall, alternate: countCall });
     const context = { releaseId: 'R-001', day: 14, metric: 0, author: 'Анна' };
     await agent.initial(context);
@@ -123,6 +125,7 @@ test('HTTP chat, HTTP MCP and the release journal use saved calculations with ze
     cookie = registration.cookie;
     const user = registration.json;
     const store = app.space('team');
+    seedReleaseMetrics(store);
     const range = ctrFixture(store, user);
     const { id: thread } = await call('team/thread', { title: 'Пример CTR' });
     const input = { thread, question, rangeId: range.id };
@@ -154,7 +157,7 @@ test('HTTP chat, HTTP MCP and the release journal use saved calculations with ze
     const legacy = await call('chat', { ...context, question: 'Сравни конверсию', requestId: 'legacy-test' });
     const calc = await call('calculations/' + legacy.refs[0].id);
     assert.equal(calc.op, 'compare_metric');
-    assert.deepEqual([calc.result.series.all.before.n, calc.result.series.all.after.n], [140, 110]);
+    assert.deepEqual([calc.result.series.all.before.n, calc.result.series.all.after.n], [5, 4]);
     assert.deepEqual(outgoing, []);
     assert.equal(store.one('SELECT count(*) n FROM costs').n, 0);
   } finally {
@@ -164,7 +167,7 @@ test('HTTP chat, HTTP MCP and the release journal use saved calculations with ze
 });
 
 test('an unavailable configured Gemini returns the saved CTR range with the delta and a resumable status', async () => {
-  const store = openStore(':memory:', { seedDemo: false });
+  const store = openStore(':memory:');
   const user = { id: 'fixture', name: 'Испытатель' };
   const env = { ...gemini, DATA_PROFILE: 'configured' };
   try {
@@ -187,7 +190,7 @@ test('an unavailable configured Gemini returns the saved CTR range with the delt
 });
 
 test('the model receives the original comparison question again when the evidence check is missing', async () => {
-  const store = openStore(':memory:', { seedDemo: false });
+  const store = openStore(':memory:');
   const user = { id: 'fixture', name: 'Испытатель' };
   const prompt = question + ' Можно ли установить причину?';
   try {

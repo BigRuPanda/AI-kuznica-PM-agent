@@ -1,6 +1,7 @@
 import { cases, facts, productFamily } from './evidence.mjs';
 import { accountDataDate, isAccountFeature, recommendationEvidence } from './account-release.mjs';
 import { marketOffers } from './market-offers.mjs';
+import { findReleaseCaseId } from './release-cases.mjs';
 
 const DAY = 86400000;
 const addDays = (date, n) => new Date(Date.parse(date + 'T00:00:00Z') + n * DAY).toISOString().slice(0, 10);
@@ -35,7 +36,7 @@ function weeklyTrend(rows, asOf) {
   return { available: true, baseline, current, change, latest: recent };
 }
 
-function released({ data }) {
+export function released({ data }) {
   return ['major', 'minor'].includes(data.release_type) && /^(выпущен[аоы]?|released)$/iu.test(data.status || '');
 }
 
@@ -43,7 +44,7 @@ export function canDecideRelease(row, products) {
   return matchedProducts(row, products).length > 0;
 }
 
-function matchedProducts(row, products) {
+export function matchedProducts(row, products) {
   if (!released(row)) return [];
   return isAccountFeature(row) ? ['ЛК'] : products.filter(name => mentions(row.data.description, name));
 }
@@ -102,8 +103,13 @@ export function releaseDecision(db, user, { product, caseId, releaseId, through 
   if (releaseId && requestedCase && boundRelease(requestedCase) && boundRelease(requestedCase) !== releaseId)
     throw Error('Разбор относится к другому релизу.');
   const caseVisible = (c, asOf) => !historical || visibleOnDate(c.body.signal, asOf);
-  const linkedCase = (row, selectedProduct, asOf) => row && accessible.find(c => c.product === selectedProduct &&
-    c.body.release === row.data.release_id && caseVisible(c, asOf));
+  const sharedCase = row => {
+    const id = row && findReleaseCaseId(db, row.data.release_id);
+    return id ? accessible.find(c => c.id === id) : null;
+  };
+  const linkedCase = (row, selectedProduct, asOf, sharedId) => row && accessible.find(c =>
+    c.product === selectedProduct && c.body.release === row.data.release_id &&
+    (c.id !== sharedId || c.id === caseId) && caseVisible(c, asOf));
   const signals = accessible.filter(c => c.body.signal && c.body.signal.status !== 'withdrawn').sort((a, b) =>
     b.body.signal.week.localeCompare(a.body.signal.week) ||
     (Number(b.body.signal.rule === 'relative') - Number(a.body.signal.rule === 'relative')) ||
@@ -130,8 +136,10 @@ export function releaseDecision(db, user, { product, caseId, releaseId, through 
     const relatedTasks = ids(row?.data.related_task_ids);
     const delivered = row ? facts(db, 'backlog').filter(r => r.data.created_date <= asOf &&
       (relatedTasks.includes(r.data.task_id) || ids(r.data.release_id).includes(row.data.release_id))) : [];
-    const linked = linkedCase(row, product, asOf);
+    const shared = sharedCase(row);
+    const linked = linkedCase(row, product, asOf, shared?.id);
     return { product: 'ЛК', products, scope: 'account', asOf, historical, caseId: linked?.id || null,
+      releaseCaseId: shared?.id ?? null, releaseCaseProduct: shared?.product ?? null,
       releases: releases.map(releaseInfo), release: row ? releaseInfo(row) : null,
       delivered: delivered.map(r => taskInfo(r, asOf, historical)),
       accountEvidence: recommendationEvidence(db, row, calendar, asOf, observation),
@@ -156,7 +164,8 @@ export function releaseDecision(db, user, { product, caseId, releaseId, through 
   const selected = releaseId || requestedCase?.body.release;
   const release = selected ? releases.find(r => r.data.release_id === selected) : releases[0];
   if (releaseId && !release) throw Error('В выбранном срезе нет такого релиза семейства.');
-  const linked = linkedCase(release, product, asOf);
+  const shared = sharedCase(release);
+  const linked = linkedCase(release, product, asOf, shared?.id);
   const signalCase = requestedCase && caseVisible(requestedCase, asOf) ? requestedCase : linked ||
     signals.find(c => c.product === product && caseVisible(c, asOf) &&
       (release ? boundRelease(c) === release.data.release_id : !boundRelease(c)));
@@ -183,6 +192,7 @@ export function releaseDecision(db, user, { product, caseId, releaseId, through 
     uncertainty: 'Изменение индекса заказов само по себе не устанавливает влияние релиза.',
   };
   return { product, products, caseId: signalCase?.id || null, asOf, releases: releases.map(releaseInfo),
+    releaseCaseId: shared?.id ?? null, releaseCaseProduct: shared?.product ?? null,
     release: release ? releaseInfo(release) : null, delivered: delivered.map(r => taskInfo(r, asOf, historical)), trend,
     backlog: task ? taskInfo(task, asOf, historical) : null,
     measurement: measurement && !historical ? { ...citation(measurement), metric: measurement.data.metric_id, title: measurement.data.metric_name,

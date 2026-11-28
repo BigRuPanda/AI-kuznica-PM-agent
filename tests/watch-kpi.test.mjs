@@ -68,6 +68,29 @@ test('the measured KPI uses its own source counts, inclusive target and control,
   assert.deepEqual(getCase(s.db,id).body.watch,old);
   assert.throws(()=>watch(s,id,{measurement:{...measure,metric:'orders_index'}}),/план проверки/);
 });
+test('the same measurement resumes a paused watch and preserves a reviewed result', t => {
+  const store = setup();
+  t.after(() => store.close());
+  history(store);
+  const adHoc = workspaceOperation(store, user, 'create-case', { title: 'Рекомендации', product: 'ЛК' }).id;
+  for (const [caseId, input] of [[newCase(store), {}], [adHoc, { measurement: measure }]]) {
+    watch(store, caseId, input);
+    const saved = getCase(store.db, caseId).body.watch;
+    workspaceOperation(store, user, 'decide', { caseId, state: 'Исследуем' });
+    watch(store, caseId, input);
+    const resumed = getCase(store.db, caseId);
+    assert.equal(resumed.state, 'Наблюдаем эффект');
+    assert.deepEqual(resumed.body.watch, saved);
+    assert.equal(resumed.body.watchHistory, undefined);
+
+    resumed.state = 'Нужно решение';
+    resumed.body.watch.reviewed = true;
+    updateCase(store.db, resumed);
+    watch(store, caseId, input);
+    assert.equal(getCase(store.db, caseId).state, 'Нужно решение');
+    assert.equal(getCase(store.db, caseId).body.watch.reviewed, true);
+  }
+});
 test('missing KPI, incomplete window and zero denominator never produce a successful outcome', t=>{
   const s=setup(); t.after(()=>s.close());
   const id = newCase(s,{...measure,control:undefined,controlSegment:undefined});

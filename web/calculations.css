@@ -1,0 +1,33 @@
+.proof-page.calculation-proof {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  align-content: start;
+  gap: 1rem;
+  padding: clamp(12px, 3vw, 36px);
+}
+.calculation-proof > .crumb { width: fit-content; margin: 0; overflow-wrap: anywhere; }
+.proof-header { display: grid; gap: .9rem; }
+.proof-header h1 { overflow-wrap: anywhere; }
+.proof-context {
+  display: flex;
+  flex-wrap: wrap;
+  gap: .55rem 1.5rem;
+  margin: 0;
+}
+.proof-context dt { color: var(--muted); font-size: .82rem; }
+.proof-context dd { margin: .14rem 0 0; }
+.calculation-dialog-body { display: grid; grid-template-columns: minmax(0, 1fr); gap: .8rem; margin-block-start: .85rem; }
+.calculation-proof .paper, .calculation-dialog-body .paper { min-width: 0; margin: 0; }
+.calculation-proof .custom, .calculation-dialog-body .custom { margin: 0; }
+.calculation-link { display: grid; justify-items: start; gap: .45rem; }
+.calculation-link label { width: 100%; }
+.calculation-link input { width: 100%; }
+.saved-chart-switch { margin-block: .7rem; }
+.proof-result { display: grid; gap: .8rem; }
+.proof-result .numbers { min-width: 17rem; }
+.proof-result .numbers :is(th, td) { vertical-align: top; padding: .6rem; }
+.proof-result .numbers th { font-weight: 600; }
+.proof-result .table-basis { display: block; }
+.proof-finding { font-size: clamp(1rem, 2vw, 1.25rem); font-weight: 600; }
+.proof-method p, .proof-result details h3 { margin-top: .65rem; }
+.proof-method code { overflow-wrap: anywhere; }

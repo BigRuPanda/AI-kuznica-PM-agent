@@ -6,7 +6,9 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { chromium } from 'playwright';
 import { createTeamApp } from '../server/team-http.mjs';
+import { getCase, updateCase } from '../server/evidence.mjs';
 import { fixtureEnv, seedWorkspace } from './workspace-fixture.mjs';
+import { seedReleaseMetrics } from './release-metrics-fixture.mjs';
 
 test('PM reads a progressing investigation, traces its evidence and publishes a chosen alternative', async t => {
   const dir = await mkdtemp(join(tmpdir(), 'investigation-ui-'));
@@ -111,4 +113,17 @@ test('PM reads a progressing investigation, traces its evidence and publishes a 
   await archive.locator('details > summary').last().click();
   await archive.getByText('Вывод по предыдущему сигналу.', { exact: true }).waitFor();
   assert.equal(await archive.getByRole('button').count(), 0);
+
+  const db = app.space('team').db;
+  const observed = getCase(db, caseId);
+  observed.state = 'Наблюдаем эффект';
+  updateCase(db, observed);
+  await page.reload();
+  const showEffect = page.getByRole('button', { name: 'Посмотреть результат проверки эффекта', exact: true });
+  assert.equal(await showEffect.getAttribute('title'), null);
+  seedReleaseMetrics(app.space('team'));
+  observed.body.release = 'R-002';
+  updateCase(db, observed);
+  await page.reload();
+  assert.equal(await showEffect.getAttribute('title'), 'Открыть результаты проверки эффекта.');
 });

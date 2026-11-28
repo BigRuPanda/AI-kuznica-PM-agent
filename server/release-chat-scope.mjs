@@ -12,7 +12,7 @@ export function checkReleaseSourceVersions(db, snapshot, through) {
   for (const [kind,key,date] of sources) {
     const allowed = snapshot[key];
     if (allowed && read.all(kind,date,date,through).some(row=>!allowed.includes(row.version)))
-      throw Error('В выбранном срезе нет подтверждённых версий для нового расчёта. Откройте актуальное решение по релизу.');
+      throw Error('В выбранном срезе нет подтверждённых версий для нового расчёта. Откройте актуальный разбор релиза.');
   }
 }
 

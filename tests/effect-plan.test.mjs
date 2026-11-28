@@ -11,7 +11,7 @@ import { createTeamApp } from '../server/team-http.mjs';
 import { seedWatchFormats } from './watch-fixture.mjs';
 
 test('effect preview requires full comparable coverage and a linked rollout while watch persists the pending plan', t => {
-  const store = openStore(':memory:', { seedDemo: false });
+  const store = openStore(':memory:');
   try {
     initEvidence(store.db);
     initWorkbench(store.db);
@@ -78,6 +78,11 @@ test('effect preview requires full comparable coverage and a linked rollout whil
     const selected = call('watch', retro);
     assert.equal(selected.plan.kind, 'archive-observation');
     const saved = store.one("SELECT body FROM cases WHERE id='astra'").body;
+    call('decide', { caseId: 'astra', state: 'Исследуем' });
+    call('watch', retro);
+    const resumed = store.one("SELECT state,body FROM cases WHERE id='astra'");
+    assert.equal(resumed.state, 'Наблюдаем эффект');
+    assert.equal(resumed.body, saved);
     assert.equal(call('effect-preview', { ...retro, asOf: '2026-05-18' }).actual, undefined);
     assert.equal(store.one("SELECT body FROM cases WHERE id='astra'").body, saved);
     importDocs(store, [{ file: 'Fixture.xlsx', facts: [
@@ -144,7 +149,7 @@ test('both saved version 2 formats and the legacy target survive a restart and r
     rmSync(dir, { recursive: true, force: true, maxRetries: 3 });
   });
   function open() {
-    store = openStore(file, { seedDemo: false });
+    store = openStore(file);
     initEvidence(store.db);
     initWorkbench(store.db);
   }
