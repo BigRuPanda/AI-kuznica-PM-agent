@@ -6,7 +6,8 @@ import { join } from 'node:path';
 import test from 'node:test';
 import { chromium } from 'playwright';
 import { createTeamApp } from '../server/team-http.mjs';
-import { importDocs } from '../server/evidence.mjs';
+import { getCase, importDocs } from '../server/evidence.mjs';
+import { seedWatchFormats } from './watch-fixture.mjs';
 import { fixtureEnv, seedWorkspace } from './workspace-fixture.mjs';
 
 test('release cards sort both sources and keep their routes and actions distinct', async t => {
@@ -264,6 +265,126 @@ test('finishing a case has its own row below archive observation at every width'
   await finish.click();
   await page.getByRole('dialog', { name: 'Завершить разбор?' }).waitFor();
 });
+
+test('manual case status supports keyboard, confirmation and reopening', async t => {
+  const { page, origin, caseId } = await openWorkspace(t);
+  const { trigger, menu, item, requests } = statusControls(page);
+  await page.goto(origin + '/#case/' + caseId);
+
+  const initial = trigger('Исследуем');
+  await initial.press('ArrowDown');
+  assert.equal(await item('Исследуем').getAttribute('aria-checked'), 'true');
+  await page.keyboard.press('Escape');
+  await menu.waitFor({ state: 'hidden' });
+  assert.ok(await initial.evaluate(button => button === document.activeElement));
+  assert.equal(await initial.getAttribute('title'), null);
+
+  await initial.click();
+  await item('Исследуем').click();
+  await menu.waitFor({ state: 'hidden' });
+  assert.deepEqual(requests, []);
+  await initial.press('ArrowDown');
+  await page.keyboard.press('ArrowDown');
+  await page.keyboard.press('Enter');
+  const decision = trigger('Нужно решение');
+  await decision.waitFor();
+
+  const confirm = page.getByRole('dialog', { name: 'Завершить разбор?' });
+  await decision.click();
+  await item('Завершено').click();
+  await confirm.getByRole('button', { name: 'Отмена', exact: true }).click();
+  await confirm.waitFor({ state: 'hidden' });
+  await decision.waitFor();
+  assert.deepEqual(requests, ['Нужно решение']);
+  await decision.click();
+  await item('Завершено').click();
+  await confirm.getByRole('button', { name: 'Завершить', exact: true }).click();
+  const completed = trigger('Завершено');
+  await completed.waitFor();
+  await page.reload();
+  await completed.waitFor();
+
+  const filter = page.getByRole('combobox', { name: 'Состояние', exact: true });
+  const caseLink = page.locator('a[href="#case/' + caseId + '"]');
+  await page.goto(origin + '/#cases');
+  await filter.selectOption('Завершено');
+  await caseLink.getByText('Завершено', { exact: true }).waitFor();
+  await caseLink.click();
+  await completed.click();
+  await item('Исследуем').click();
+  await initial.waitFor();
+  await page.goto(origin + '/#cases');
+  await filter.selectOption('Исследуем');
+  await caseLink.getByText('Исследуем', { exact: true }).waitFor();
+  assert.deepEqual(requests, ['Нужно решение', 'Завершено', 'Исследуем']);
+
+  await page.setViewportSize({ width: 390, height: 844 });
+  await caseLink.click();
+  await page.getByRole('button', { name: 'Обсудить', exact: true }).click();
+  await page.getByRole('region', { name: 'Переписка', exact: true }).waitFor();
+  await initial.click();
+  await item('Нужно решение').waitFor();
+});
+
+test('manual case status handles save failures and keeps the observation plan', async t => {
+  const { app, page, origin, caseId } = await openWorkspace(t);
+  const { trigger, item, requests } = statusControls(page);
+  const store = app.space('team');
+  const rejectSave = Promise.withResolvers();
+  await page.route('**/api/team/decide', async route => {
+    await rejectSave.promise;
+    await route.fulfill({ status: 503, json: { error: 'Не удалось сохранить статус' } });
+  }, { times: 1 });
+
+  await page.goto(origin + '/#case/' + caseId);
+  const initial = trigger('Исследуем');
+  await initial.click();
+  try {
+    await Promise.all([
+      page.waitForRequest(request => request.url().endsWith('/api/team/decide')),
+      item('Нужно решение').click(),
+    ]);
+    assert.equal(await initial.isDisabled(), true);
+    assert.deepEqual(requests, ['Нужно решение']);
+  } finally {
+    rejectSave.resolve();
+  }
+  await page.getByRole('alert').filter({ hasText: 'Не удалось сохранить статус' }).waitFor();
+  assert.equal(getCase(store.db, caseId).state, 'Исследуем');
+  await initial.click();
+  await item('Нужно решение').click();
+  await trigger('Нужно решение').waitFor();
+  assert.equal(getCase(store.db, caseId).state, 'Нужно решение');
+
+  seedWatchFormats(store);
+  const observationId = 'saved-observation';
+  const savedWatch = getCase(store.db, observationId).body.watch;
+  await page.goto(origin + '/#case/' + observationId);
+  await trigger('Наблюдаем эффект').click();
+  const observation = item('Наблюдаем эффект');
+  assert.equal(await observation.getAttribute('aria-checked'), 'true');
+  assert.equal(await observation.getAttribute('aria-disabled'), 'true');
+  await item('Исследуем').click();
+  await initial.waitFor();
+  await page.locator('.effect-panel > summary').click();
+  await page.getByText('Уточнить причину изменения контроля', { exact: true }).waitFor();
+  await app.tick();
+  assert.equal(getCase(store.db, observationId).state, 'Исследуем');
+  assert.deepEqual(getCase(store.db, observationId).body.watch, savedWatch);
+});
+
+function statusControls(page) {
+  const menu = page.getByRole('menu', { name: 'Изменить статус', exact: true });
+  const requests = [];
+  page.on('request', request => {
+    if (request.url().endsWith('/api/team/decide')) requests.push(request.postDataJSON().state);
+  });
+  return {
+    menu, requests,
+    trigger: state => page.getByRole('button', { name: 'Изменить статус. Сейчас «' + state + '»', exact: true }),
+    item: state => menu.getByRole('menuitemradio', { name: state, exact: true }),
+  };
+}
 
 async function assertOutlined(control) {
   await control.waitFor({ state: 'visible' });

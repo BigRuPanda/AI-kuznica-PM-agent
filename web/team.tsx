@@ -47,6 +47,7 @@ import { CaseInvestigation, InvestigationSnapshot, useCaseInvestigation } from '
 import type { InvestigationCalculation } from './case-investigation';
 import { caseHeading, changeLabel, signalBaseline, signalPeriod } from './case-periods';
 import { CasePeriodFilter } from './case-period-filter';
+import { CaseStatusMenu, type ManualCaseState } from './case-status-menu';
 import { SignalEvidence } from './signal-evidence';
 import { Answer } from './answer';
 import { moveMenu, moveView } from './motion';
@@ -1262,6 +1263,7 @@ function Investigation({
     [err, fail] = useState(''),
     [confirmation, confirm] = useState<'reset' | 'finish'>(),
     [updating, setUpdating] = useState(false),
+    [savingStatus, setSavingStatus] = useState(false),
     [preparingSignalIssue, setPreparingSignalIssue] = useState(false),
     [draftToFocus, setDraftToFocus] = useState('');
   const [presentationAction, setPresentationAction] = useState<HTMLSpanElement | null>(null);
@@ -1453,6 +1455,18 @@ function Investigation({
   const planAccepted = d.drafts.some(draft => draft.state === 'done' &&
     readyRuns.some(run => run?.status === 'ready' && run.id === draft.investigationId));
   const scheduleEffect = !completed && !needsReconfirmation && planAccepted;
+  async function saveStatus(state: ManualCaseState) {
+    if (savingStatus || c.state === state) return;
+    setSavingStatus(true);
+    try {
+      const result = await post<{ ok: true; state: ManualCaseState }>('decide', { caseId: id, state });
+      set(previous => previous && { ...previous, case: { ...previous.case, state: result.state } });
+      await Promise.all([load(), refresh()]);
+    } finally {
+      setSavingStatus(false);
+    }
+  }
+
   const measurementEditor = (run: InvestigationRun) => {
     if (!signal || !agreementMetric || withdrawn || completed || c.body.watch || watchNext ||
       run.revision !== (signal.revision ?? 0) || (specified && !agreement)) return undefined;
@@ -1529,7 +1543,10 @@ function Investigation({
         {signal && !withdrawn && !research.investigation?.current?.period && <p>
           {[signal.releaseId, signalPeriod(signal), changeLabel(signal.change, signal.changeUnit)].filter(Boolean).join(' · ')}
         </p>}
-        <span className="state">{c.state}</span>
+        <CaseStatusMenu state={c.state} busy={savingStatus} releaseLinked={releaseLinked} onSelect={state => {
+          if (state === 'Завершено') confirm('finish');
+          else action(() => saveStatus(state));
+        }} />
         {signal?.metric && signal.status === 'provisional' && <span className="state">Предварительный сигнал</span>}
         {withdrawn && <p role="status">Сигнал отозван после пересчёта данных. Разбор и сохранённые выводы доступны для проверки.</p>}
         {!researchAvailable && signalDetails}
@@ -1691,7 +1708,7 @@ function Investigation({
               </li>)}</ul>
             </details>}
             <footer className="effect-finish">
-              <button type="button" onClick={() => confirm('finish')} disabled={completed}>
+              <button type="button" onClick={() => confirm('finish')} disabled={completed || savingStatus}>
                 Завершить разбор
               </button>
             </footer>
@@ -1808,11 +1825,7 @@ function Investigation({
                     updatePreferences({ cards: initialCards, pinned: [], full: false, control: '', sourceQuery: '' });
                     return;
                   }
-                  action(async () => {
-                    await post('decide', { caseId: id, state: 'Завершено' });
-                    await load();
-                    await refresh();
-                  });
+                  action(() => saveStatus('Завершено'));
                 })}>{confirmation === 'reset' ? 'Сбросить' : 'Завершить'}</button>
               </footer>
             </div>

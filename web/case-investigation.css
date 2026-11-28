@@ -1,4 +1,22 @@
 .page-head.investigation-head { display: block; margin-block-end: 16px; }
+.case-status-trigger.state {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-block-size: 34px;
+  margin-inline-end: 6px;
+  border-color: var(--control-border);
+  font-weight: 600;
+}
+.case-status-trigger .ui-icon { width: 14px; height: 14px; }
+.case-status-trigger:not(:disabled):is(:hover, [aria-expanded='true']) {
+  border-color: var(--brand-line);
+  background: var(--accent-soft);
+  color: var(--accent-text);
+}
+.case-status-menu button { justify-content: space-between; }
+.case-status-menu button[aria-checked='true'] { color: var(--accent-text); font-weight: 650; }
+.case-status-menu button[aria-disabled='true'] { cursor: default; }
 .case-controls { container: case-controls / inline-size; }
 .actions.case-actions { gap: 8px; margin-block-end: 12px; }
 .case-actions > span, .case-share-actions { min-width: 0; max-width: 100%; }
