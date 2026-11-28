@@ -108,7 +108,16 @@ test('startup, committed imports and manual cases wake investigations without re
   const signal=cases(app.space('team').db).find(c=>c.body.signal);
   assert.ok(signal);
   await waitForCalls(6);
-  assert.deepEqual(calls.sort(),[first,first,second,second,signal.id,signal.id].sort());
+  const release = { kind: 'releases', loc: 'Релизы!A2', row: {
+    release_id: 'STORE-1', release_type: 'major', status: 'выпущен', description: 'Обновление Store',
+    release_date: '2026-11-16', affected_metrics: 'orders_index',
+  } };
+  const store = app.space('team');
+  importDocs(store, [{ file: 'Календарь', facts: [release] }], { notify: false });
+  const releaseCase = cases(store.db).find(c => c.body.release === 'STORE-1');
+  assert.ok(releaseCase, 'import immediately saves the release case');
+  await waitForCalls(8);
+  assert.deepEqual(calls.sort(), [first, first, second, second, signal.id, signal.id, releaseCase.id, releaseCase.id].sort());
 });
 
 test('participants explicitly choose a scope and share one durable investigation for a release', async t => {
@@ -186,4 +195,49 @@ test('participants explicitly choose a scope and share one durable investigation
   assert.equal(app.space('team').db.prepare(
     'SELECT count(*) AS n FROM case_investigations WHERE case_id=? AND parent_id IS NULL'
   ).get(caseId).n, 1);
+});
+
+test('publishing a calendar release queues one investigation that waits for post-release data', async t => {
+  const store = openStore(':memory:', { seedDemo: false });
+  t.after(() => store.close());
+  initEvidence(store.db);
+  initWorkbench(store.db);
+  const sales = (week_start, orders_index) => ({ kind: 'sales', loc: 'Продажи!' + week_start,
+    row: { product_family: 'Astra', week_start, orders_index } });
+  const release = (status, description = 'Обновление Astra') => ({ kind: 'releases', loc: 'Релизы!A2',
+    row: { release_id: 'R-ASTRA', release_type: 'major', status, description,
+      release_date: '2026-10-19', affected_metrics: 'family_orders_idx' } });
+  const importCalendar = (...facts) => importDocs(store, [{ file: 'Календарь', facts }], { notify: false });
+  const releaseCases = () => cases(store.db).filter(c => c.body.release === 'R-ASTRA');
+  importCalendar(release('запланирован'), sales('2026-09-28', 108), sales('2026-10-05', 110), sales('2026-10-12', 102));
+  assert.deepEqual(releaseCases(), []);
+  assert.throws(() => importCalendar(release('выпущен'), { kind: 'invalid', loc: 'A1' }), /Неизвестный тип данных/);
+  assert.deepEqual(releaseCases(), []);
+
+  importCalendar(release('выпущен'));
+  const [releaseCase] = releaseCases();
+  assert.ok(releaseCase, 'updating the rollout status creates the case');
+  const run = () => store.db.prepare('SELECT id,status,wait_for FROM case_investigations WHERE case_id=?').get(releaseCase.id);
+  const runId = run().id;
+  importCalendar(release('выпущен'));
+  importCalendar(release('выпущен', 'Уточнённое обновление Astra'));
+  assert.deepEqual(releaseCases().map(c => c.id), [releaseCase.id]);
+  assert.equal(run().id, runId);
+
+  const env = { LLM_BASE_URL: 'https://fixture.invalid', LLM_MODEL: 'fixture', LLM_DATA_MODE: 'analysis' };
+  const work = () => listInvestigationWork(store, env, Date.now(), runId);
+  await tryStartInvestigation(store, work()[0], env);
+  assert.deepEqual({ ...run() }, { id: runId, status: 'waiting', wait_for: 'data' });
+  assert.deepEqual(work(), []);
+  importCalendar(sales('2026-10-26', 101));
+  await tryStartInvestigation(store, work()[0], env);
+  assert.equal(run().id, runId);
+  assert.equal(run().wait_for, null);
+  assert.ok(work().some(item => item.role === 'analyst'));
+
+  importCalendar({ kind: 'releases', loc: 'Релизы!A3', row: { release_id: 'R-LK', release_type: 'minor',
+    status: 'выпущен', description: 'Карусель рекомендаций', release_date: '2026-10-19', affected_metrics: 'lk_reco_ctr' } });
+  const accountCase = cases(store.db).find(c => c.body.release === 'R-LK');
+  assert.equal(accountCase.product, 'ЛК');
+  assert.equal(accountCase.body.plan.metric, 'lk_reco_ctr');
 });

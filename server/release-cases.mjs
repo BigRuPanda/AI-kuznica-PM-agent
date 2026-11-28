@@ -36,6 +36,18 @@ function releaseScope(db, releaseId) {
   return { releaseWeek: releaseDay.toISOString().slice(0, 10), options };
 }
 
+function defaultSelection(options) {
+  return options.length === 1 && options[0].metrics.length === 1
+    ? { product: options[0].product, metric: options[0].metrics[0] }
+    : null;
+}
+
+export function releaseInvestigationInput(db, releaseId) {
+  const scope = releaseScope(db, releaseId);
+  const selection = scope && defaultSelection(scope.options);
+  return selection && { releaseId, ...selection };
+}
+
 export function ensureReleaseCase(db, { releaseId, product, metric }) {
   const existing = findReleaseCaseId(db, releaseId);
   if (existing) return { caseId: existing };
@@ -43,9 +55,9 @@ export function ensureReleaseCase(db, { releaseId, product, metric }) {
   if (!scope) throw Error('Выберите выпущенный релиз из календаря.');
   const { releaseWeek, options } = scope;
   if (!product && !metric) {
-    if (options.length !== 1 || options[0].metrics.length !== 1) return { caseId: null, options };
-    product = options[0].product;
-    [metric] = options[0].metrics;
+    const selection = defaultSelection(options);
+    if (!selection) return { caseId: null, options };
+    ({ product, metric } = selection);
   }
   if (!options.some(option => option.product === product && option.metrics.includes(metric)))
     throw Error('Выберите продукт и метрику этого релиза.');
