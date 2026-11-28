@@ -5,6 +5,7 @@ import {ChartSummary,Comparisons,CustomChart} from './charts';
 import {metricSample} from './metric-values';
 import {PeriodSummary} from './period-summary';
 import {Dialog} from './dialog';
+import {HelpMarker} from './ui-hints';
 import {seriesPath} from './trend';
 import {Icon} from './icons';
 import './calculations.css';
@@ -63,6 +64,7 @@ export function SavedChart({id,author,suggested,onSave}:{id:string;author?:strin
     <span id={listId+'-summary'}><ChartSummary chart={calc.result} launch={calc.launch} day={calc.context.day}/></span><Sparkline chart={calc.result} launch={calc.launch}/>
   </button>{view&&<Dialog title={view==='chart'?calc.result.title:'Расчёт: '+calc.result.title} wide close={()=>setView(null)}>
     <div className="release-chart">
+      {view==='chart'&&<HelpMarker label="О графике релиза" hint="График построен по сохранённому расчёту."/>}
       <button type="button" className="text-action saved-chart-switch"
         onClick={()=>setView(view==='chart'?'calculation':'chart')}>
         {view==='chart'?'Источник расчёта':'← К графику'}
@@ -225,7 +227,12 @@ export function CalculationPage({id}:{id:string}){
   const {releaseId} = calc.context;
   return <section className="proof-page calculation-proof">
     <a className="crumb" href={'#release/' + encodeURIComponent(releaseId)}>← К релизу {releaseId}</a>
-    <header className="proof-header"><h1>{describeCalculation(calc).title}</h1></header>
+    <header className="proof-header">
+      <div className="ui-hint-heading">
+        <h1>{describeCalculation(calc).title}</h1>
+        <HelpMarker label="О расчёте релиза" hint="Здесь видны данные сохранённого расчёта релиза."/>
+      </div>
+    </header>
     <CalculationDetails calc={calc}/>
   </section>;
 }

@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { post } from './team-data';
+import { HelpMarker } from './ui-hints';
 import type { Home } from './team-data';
 import { useTrackingVisibility } from './tracking-visibility';
 import type { Workbook } from './knowledge-source';
@@ -127,7 +128,11 @@ export function DemoObject({ id, service }: { id: string; service: string }) {
     <section className="paper">
       {showConfluence && service === 'demo-page' && <p><a href="#knowledge">База знаний</a></p>}
       <small>{service === 'demo-page' ? 'Встроенная база знаний' : 'Локальное демо · Redmine'}</small>
-      <h1>{page?.title || task?.title || 'Загрузка'}</h1>
+      <div className="ui-hint-heading">
+        <h1>{page?.title || task?.title || 'Загрузка'}</h1>
+        {page && <HelpMarker label="О странице базы знаний" hint="Здесь видны текст страницы, версия и ссылки." />}
+        {task && <HelpMarker label="О задаче Redmine" hint="Здесь видны статус, описание и комментарии задачи." />}
+      </div>
       {error && <p role="alert">{error}</p>}
       {task && <TaskContents task={task} />} {page && <PageContents page={page} />}
     </section>
@@ -212,6 +217,7 @@ export function PreviewCard({
         <button
           className="primary"
           disabled={busy}
+          data-ui-hint={p.state !== 'uncertain' && !p.receipt ? 'Запишет показанные изменения в выбранный сервис.' : undefined}
           onClick={() =>
             action(async () => {
               setBusy(true);
@@ -458,7 +464,7 @@ function IssueForm({
               </label>
             </>
           )}
-          <button>Подготовить черновик задачи</button>
+          <button data-ui-hint="Покажет черновик перед записью в Redmine.">Подготовить черновик задачи</button>
         </form>
       )}
     </>
@@ -617,7 +623,7 @@ function PageForm({
               Добавить ссылки на исходный отчёт и версии Excel
             </label>
           )}
-          <button>
+          <button data-ui-hint="Покажет черновик перед публикацией страницы.">
             {builtIn ? 'Подготовить страницу базы знаний' : 'Подготовить публикацию в Confluence'}
           </button>
         </form>
