@@ -4,10 +4,12 @@ import { openStore } from '../server/store.mjs';
 import { analysisView, initEvidence, importDocs } from '../server/evidence.mjs';
 import { grant, readSnapshot } from '../server/chart-ranges.mjs';
 import { readMaterial } from '../server/materials.mjs';
-import { answer, initWorkbench, createThread, enqueue, workJobs, messages } from '../server/workbench.mjs';
+import { answer, initWorkbench, createThread, enqueue, workJobs, messages, resumeJob } from '../server/workbench.mjs';
 import { webQuestion } from '../server/web-search.mjs';
 import { competitorQuestion } from '../server/competitor-chat.mjs';
 import { releaseDecision } from '../server/release-decision.mjs';
+import { openWorkspace } from '../scripts/acceptance/workspace-fixture.mjs';
+import { chatWriteCase, chatWriteRequests } from '../server/chat-write-intent.mjs';
 
 const user = {id:'tester', name:'Продакт', role:'admin'};
 function context(t) {
@@ -334,4 +336,179 @@ test('released-decision chart preparation applies the signed cutoff before savin
   assert.deepEqual(narrower.summary[0].rows.map(r=>r.value),[45]);
   importDocs(store,[{file:'weekly-release.xlsx',facts:facts.map(f=>({...f,row:{...f.row,orders_index:17}}))}],{notify:false});
   await assert.rejects(chart(release),/нет подтверждённых версий/u);
+});
+
+const recoveryEnv = {DATA_PROFILE:'configured', LLM_BACKEND:'anymodel', LLM_MODEL:'qwen/qwen3.8-27b',
+  LLM_DATA_MODE:'analysis', ANYMODEL_API_KEY:'offline'};
+const frame = (message, finish_reason = 'stop') => Response.json({
+  choices:[{message:{role:'assistant', ...message},finish_reason}],
+});
+const tool = (id,name,args) => ({id,type:'function',function:{name,arguments:JSON.stringify(args)}});
+function privateReport(t, answerFromModel, question = 'Сделай разбор текущих показателей и дай вывод в чате.', pinned = false) {
+  const requests = [];
+  const send = async (url, options) => {
+    assert.equal(String(url), 'https://anymodel.org/v1/chat/completions');
+    requests.push(JSON.parse(options.body));
+    return answerFromModel(x, requests.length, requests.at(-1));
+  };
+  const x = openWorkspace(recoveryEnv, send);
+  t.after(()=>x.close());
+  const id = enqueue(x.store,x.user,{thread:x.thread,caseId:x.caseId,screen:x.screen,question,
+    ...(pinned && {selection:x.selection})});
+  return {...x,id,requests,work:()=>workJobs(x.store,{publicUser:()=>x.user},recoveryEnv,send),
+    saved:()=>JSON.parse(x.one('SELECT result FROM jobs WHERE id=?',id).result),
+    status:()=>x.one('SELECT status FROM jobs WHERE id=?',id).status};
+}
+
+test('private report survives bad tool reply and resumes from the last valid turn', async t => {
+  const x = privateReport(t, (fixture,round,request) => {
+    if (round===1) return frame({tool_calls:[tool('note','append_case',{caseId:fixture.caseId,note:'Проверенная заметка'})]},'tool_calls');
+    if (round===2) return frame({tool_calls:[null]},'tool_calls');
+    assert.ok(request.messages.every(m=>!m.tool_calls?.includes(null)));
+    return frame({content:'Заметка сохранена.'});
+  }, 'Добавь заметку в этот разбор.');
+  await x.work();
+  assert.equal(x.status(),'partial');
+  assert.equal(x.inspectCase().body.notes.length,1);
+  const state=JSON.parse(x.one('SELECT body FROM agent_turns WHERE job=?',x.id).body);
+  state.messages.push({role:'assistant',content:null,tool_calls:[null]});
+  state.pending=[null];
+  x.db.prepare('UPDATE agent_turns SET body=? WHERE job=?').run(JSON.stringify(state),x.id);
+  resumeJob(x.db,x.user,x.id);
+  await x.work();
+  assert.equal(x.requests.length,3);
+  assert.equal(x.status(),'done');
+  assert.equal(x.inspectCase().body.notes.length,1);
+  assert.equal(x.one('SELECT count(*) n FROM agent_steps WHERE job=?',x.id).n,1);
+  assert.equal(messages(x.db,x.user,x.thread).items.filter(m=>m.role==='assistant').length,1);
+});
+
+test('optional read failure keeps a checked answer', async t => {
+  const x = privateReport(t, (fixture,round) => round===1
+    ? frame({tool_calls:[tool('view','view',{caseId:fixture.caseId}),tool('missing','calc',{id:'f'.repeat(64)})]},'tool_calls')
+    : frame({content:'Готовый вывод по проверенному срезу.'}));
+  await x.work();
+  assert.match(x.saved().text,/Готовый вывод по проверенному срезу/u);
+  assert.ok(x.saved().calc);
+  assert.match(x.saved().warning,/прочитать расчёт/u);
+});
+
+test('truncated or refused chat reply is not done', async t => {
+  const truncated = privateReport(t, x=>frame({
+    content:'Заметка сохраняется',
+    tool_calls:[tool('not-complete','append_case',{caseId:x.caseId,note:'Не сохранять'})],
+  },'length'), 'Добавь заметку в этот разбор.');
+  await truncated.work();
+  assert.ok(['partial','failed'].includes(truncated.status()));
+  assert.equal(truncated.requests.length,2);
+  assert.equal(truncated.inspectCase().body.notes?.length||0,0);
+  const refusal = privateReport(t, ()=>frame({refusal:'Refused'},'stop'));
+  await refusal.work();
+  assert.ok(['partial','failed'].includes(refusal.status()));
+});
+
+test('case reports are read only and chat writes use the requested target', async t => {
+  const readOnly = [
+    ['Сделай разбор текущих показателей и дай вывод в чате.', 'append_case'],
+    ['Не добавляй заметку. Только прочитай данные разбора.', 'append_case'],
+    ['Покажи карточки, ничего не меняй.', 'set_view'],
+    ['Подготовь список задач в Redmine.', 'draft'],
+    ['Не подготавливай черновик для QA. Проверь текущие данные.', 'draft'],
+    ['Подготовь черновик страницы Confluence для QA.', 'draft'],
+    ['Подготовь обзор страницы Confluence.', 'page_draft'],
+    ['Собери вывод для команды по текущим показателям.', 'prepare_publish'],
+    ['Подготовь черновик страницы Confluence. Запиши в неё короткую сводку.', 'append_case'],
+  ];
+  for (const [question, denied] of readOnly) {
+    const x = privateReport(t, (fixture,round,request) => {
+      if (round!==1) return frame({content:'Данные прочитаны.'});
+      return frame({tool_calls:[
+        tool('denied-1',denied,{caseId:fixture.caseId,note:'Лишняя запись'}),
+        tool('denied-2',denied,{caseId:fixture.caseId,note:'Лишняя запись'}),
+        tool('view','view',{caseId:fixture.caseId}),
+      ]},'tool_calls');
+    },question);
+    await x.work();
+    const advertised=x.requests[0].tools.map(t=>t.function.name);
+    assert.ok(!advertised.includes(denied),question);
+    if (question.startsWith('Подготовь черновик страницы')) assert.ok(advertised.includes('page_draft'));
+    else assert.match(x.saved().text,/Данные прочитаны/u);
+    assert.equal(x.inspectCase().body.notes?.length || 0,0);
+    assert.equal(x.one('SELECT count(*) n FROM personal_views').n,0);
+  }
+  let other;
+  const current = privateReport(t,(fixture,round,request)=>{
+    if(round!==1)return frame({content:'Заметка сохранена.'});
+    other=fixture.op('create-case',{title:'Другая доступная карточка',product:'Kaspersky'}).id;
+    return frame({tool_calls:[tool('write','append_case',{caseId:other,note:'Для текущего разбора'})]});
+  },'Добавь заметку в текущий разбор.');
+  await current.work();
+  assert.ok(current.requests[0].tools.some(t=>t.function.name==='append_case'));
+  assert.equal(current.status(),'done');
+  assert.equal(current.inspectCase().body.notes.length,1);
+  assert.equal(current.inspectCase(other).body.notes?.length||0,0);
+  for(const [question,expected] of [
+    ['Создай новый личный разбор «Проверка» для Kaspersky.','create_case'],
+    ['Сохрани наблюдение за эффектом с 5 октября.','watch'],
+  ]){
+    const x=privateReport(t,()=>frame({content:'Получил поручение.'}),question);
+    await x.work();
+    assert.ok(x.requests[0].tools.some(t=>t.function.name===expected));
+  }
+});
+
+test('failed receipt rolls back note and visible action', async t => {
+  const x=privateReport(t,(fixture,round)=>round===1
+    ? frame({tool_calls:[tool('write','append_case',{caseId:fixture.caseId,note:'Откатываемая заметка'})]},'tool_calls')
+    : frame({content:'Заметка сохранена.'}), 'Добавь заметку в этот разбор.');
+  x.db.exec("CREATE TEMP TRIGGER fail_receipt BEFORE INSERT ON agent_steps BEGIN SELECT RAISE(ABORT, 'fixture receipt failure'); END");
+  await x.work();
+  assert.equal(x.inspectCase().body.notes?.length||0,0);
+  assert.equal(x.one('SELECT count(*) n FROM agent_steps WHERE job=?',x.id).n,0);
+  assert.ok(!x.saved().actions?.some(a=>a.op==='append_case'));
+});
+
+test('a read reference and a draft subject cannot authorize a different case write', () => {
+  assert.deepEqual(chatWriteRequests('Создай задачу QA на разбор причин снижения индекса.'),[{op:'draft',count:1}]);
+  const current='current-case', other='other-case';
+  assert.equal(chatWriteCase('Прочитай #case/other-case и добавь заметку в текущий разбор.',current,'append_case'),current);
+  assert.equal(chatWriteCase('Добавь в текущий разбор заметку по #case/other-case.',current,'append_case'),current);
+  assert.equal(chatWriteCase('Добавь заметку в другой разбор #case/other-case.',current,'append_case'),other);
+  assert.equal(chatWriteCase('Добавь заметку со ссылкой на #case/other-case.',current,'append_case'),current);
+  assert.equal(chatWriteCase('Добавь заметку по данным #case/current-case в другой разбор #case/other-case.',current,'append_case'),other);
+  assert.throws(()=>chatWriteCase('Добавь заметку в текущий разбор и добавь ещё одну заметку в #case/other-case.',current,'append_case'),
+    /нужный разбор/iu);
+});
+
+test('write permissions use the object of the command and ignore discussed instructions', () => {
+  const note={op:'append_case',count:1};
+  const page={op:'page_draft',count:1};
+  for(const question of [
+    'Добавь заметку о задаче Redmine в текущий разбор.',
+    'Добавь заметку о странице Confluence в текущий разбор.',
+  ]) assert.deepEqual(chatWriteRequests(question),[note],question);
+  assert.deepEqual(chatWriteRequests('Подготовь задачу для команды по странице Confluence.'),[{op:'draft',count:1}]);
+  assert.deepEqual(chatWriteRequests('Объясни, что делает команда добавь заметку.'),[]);
+  assert.deepEqual(chatWriteRequests('Для Confluence подготовь новую страницу «Сверка CTR».'),[page]);
+  assert.deepEqual(chatWriteRequests('Добавь заметку о задаче Redmine и подготовь новую страницу Confluence.'),[note,page]);
+});
+
+test('a private read cannot report an unverified draft as complete', async t => {
+  const x=privateReport(t,()=>frame({content:'Подготовил черновик задачи.'}));
+  await x.work();
+  assert.ok(['partial','failed'].includes(x.status()));
+  assert.doesNotMatch(x.saved().text,/Подготовил черновик/u);
+  assert.equal(x.one('SELECT count(*) n FROM draft_actions').n,0);
+});
+
+test('an unrequested write cannot replace the pinned-range report with an error', async t => {
+  const x=privateReport(t,(fixture,round)=>round===1
+    ? frame({tool_calls:[tool('not-requested','append_case',{caseId:fixture.caseId,note:'Ненужная заметка'})]},'tool_calls')
+    : frame({content:'По выделенным периодам индекс Kaspersky снизился со 100 до 70.'}),
+  'Сделай разбор выделенных периодов и дай вывод в чате.',true);
+  await x.work();
+  assert.equal(x.status(),'done');
+  assert.match(x.saved().text,/100 до 70/u);
+  assert.ok(x.saved().rangeId);
+  assert.equal(x.inspectCase().body.notes?.length || 0,0);
 });

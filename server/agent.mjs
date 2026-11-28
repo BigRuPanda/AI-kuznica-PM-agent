@@ -4,7 +4,7 @@ import {analysis,labels,runTool} from './analytics.mjs';
 import {operations} from './tools.mjs';
 import {profiles} from './config.mjs';
 import {name,hash} from './store.mjs';
-import {readModelResponse} from './model-response.mjs';
+import {completeModelText,modelAbortFailure,modelHttpFailure,normalizeModelReply,readModelResponse} from './model-response.mjs';
 import {geminiCall} from './gemini.mjs';
 import {chatAnswerFormat} from './answer-format.mjs';
 import {checkModelTransport,localData} from './data-profile.mjs';
@@ -18,6 +18,11 @@ const system='Ты помощник продакта. Отвечай по-рус
 export const anymodelBaseUrl = 'https://anymodel.org/v1';
 export const anymodelTimeoutMs = 600_000;
 const qwenMaxCompletionTokens = 65_536;
+export const isAnyModelQwen = env => env.LLM_BACKEND === 'anymodel' && env.LLM_MODEL === 'qwen/qwen3.8-27b';
+
+export function legacyOutputLimit(env, limit) {
+  return isAnyModelQwen(env) ? undefined : limit;
+}
 
 export function modelTimeout(env, fallback) {
   return env.LLM_BACKEND === 'anymodel' ? anymodelTimeoutMs : fallback;
@@ -50,6 +55,31 @@ function apiTools(){
   });
 }
 export async function providerCall(env,messages,tools,choice='auto',send=fetch,limits={}){
+  if (!limits.step) return callProvider(env,messages,tools,choice,send,limits);
+  const started = performance.now();
+  let status = null;
+  const transport = async (url,options) => {
+    const response = await send(url,options);
+    status = response.status ?? null;
+    return response;
+  };
+  const reportFailure = (code,finish) => console.warn(JSON.stringify({
+    event:'model_call_failed', step:limits.step, model:env.LLM_MODEL || env.LLM_BACKEND || 'configured',
+    elapsedMs:Math.round(performance.now()-started), status, code,
+    finishReason:['stop','tool_calls','length','refusal','content_filter','function_call'].includes(finish) ? finish : null,
+  }));
+  try {
+    const reply = await callProvider(env,messages,tools,choice,transport,limits);
+    if (['length','refusal','content_filter'].includes(reply.finishReason)) reportFailure(reply.finishReason,reply.finishReason);
+    return reply;
+  } catch (error) {
+    reportFailure(error.modelCode || (error.timedOut ? 'timeout' : error.status ? 'http_error' :
+      error.retryable ? 'transport' : 'request_failed'),error.finishReason);
+    throw error;
+  }
+}
+
+async function callProvider(env,messages,tools,choice,send,limits){
   if(['gemini','vertex','vertex-express'].includes(env.LLM_BACKEND))return geminiCall(env,messages,tools,choice,send,undefined,limits);
   checkModelTransport(env);
   if(env.LLM_BACKEND==='proxyapi')throw Error('Для перехода с ProxyAPI задайте LLM_BACKEND=anymodel, ANYMODEL_API_KEY и LLM_MODEL в корневом .env.');
@@ -64,41 +94,55 @@ export async function providerCall(env,messages,tools,choice='auto',send=fetch,l
   let response;
   const timeoutLimit = modelTimeout(env, 60_000);
   const timeout = Math.max(1,Math.min(timeoutLimit, limits.timeout ?? timeoutLimit));
-  const signal = AbortSignal.timeout(timeout);
-  const timedOut = error => signal.aborted || error?.name === 'TimeoutError';
+  const timeoutSignal = AbortSignal.timeout(timeout);
+  const signal = limits.signal ? AbortSignal.any([timeoutSignal, limits.signal]) : timeoutSignal;
   const timeoutError = () => {
     const seconds = Math.ceil(timeout / 1000);
     const unit = { one:'секунду', few:'секунды', many:'секунд', other:'секунды' }[new Intl.PluralRules('ru').select(seconds)];
     return Object.assign(Error('Модель не успела ответить за ' + seconds + ' ' + unit + '.'), {timedOut:true});
   };
-  const history = messages.map(({usage, googleParts, lengthLimited, ...message}) => message);
-  const maxTokens = anymodel && env.LLM_MODEL === 'qwen/qwen3.8-27b' ? qwenMaxCompletionTokens : limits.maxTokens;
-  try{response=await send(target,{method:'POST',redirect:'error',signal,headers:{'Content-Type':'application/json',...(key?{Authorization:'Bearer '+key}:{})},
+  const history = messages.map(({usage, googleParts, lengthLimited, finishReason, refusal, ...message}) => message);
+  const maxTokens = isAnyModelQwen(env)
+    ? Math.min(limits.maxTokens ?? qwenMaxCompletionTokens, qwenMaxCompletionTokens)
+    : limits.maxTokens;
+  try{signal.throwIfAborted();response=await send(target,{method:'POST',redirect:'error',signal,headers:{'Content-Type':'application/json',...(key?{Authorization:'Bearer '+key}:{})},
     body:JSON.stringify({model:env.LLM_MODEL,messages:history,...(tools.length?{tools,tool_choice:choice}:{}),
       ...(maxTokens?{max_tokens:maxTokens}:{}),
       ...(limits.responseFormat?{response_format:limits.responseFormat}:{}),
       ...(limits.temperature!==undefined?{temperature:limits.temperature}:{})})});}
   catch(error) {
-    if(timedOut(error))throw timeoutError();
+    const abort = modelAbortFailure(error, signal, limits.signal);
+    if (abort) throw abort.timedOut ? timeoutError() : abort;
     throw Object.assign(Error('Модель недоступна. Проверьте подключение и параметры .env.'),{retryable:true});
   }
-  if(!response.ok)throw Object.assign(Error('Провайдер модели вернул HTTP '+response.status+'.'),{status:response.status});
-  const data=await readModelResponse(response,signal).catch(error=>{
-    if(error.timedOut)throw timeoutError();
+  try {
+    if (!response.ok) throw await modelHttpFailure(response, signal, limits.signal,
+      'Провайдер модели вернул HTTP '+response.status+'.');
+    const data = await readModelResponse(response, signal, limits.signal);
+    const reply = data?.choices?.[0];
+    return normalizeModelReply(reply?.message, {
+      finishReason: reply?.finish_reason,
+      usage: {input:data?.usage?.prompt_tokens,output:data?.usage?.completion_tokens},
+    });
+  } catch(error) {
+    if (error.timedOut) throw timeoutError();
     throw error;
-  });
-  const choiceReply=data?.choices?.[0], reply=choiceReply?.message;
-  if(!reply)throw Object.assign(Error('Модель вернула пустой ответ.'),{invalidModelResponse:true});
-  return {...reply,lengthLimited:choiceReply.finish_reason==='length',
-    usage:{input:data.usage?.prompt_tokens,output:data.usage?.completion_tokens}};
+  }
 }
 async function apiTurn(store,a,history,question,env,send){
   const ctx=a.context,tools=apiTools(),refs=new Map(),messages=[{role:'system',content:system},
     {role:'user',content:JSON.stringify({release:a.rel,context:ctx,history,question})}];
+  const metadataOnly = /релиз|выкладк|описани|аудитори|что измен|когда выпущен/iu.test(question) &&
+    !/сколько|числител|знаменател|конверси|дол[яюеи]|показател|сравни|сопостав|эффект|воронк|метрик|почему|до и после|оплатил/iu.test(question);
+  let readRelease = false;
   for(let round=0;round<6;round++){
-    const reply=await providerCall(env,messages,tools,refs.size?'auto':'required',send);
+    const grounded = refs.size || metadataOnly && readRelease;
+    const reply=await providerCall(env,messages,tools,grounded?'auto':'required',send,{step:'release-chat.'+(round+1)});
+    if (reply.lengthLimited || ['length','refusal','content_filter'].includes(reply.finishReason))
+      throw Error('Модель вернула незавершённый ответ. Выполненные расчёты сохранены.');
     if(!reply.tool_calls?.length){
-      if(refs.size&&typeof reply.content==='string'&&reply.content.trim())return {answer:reply.content,refs:[...refs.values()]};
+      const answer = completeModelText(reply);
+      if(grounded && answer) return {answer,refs:[...refs.values()]};
       throw Error('Модель не подтвердила ответ расчётом.');
     }
     messages.push({...reply,role:'assistant',content:reply.content??null,tool_calls:reply.tool_calls});
@@ -106,6 +150,7 @@ async function apiTurn(store,a,history,question,env,send){
       let result;
       try{
         const calc=scopeTool(store,ctx,call.function.name,JSON.parse(call.function.arguments));
+        if(call.function.name === 'get_release') readRelease = true;
         if(calc.op)refs.set(calc.id,calc);
         result=calc.op==='build_chart'?calc:compact(calc);
       }catch(e){result={error:e.message};}
@@ -115,7 +160,7 @@ async function apiTurn(store,a,history,question,env,send){
   throw Error('Модель исчерпала число уточнений. Попробуйте более узкий вопрос.');
 }
 export function makeAgent(store,{env=process.env,send=fetch,alternate}={}){
-  const jobs=new Map();
+  const jobs=new Map(), reviews=new Map(), reviewAbort=new AbortController();
   function queue(key,fn){
     const job=(jobs.get(key)||Promise.resolve()).catch(()=>{}).then(fn);
     jobs.set(key,job);job.finally(()=>{if(jobs.get(key)===job)jobs.delete(key);}).catch(()=>{});return job;
@@ -138,16 +183,33 @@ export function makeAgent(store,{env=process.env,send=fetch,alternate}={}){
       store.db.prepare('INSERT OR IGNORE INTO notes VALUES(?,?,?)').run(id,ctx.releaseId,JSON.stringify({...n,calc:calc.id,version:ctx.version,observedDay:ctx.day}));
     }
   }
-  async function review(a,answer){
+  async function review(a,answer,signal){
     const facts=a.cards.map(c=>({metric:c.metric,title:c.title,status:c.status,before:c.series.all.before,after:c.series.all.after,
       days:c.series.all.daily.map((r,j)=>[a.days[j],r.value,r.d])}));
     const cohorts=compact(runTool(store,'breakdown',{...a.context,metric:a.rel.target}));
     const prompt='Напиши краткий общий вывод summary по главному вопросу, выбери 0–2 графика первого разбора и 0–3 значимых участка. Учитывай размер изменения и выборки. Используй факты и разрезы ниже. Участки [start,end) в сутках относительно релиза. Ответ по-русски. '+JSON.stringify({facts,cohorts,question:a.rel.question,answer});
     const parameters=z.toJSONSchema(reportSpec);delete parameters.$schema;
     const tool={type:'function',function:{name:'record_findings',description:'Выделить графики и периоды',parameters}};
-    const reply=await providerCall(env,[{role:'user',content:prompt}],[tool],{type:'function',function:{name:'record_findings'}},send);
+    const reply=await providerCall(env,[{role:'user',content:prompt}],[tool],{type:'function',function:{name:'record_findings'}},send,{signal,step:'release-review'});
+    if (reply.lengthLimited || ['refusal','content_filter'].includes(reply.finishReason)) throw Error('Обзор релиза не завершён.');
     return reportSpec.parse(JSON.parse(reply.tool_calls?.[0]?.function.arguments||'null'));
   }
+
+  function queueReview(a, answer) {
+    const key = JSON.stringify([a.context.releaseId,a.context.version,a.context.day]);
+    if (reviewAbort.signal.aborted) return Promise.resolve();
+    if (reviews.has(key)) return reviews.get(key);
+    const job = review(a,answer,reviewAbort.signal).then(decision => {
+      if (!reviewAbort.signal.aborted) store.tx(()=>storeReview(a,decision,answer));
+    }).catch(()=>{}).finally(()=>reviews.delete(key));
+    reviews.set(key,job);
+    return job;
+  }
+  const waitForReviews = async () => { await Promise.allSettled(reviews.values()); };
+  const closeReviews = () => {
+    reviewAbort.abort();
+    return waitForReviews();
+  };
   function ask(body,trustedActor,trustedActorId){return queue(body.releaseId,async()=>{
     const question=name(body.question,1500),request=name(body.requestId||randomUUID(),100);
     if(body.author!==trustedActor&&!profiles.includes(body.author)||!body.author)throw Error('Выберите профиль.');
@@ -162,21 +224,21 @@ export function makeAgent(store,{env=process.env,send=fetch,alternate}={}){
     }else if(env.LLM_BACKEND==='codex'&&alternate&&!apiConfigured(env)){
       turn=await alternate(store,a,history,question);
     }else turn=await apiTurn(store,a,history,question,env,send);
-    let decision=turn.decision;
-    if(!decision&&apiConfigured(env))decision=await review(a,turn.answer).catch(()=>null);
+    const decision=turn.decision;
     const refs=turn.refs.map(c=>({id:c.id,op:c.op,title:c.result.title||({breakdown:'Разбивка по клиентам',funnel:'Шаги воронки'}[c.op])||'Расчёт'}));
     const user={role:'user',author:body.author,authorId:trustedActorId,text:question,context:ctx,created:Date.now()};
     const reply={role:'assistant',author:'Агент',text:turn.answer,context:ctx,refs,created:Date.now()};
     store.tx(()=>{if(decision)storeReview(a,decision,turn.answer);store.addMessage(ctx.releaseId,request+'/q',user);store.addMessage(ctx.releaseId,request+'/a',reply);});
+    if(!decision && apiConfigured(env)) void queueReview(a,turn.answer);
     return reply;
   });}
-  return {ask,initial(input){return queue(input.releaseId,async()=>{
+  return {ask,waitForReviews,closeReviews,async initial(input) {
     const a=analysis(store,{...input,segment:'all'});
     if(store.one('SELECT 1 FROM report_versions WHERE release=? AND version=?',a.rel.id,a.v.id)||a.cards[a.rel.target].status!=='ready')return;
     let decision;
     if(localData(env))return;
-    if(apiConfigured(env))decision=await review(a,'Первый полный обзор.');
+    if(apiConfigured(env))return queueReview(a,'Первый полный обзор.');
     else if(env.LLM_BACKEND==='codex'&&alternate){const t=await alternate(store,a,[],'Составь первый полный обзор и выбери графики и участки.');decision={...t.decision,summary:t.answer.slice(0,1200)};}
     if(decision)store.tx(()=>storeReview(a,decision,a.cards[a.rel.target].caption));
-  })}};
+  }};
 }

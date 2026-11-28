@@ -195,6 +195,8 @@ test('two failed roles retain separate reasons, deadlines and permissions', asyn
   setSetting(db, 'investigation_auto_retry', true);
   const errors=[
     [{status:401},/доступа/,300000], [{status:403},/доступа/,300000], [{status:404},/доступа/,300000],
+    [{status:402},/лимит ключа/,300000],
+    [{status:429,retryAt:120200},/частоту/,120000],
     [{status:429},/частоту/,15000], [{status:503},/стороне провайдера/,15000], [{retryable:true},/связаться/,15000],
     [{invalidModelResponse:true},/не прошёл проверку/,15000],
   ];
@@ -537,4 +539,46 @@ test('only an explicitly requested alternative reads a public page and keeps it 
   assert.equal(fetched,1);
   const capture=JSON.parse(db.prepare('SELECT capture FROM case_investigations WHERE id=?').get(run.id).capture);
   assert.ok(capture.context.findings.some(f=>f.url==='https://museum.example/' && f.text.includes('7 декабря')));
+});
+
+test('Qwen failure in verification keeps the frozen snapshot for retry',async t=>{
+  const store=open(),{db}=store;
+  t.after(()=>store.close());
+  add(db,'split-gap');
+  saveResearchSettings(db,{...dima,role:'admin'},{scope:'team',mode:'lead'});
+  const env={LLM_BACKEND:'anymodel',LLM_MODEL:'qwen/qwen3.8-27b',ANYMODEL_API_KEY:'fixture',LLM_DATA_MODE:'analysis'};
+  const ids=['gap'];
+  const inputs={
+    read_findings:{ids},
+    submit_check:{question:'Как проверить?',result:'Есть замечание.',impact:'Нужен прогон.',findingIds:ids},
+    submit_assessment:{summary:'Причина требует проверки.',hypotheses:[{title:'Учёт',for:[],against:[],test:'Сверить событие.'}]},
+    submit_plan:{action:'Проверить корзину.',plan:'Сверить действие и событие.',outcomes:['Отметить результат.']},
+    submit_verification:{findingId:'gap',scenario:'Повторить добавление.',
+      behavior:'появление товара',telemetry:'запись добавления товара',
+      eventMissing:'Проверить запись.',behaviorFailed:'Проверить действие.',bothPassed:'Расширить выборку.'},
+  };
+  let complete=false;
+  const send=async(_url,init)=>{
+    const request=JSON.parse(init.body);
+    const name=request.tool_choice?.function?.name || 'submit_check';
+    if(name==='submit_verification'&&!complete)
+      return Response.json({choices:[{finish_reason:'length',message:{content:null}}]});
+    return Response.json({choices:[{message:{tool_calls:[{id:name,type:'function',function:{name,arguments:JSON.stringify(inputs[name]||inputs.submit_check)}}]}}]});
+  };
+  const work=()=>workInvestigation(store,env,send,{capture(db){
+    db.prepare('INSERT OR IGNORE INTO evidence_calcs VALUES(?,?)').run('frozen-split','{}');
+    return {calcId:'frozen-split',measurable:true,checks:[],context:{findings:[
+      {id:'gap',kind:'dictionary',label:'Учёт',text:'Проверить событие.',measurementGap:true},
+    ]}};
+  }});
+  const failed=await work();
+  assert.equal(failed.status,'retry');
+  assert.match(failed.stages[0].reason,/лимит генерации/u);
+  assert.equal(failed.result ?? null,null);
+  retryInvestigationStage(db,dima,{caseId:'split-gap',runId:failed.id,role:'lead',attempt:1});
+  complete=true;
+  const ready=await work();
+  assert.equal(ready.status,'ready');
+  assert.equal(ready.calcId,failed.calcId);
+  assert.match(ready.result.action,/запись добавления/u);
 });

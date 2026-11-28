@@ -11,6 +11,7 @@ import {application} from '../server/http.mjs';
 import {createTeamApp} from '../server/team-http.mjs';
 import {page,runTool} from '../server/analytics.mjs';
 import {geminiCall} from '../server/gemini.mjs';
+import {completeModelText} from '../server/model-response.mjs';
 import {apiConfigured,makeAgent,providerCall} from '../server/agent.mjs';
 import {releaseMetricsCsv,seedReleaseMetrics} from './release-metrics-fixture.mjs';
 
@@ -63,12 +64,12 @@ test('AnyModel uses its own key, endpoint and model limits across tool calls', a
   const final = await providerCall(anymodel, messages, [tool], 'auto', send, {timeout:550_000,maxTokens:56});
   assert.equal(requests.length, 2);
   assert.deepEqual(timeouts, [600_000, 550_000]);
+  assert.deepEqual(requests.map(({body})=>body.max_tokens),[65_536,56]);
   for (const {url, init, body} of requests) {
     assert.equal(url, 'https://anymodel.org/v1/chat/completions');
     assert.equal(init.headers.Authorization, 'Bearer fixture-anymodel-key');
     assert.equal(init.redirect, 'error');
     assert.equal(body.model, 'qwen/qwen3.8-27b');
-    assert.equal(body.max_tokens, 65_536);
     assert.deepEqual(body.tools, [tool]);
   }
   assert.deepEqual(requests.map(({body}) => body.tool_choice), [choice, 'auto']);
@@ -78,6 +79,68 @@ test('AnyModel uses its own key, endpoint and model limits across tool calls', a
   ]);
   assert.equal(final.content, '37');
   assert.deepEqual(final.usage, {input:9, output:2});
+});
+
+test('model reply rejects invalid tool batches and preserves valid stop calls', async () => {
+  const call = { id: 'tool-1', type: 'function', function: { name: 'read', arguments: '{}' } };
+  const model = (message, finish_reason) => async () =>
+    Response.json({ choices: [{ message: { role: 'assistant', ...message }, finish_reason }] });
+  const malformed = [
+    [null], [{ function: call.function }], [call, call],
+    [{ ...call, function: { name: 'read', arguments: {} } }],
+    [call, { ...call, id: 'tool-2', function: { name: 'read', arguments: '{' } }],
+    [{ ...call, function: { name: 'read', arguments: '[]' } }],
+  ];
+  for (const tool_calls of malformed) {
+    await assert.rejects(providerCall(anymodel, [], [], 'auto', model({ tool_calls }, 'tool_calls')),
+      { invalidModelResponse: true });
+  }
+  const stop = await providerCall(anymodel, [], [], 'auto', model({ content: null, tool_calls: [call] }, 'stop'));
+  assert.deepEqual(stop.tool_calls, [call]);
+  assert.equal(stop.finishReason, 'stop');
+  const cut = await providerCall(anymodel, [], [], 'auto', model({ content: null }, 'length'));
+  assert.equal(cut.finishReason, 'length');
+  assert.equal(cut.lengthLimited, true);
+  const refusal = await providerCall(anymodel, [], [], 'auto', model({ refusal: 'Refused' }, 'stop'));
+  assert.equal(refusal.finishReason, 'refusal');
+});
+
+test('model failures retain retry deadline and cancellation', async t => {
+  const now = Date.UTC(2026, 10, 28, 11);
+  t.mock.method(Date, 'now', () => now);
+  const error = (status, code, headers) => async () => Response.json({ error: { code } }, { status, headers });
+  await assert.rejects(providerCall(anymodel, [], [], 'auto', error(429, 'rate_limit', { 'Retry-After': '120' })),
+    { status: 429, modelCode: 'rate_limit', retryAt: now + 120_000 });
+  await assert.rejects(providerCall(anymodel, [], [], 'auto',
+    error(429, 'rate_limit', { 'Retry-After': new Date(now + 60_000).toUTCString() })),
+    { status: 429, retryAt: now + 60_000 });
+  await assert.rejects(providerCall(anymodel, [], [], 'auto', error(400, 'context_length_exceeded')),
+    { status: 400, modelCode: 'context_limit' });
+  await assert.rejects(providerCall(anymodel, [], [], 'auto', error(402, 'insufficient_quota')),
+    { status: 402, modelCode: 'quota' });
+
+  const interrupted = async () => new Response(new ReadableStream({
+    start(stream) { stream.error(new TypeError('fixture disconnected')); },
+  }));
+  await assert.rejects(providerCall(anymodel, [], [], 'auto', interrupted),
+    { retryable: true, modelCode: 'body_interrupted' });
+
+  for (const env of [anymodel, { LLM_BACKEND: 'gemini', LLM_API_KEY: 'fixture' }]) {
+    const parent = new AbortController();
+    const readUntilCancelled = async (_url, { signal }) => new Response(new ReadableStream({
+      start(stream) {
+        signal.addEventListener('abort', () => stream.error(signal.reason), { once: true });
+        queueMicrotask(() => parent.abort());
+      },
+    }));
+    const keepAlive = setTimeout(() => {}, 300);
+    try {
+      await assert.rejects(providerCall(env, [], [], 'auto', readUntilCancelled, { signal: parent.signal, timeout: 200 }),
+        failure => failure.modelCode === 'cancelled' && !failure.timedOut);
+    } finally {
+      clearTimeout(keepAlive);
+    }
+  }
 });
 
 test('Gemini Developer API uses the selected URL and a server-side key header',async()=>{
@@ -279,4 +342,99 @@ test('release messages identify their signed-in author after rename', async t =>
   assert.ok(messages.filter(message => message.role === 'assistant').every(message => message.own === false));
   assert.deepEqual(identify(await activity(other.cookie)).map(message => [message.own, message.author]),
     [[false, name], [true, name], [false, name]]);
+});
+
+const legacyFrame = message => Response.json({choices:[{message:{role:'assistant',...message}}]});
+const legacyCall = (name,args={}) => legacyFrame({tool_calls:[{
+  id:name,type:'function',function:{name,arguments:JSON.stringify(args)},
+}]});
+
+test('release chat saves its answer while optional review is pending', async () => {
+  const store=openStore(':memory:');
+  const started=Promise.withResolvers(), review=Promise.withResolvers();
+  let first,second,firstPromise,secondPromise;
+  seedReleaseMetrics(store);
+  const release=store.release('R-001');
+  const agent=makeAgent(store,{env:anymodel,send:async (_url,init)=>{
+    const request=JSON.parse(init.body);
+    if(request.tool_choice?.function?.name==='record_findings'){
+      started.resolve();
+      return review.promise;
+    }
+    return request.messages.some(message=>message.role==='tool')
+      ? legacyFrame({content:'Проверенный итог по расчёту.'}) : legacyCall('compare_metric',{metric:0});
+  }});
+  const ask=requestId=>agent.ask({releaseId:release.id,day:14,author:'Анна',question:'Что показал расчёт?',requestId});
+  try {
+    firstPromise=ask('first').then(reply=>{first=reply;});
+    await started.promise;
+    await new Promise(resolve=>setImmediate(resolve));
+    assert.equal(first?.text,'Проверенный итог по расчёту.');
+    assert.equal(store.messages(release.id).length,2);
+    secondPromise=ask('second').then(reply=>{second=reply;});
+    await new Promise(resolve=>setImmediate(resolve));
+    assert.equal(second?.text,'Проверенный итог по расчёту.');
+    assert.equal(store.messages(release.id).length,4);
+  } finally {
+    review.resolve(new Response(null,{status:503}));
+    await Promise.allSettled([firstPromise,secondPromise]);
+    await agent.closeReviews?.();
+    store.close();
+  }
+});
+
+test('release metadata completes without an unrelated calculation', async () => {
+  const store=openStore(':memory:');
+  seedReleaseMetrics(store);
+  const release=store.release('R-001');
+  const agent=makeAgent(store,{env:anymodel,send:async (_url,init)=>{
+    const request=JSON.parse(init.body);
+    if(request.tool_choice?.function?.name==='record_findings') return new Response(null,{status:503});
+    return request.messages.some(message=>message.role==='tool')
+      ? legacyFrame({content:'Изменили описание оформления.'}) : legacyCall('get_release');
+  }});
+  const ask=(question,requestId)=>agent.ask({releaseId:release.id,day:14,author:'Анна',question,requestId});
+  try {
+    const description=await ask('Что изменили в релизе?','metadata');
+    assert.equal(description.text,'Изменили описание оформления.');
+    assert.deepEqual(description.refs,[]);
+    await assert.rejects(ask('Сколько компаний оплатили заказ?','numbers'),/расч[её]том/u);
+    await agent.waitForReviews?.();
+  } finally { await agent.closeReviews?.(); store.close(); }
+});
+
+test('model call diagnostics identify failed phases without logging prompt or provider content', async t => {
+  const warnings=[];
+  t.mock.method(console,'warn',line=>warnings.push(JSON.parse(line)));
+  const step='reviewer.submit_check';
+  const request=[{role:'user',content:'Hidden prompt fixture'}];
+  const interrupted=async()=>new Response(new ReadableStream({start(controller){
+    controller.error(new Error('Hidden provider fixture'));
+  }}));
+  await assert.rejects(providerCall(anymodel,request,[],'auto',interrupted,{step}),{modelCode:'body_interrupted'});
+  const cut=async()=>Response.json({choices:[{message:{content:null},finish_reason:'length'}]});
+  await providerCall(anymodel,request,[],'auto',cut,{step:'workspace-chat.2'});
+  assert.equal(warnings.length,2);
+  assert.deepEqual(warnings.map(({step,model,status,finishReason,code})=>({step,model,status,finishReason,code})),[
+    {step,model:anymodel.LLM_MODEL,status:200,finishReason:null,code:'body_interrupted'},
+    {step:'workspace-chat.2',model:anymodel.LLM_MODEL,status:200,finishReason:'length',code:'length'},
+  ]);
+  assert.ok(warnings.every(row=>Number.isFinite(row.elapsedMs)));
+  assert.doesNotMatch(JSON.stringify(warnings),/hidden|fixture-anymodel-key/i);
+});
+
+test('Gemini rejects failed termination and malformed native response parts',async()=>{
+  const env={LLM_BACKEND:'gemini',LLM_API_KEY:'fixture'};
+  const call=async(finishReason,parts)=>geminiCall(env,[],[],'auto',async()=>Response.json({
+    candidates:[{finishReason,content:{parts}}],
+  }));
+  for(const [reason,parts] of [
+    ['MALFORMED_FUNCTION_CALL',[{text:'Обрыв ответа.'}]],
+    ['STOP',[{text:{value:'not a string'}}]],
+    ['STOP',[null]],
+    ['STOP',[{functionCall:{name:'read',args:'not an object'}}]],
+  ]) await assert.rejects(call(reason,parts),{invalidModelResponse:true,modelCode:'invalid_response'});
+  const limited=await call('MAX_TOKENS',[{text:'Этот кусок не завершён.'}]);
+  assert.equal(limited.finishReason,'length');
+  assert.equal(completeModelText(limited),'');
 });

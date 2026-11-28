@@ -217,3 +217,22 @@ test('natural opt-out wins over a pasted URL and the internet toggle',async()=>{
    assert.equal(await externalAnswer({}, {},{question,webSearch:true},{},()=>assert.fail('unexpected request'),'job',false),undefined);
  }
 });
+
+test('source synthesis saves partial results for cut text and provider errors in web chat', async t => {
+  const store=workspace(t), model={...env,LLM_BASE_URL:'http://localhost:9123/v1',LLM_MODEL:'fixture'};
+  for(const variant of ['length','503']){
+    const thread=createThread(store.db,user,'Поиск '+variant);
+    let calls=0;
+    enqueue(store,user,{thread,question:'выставки в Казани',webSearch:true});
+    await workJobs(store,{publicUser:()=>user},model,async()=>{
+      if(++calls===1)return yandex(result);
+      return variant==='503' ? new Response(null,{status:503}) :
+        Response.json({choices:[{finish_reason:'length',message:{content:'Выставка открыта [1], кроме'}}]});
+    });
+    const body=messages(store.db,user,thread).items.at(-1).body;
+    assert.equal(body.outcome,'partial',variant);
+    assert.equal(body.canResume,true,variant);
+    assert.doesNotMatch(body.text,/кроме/u);
+    assert.equal(body.readSources[0].url,'https://museum.example/exhibition');
+  }
+});

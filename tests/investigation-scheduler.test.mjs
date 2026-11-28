@@ -4,6 +4,7 @@ import { setImmediate as nextTurn } from 'node:timers/promises';
 import { openStore } from '../server/store.mjs';
 import { initEvidence } from '../server/evidence.mjs';
 import { createInvestigationScheduler } from '../server/investigation-scheduler.mjs';
+import { saveResearchSettings } from '../server/investigation-settings.mjs';
 import { syncInvestigations, createAlternative, readInvestigations } from '../server/case-investigations.mjs';
 
 const env={LLM_BASE_URL:'https://fixture.invalid',LLM_MODEL:'fixture',LLM_DATA_MODE:'analysis'};
@@ -90,4 +91,52 @@ test('new arrivals join behind a case already waiting for its second role', asyn
   x.held.shift().resolve();
   await until(()=>x.starts.length===3);
   assert.equal(x.starts[2][0],'arrival');
+});
+
+test('superseded role aborts and releases its scheduler slot',async t=>{
+  for(const condition of ['superseded','expired']) await t.test(condition,async t=>{
+    const store=openStore(':memory:'),{db}=store;
+    initEvidence(db);
+    const user={id:'pm',role:'admin'};
+    saveResearchSettings(db,user,{scope:'team',mode:'lead'});
+    const add=id=>{
+      db.prepare('INSERT INTO cases VALUES(?,?,?,?,?)').run(id,id,id,'Исследуем',
+        JSON.stringify({signal:{status:'confirmed',revision:1}}));
+      syncInvestigations(db,id);
+    };
+    add('first');
+    const old=readInvestigations(db,user,'first').current;
+    const held=Promise.withResolvers(), started=Promise.withResolvers();
+    let now=10_000, oldSignal;
+    const scheduler=createInvestigationScheduler({spaces:new Map([['team',store]]),getLimit:()=>1,env,
+      options:{now:()=>now,leaseMs:1000,
+        capture(_db,run){return {calcId:'fixture-'+run.id,measurable:true,context:{},checks:[]};},
+        async execute({run,stage,signal}){
+          if(run.id===old.id){
+            oldSignal=signal;
+            started.resolve();
+            signal?.addEventListener('abort',()=>held.reject(signal.reason),{once:true});
+            await held.promise;
+            return {check:{role:'stale'},result:{stale:true}};
+          }
+          return {check:{role:stage},result:{current:true}};
+        },
+      }});
+    t.after(async()=>{held.resolve(); await scheduler.close(); store.close();});
+    scheduler.wake();
+    await started.promise;
+    if(condition==='superseded'){
+      db.prepare("UPDATE cases SET body=json_set(body,'$.signal.revision',2) WHERE id='first'").run();
+      syncInvestigations(db,'first');
+    }else{
+      now+=1001;
+      add('new');
+      syncInvestigations(db);
+    }
+    scheduler.wake();
+    await until(()=>readInvestigations(db,user,condition==='superseded'?'first':'new').current.status==='ready');
+    assert.equal(oldSignal?.aborted,true);
+    const previous=db.prepare('SELECT result FROM case_investigations WHERE id=?').get(old.id);
+    assert.equal(previous.result,null);
+  });
 });

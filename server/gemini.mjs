@@ -1,9 +1,10 @@
 import { checkModelTransport } from './data-profile.mjs';
-import {readModelResponse} from './model-response.mjs';
+import {invalidResponse,modelAbortFailure,modelHttpFailure,normalizeModelReply,readModelResponse} from './model-response.mjs';
 import {GoogleAuth} from 'google-auth-library';
 import {randomUUID} from 'node:crypto';
 
 const auth=new GoogleAuth({scopes:['https://www.googleapis.com/auth/cloud-platform']});
+const object=value=>value!==null && typeof value==='object' && !Array.isArray(value);
 export function geminiRequest(messages,tools,choice){
   const contents=[],systems=[],calls=new Map();
   for(const m of messages){
@@ -54,13 +55,44 @@ export async function geminiCall(env,messages,tools,choice,send,credentials=auth
   if(limits.maxTokens)request.generationConfig={maxOutputTokens:limits.maxTokens};
   const body=JSON.stringify(request);
   let res;
-  const signal=AbortSignal.timeout(limits.timeout ?? 60000);
-  try{res=await send(url,{method:'POST',headers,redirect:'error',signal,body});}
-  catch{throw Object.assign(Error('Не удалось связаться с Google Cloud.'),{retryable:true,timedOut:signal.aborted});}
-  if(!res.ok)throw Object.assign(Error('Google вернул HTTP '+res.status+'. '+({400:'Проверьте параметры модели и тип ключа.',401:'Проверьте аутентификацию.',403:developer?'Проверьте доступ ключа к Gemini API и модели.':'Проверьте биллинг, включение API и право aiplatform.endpoints.predict.',404:'Проверьте доступность ID модели.',429:'Исчерпана квота запросов.'}[res.status]||'Повторите запрос позже.')),{status:res.status});
-  const response=await readModelResponse(res,signal),parts=response?.candidates?.[0]?.content?.parts;
-  if(!parts?.length)throw Object.assign(Error('Gemini вернула пустой ответ.'),{invalidModelResponse:true});
+  const timeoutSignal = AbortSignal.timeout(limits.timeout ?? 60000);
+  const signal = limits.signal ? AbortSignal.any([timeoutSignal, limits.signal]) : timeoutSignal;
+  try {
+    signal.throwIfAborted();
+    res = await send(url, {method:'POST', headers, redirect:'error', signal, body});
+  } catch (error) {
+    throw modelAbortFailure(error, signal, limits.signal) ||
+      Object.assign(Error('Не удалось связаться с Google Cloud.'), {retryable:true});
+  }
+  if (!res.ok) {
+    const hint = {400:'Проверьте параметры модели и тип ключа.',401:'Проверьте аутентификацию.',
+      403:developer?'Проверьте доступ ключа к Gemini API и модели.':'Проверьте биллинг, включение API и право aiplatform.endpoints.predict.',
+      404:'Проверьте доступность ID модели.',429:'Исчерпана квота запросов.'}[res.status] || 'Повторите запрос позже.';
+    throw await modelHttpFailure(res, signal, limits.signal, 'Google вернул HTTP '+res.status+'. '+hint);
+  }
+  const response = await readModelResponse(res, signal, limits.signal);
+  const candidate = response?.candidates?.[0];
+  const nativeFinish = candidate?.finishReason;
+  const blocked = response?.promptFeedback?.blockReason ||
+    ['SAFETY','RECITATION','BLOCKLIST','PROHIBITED_CONTENT','SPII','IMAGE_SAFETY','IMAGE_PROHIBITED_CONTENT'].includes(nativeFinish);
+  const finishReason = blocked ? 'content_filter' : nativeFinish === 'STOP' ? 'stop' : nativeFinish === 'MAX_TOKENS' ? 'length' : null;
+  if (!finishReason && nativeFinish != null && nativeFinish !== 'FINISH_REASON_UNSPECIFIED')
+    throw invalidResponse('Gemini не завершил текст или вызов инструмента.');
+  const parts = candidate?.content?.parts ?? [];
+  if (!Array.isArray(parts) || parts.some(part=>!object(part) ||
+      (part.text != null && typeof part.text!=='string') ||
+      (part.functionCall != null && (!object(part.functionCall) ||
+        part.functionCall.args != null && !object(part.functionCall.args)))))
+    throw invalidResponse('Gemini вернул часть ответа в неизвестном формате.',finishReason);
+  const input = response?.usageMetadata?.promptTokenCount;
+  const total = response?.usageMetadata?.totalTokenCount;
   // Gemini may split a word across adjacent parts. Whitespace belongs to the text itself.
-  return {role:'assistant',usage:{input:response.usageMetadata?.promptTokenCount,output:response.usageMetadata?.totalTokenCount!=null?response.usageMetadata.totalTokenCount-(response.usageMetadata.promptTokenCount||0):undefined},content:parts.filter(p=>p.text&&!p.thought).map(p=>p.text).join(''),googleParts:parts,
-    tool_calls:parts.filter(p=>p.functionCall).map(p=>({id:p.functionCall.id||randomUUID(),type:'function',function:{name:p.functionCall.name,arguments:JSON.stringify(p.functionCall.args||{})}}))};
+  return normalizeModelReply({
+    role:'assistant',
+    content:parts.filter(p=>p.text&&!p.thought).map(p=>p.text).join(''),
+    tool_calls:parts.filter(p=>p.functionCall).map(p=>({
+      id:p.functionCall.id??randomUUID(), type:'function',
+      function:{name:p.functionCall.name,arguments:JSON.stringify(p.functionCall.args||{})},
+    })),
+  }, {finishReason, usage:{input,output:total!=null?total-(input||0):undefined}, googleParts:parts});
 }

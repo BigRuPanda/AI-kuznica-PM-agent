@@ -1,6 +1,7 @@
 import { normalizeObservation, observationWithin } from './metric-observations.mjs';
 import { explicitDates } from './day-comparison.mjs';
-import { apiConfigured, modelTimeout, providerCall } from './agent.mjs';
+import { apiConfigured, modelTimeout,legacyOutputLimit, providerCall } from './agent.mjs';
+import {completeModelText} from './model-response.mjs';
 
 const indexes = new WeakMap();
 const stop = new Set('как какой какова какая какие каких какого сколько чем что чего где когда почему ли бы на по от до за для при или из было были был была есть эту эти этом этой его нее еще после перед можно наши нашей раз раза назови укажи покажи основании данным данных источник источники согласно именно'.split(' '));
@@ -321,14 +322,17 @@ export async function archiveAnswer(store, question, evidence, env, send, job) {
     {role:'user',content:JSON.stringify({question,records:evidence.map(x=>x.text)})}];
   const start=Date.now();
   try {
-    const reply=await providerCall(env,messages,[],'auto',send,{timeout:modelTimeout(env,42_000),maxTokens:220});
+    const reply=await providerCall(env,messages,[],'auto',send,{timeout:modelTimeout(env,42_000),maxTokens:legacyOutputLimit(env,220),step:'archive-chat'});
     store.db.prepare('INSERT INTO costs(job,model,elapsed,input,output) VALUES(?,?,?,?,?)')
       .run(job,env.LLM_MODEL || 'configured',Date.now()-start,reply.usage?.input??null,reply.usage?.output??null);
-    const text=reply.content?.trim();
-    if(text) {
-      const numbers=s=>(s.replace(/(?<=\d)[ \u00a0\u202f](?=\d{3}(?!\d))/gu,'').match(/\d+/gu)||[]).map(Number);
-      const measured=new Set(numbers(evidence.map(x=>x.text).join('\n')));
-      if(numbers(text).every(n=>measured.has(n))) return {...result,text};
+    const text = completeModelText(reply);
+    if (text) {
+      const tokens = value => (value.replace(/(?<=\d)[ \u00a0\u202f](?=\d{3}(?!\d))/gu,'')
+        .match(/[a-z][a-z\d]*-\d+|\d{4}-\d{2}-\d{2}|[+-]?\d+(?:[.,]\d+)?%?/giu) || [])
+        .map(token=>token.toLowerCase().replace(',', '.'));
+      const rows = evidence.map(row=>new Set(tokens(row.text)));
+      const claims = text.split(/(?<=[.!?])\s+|\n+/u).map(tokens);
+      if (claims.every(claim=>!claim.length || rows.some(row=>claim.every(token=>row.has(token))))) return {...result,text};
     }
   } catch { /* Sources are usable even when the local model is busy. */ }
   return {...result,text:'Вот что удалось проверить по архиву.\n\n'+fallback(),outcome:'partial'};

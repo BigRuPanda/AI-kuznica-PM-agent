@@ -1,14 +1,22 @@
 import { listInvestigationWork, tryStartInvestigation } from './case-investigations.mjs';
 
 export function createInvestigationScheduler({spaces, getLimit, env, send=fetch, options={}}) {
-  const pending = new Set();
+  const pending = new Set(), active = new Map();
   let ring = [];
   let activeRoles=0, timer, closed=false;
 
   function start(store, item) {
-    const task = tryStartInvestigation(store,item,env,send,options);
+    let claim;
+    const controller = item.kind === 'role' ? new AbortController() : null;
+    const task = tryStartInvestigation(store,item,env,send,controller ? {
+      ...options, signal:controller.signal,
+      onRoleClaim(owned) { claim=owned; options.onRoleClaim?.(owned); },
+    } : options);
     if (!task) return false;
-    if (item.kind === 'role') activeRoles++;
+    if (controller) {
+      activeRoles++;
+      active.set(task,{store,controller,claim});
+    }
     pending.add(task);
     task.then(() => finish(true), () => {
       console.error('Не удалось обработать этап исследования');
@@ -16,7 +24,7 @@ export function createInvestigationScheduler({spaces, getLimit, env, send=fetch,
     });
     function finish(again) {
       pending.delete(task);
-      if (item.kind === 'role') activeRoles--;
+      if (active.delete(task)) activeRoles--;
       if (again) wake();
     }
     return true;
@@ -27,6 +35,11 @@ export function createInvestigationScheduler({spaces, getLimit, env, send=fetch,
     if (closed) return;
     const groups=new Map();
     const now=options.now?.() ?? Date.now();
+    for (const {store,controller,claim} of active.values()) {
+      const owned=store.db.prepare('SELECT lease,lease_until FROM case_investigation_role_state WHERE run_id=? AND role=?')
+        .get(claim.runId,claim.role);
+      if (owned?.lease !== claim.lease || owned.lease_until <= now) controller.abort();
+    }
     for (const [spaceId,store] of spaces) {
       for (const work of listInvestigationWork(store,env,now)) {
         if (work.kind === 'prepare') {
@@ -64,6 +77,7 @@ export function createInvestigationScheduler({spaces, getLimit, env, send=fetch,
   async function close() {
     closed=true;
     clearImmediate(timer);
+    for (const {controller} of active.values()) controller.abort();
     await Promise.allSettled([...pending]);
   }
   return {wake,close};

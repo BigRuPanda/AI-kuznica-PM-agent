@@ -517,3 +517,49 @@ test('Metrika paginates with sampling metadata', async () => {
   assert.equal(r.docs[0].facts.length, 2);
   assert.equal(r.samples[0].share, 0.8);
 });
+
+test('a slow conversation leaves another conversation free', async t => {
+  const store=openStore(':memory:');
+  t.after(()=>store.close());
+  initEvidence(store.db); initWorkbench(store.db);
+  const user={id:'reader',name:'Владелец',role:'member'};
+  const env={LLM_BACKEND:'anymodel',LLM_MODEL:'fixture',ANYMODEL_API_KEY:'offline',LLM_DATA_MODE:'analysis'};
+  const first=createThread(store.db,user,'Первая'), second=createThread(store.db,user,'Вторая');
+  const third=createThread(store.db,user,'Третья');
+  const ask=(thread,question)=>enqueue(store,user,{thread,question});
+  const a=ask(first,'Сверь первый набор данных.'), a2=ask(first,'Сверь второй набор данных.');
+  const b=ask(second,'Сверь независимый ряд.'), c=ask(third,'Сверь последний ряд.');
+  const reply=()=>Response.json({choices:[{message:{content:'Проверка готова.'}}]});
+  const heldA=Promise.withResolvers(), heldB=Promise.withResolvers();
+  const asked=[];
+  const accounts={publicUser:()=>user};
+  const work=()=>workJobs(store,accounts,env,async (_url,init)=>{
+    const request=JSON.parse(init.body);
+    const question=JSON.parse(request.messages.findLast(m=>m.role==='user').content).question;
+    asked.push(question);
+    if(question.includes('первый'))return heldA.promise;
+    if(question.includes('независимый'))return heldB.promise;
+    return reply();
+  });
+  const status=id=>store.one('SELECT status FROM jobs WHERE id=?',id).status;
+  const p1=work(), p2=work();
+  try {
+    await new Promise(resolve=>setImmediate(resolve));
+    assert.equal(status(a),'running');
+    assert.equal(status(a2),'queued');
+    assert.equal(status(b),'running');
+    await work();
+    assert.equal(status(c),'queued');
+    heldB.resolve(reply());
+    await p2;
+    await work();
+    assert.equal(status(c),'done');
+    assert.equal(status(a2),'queued');
+  } finally {
+    heldA.resolve(reply()); heldB.resolve(reply());
+    await Promise.allSettled([p1,p2]);
+  }
+  await work();
+  assert.equal(status(a2),'done');
+  assert.equal(asked.length,4);
+});

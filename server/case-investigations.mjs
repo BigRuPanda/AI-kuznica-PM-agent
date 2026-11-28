@@ -492,18 +492,22 @@ async function executeRole(store, job, env, send, options) {
   const {row,stage,ordinal,attempt,lease,leaseUntil,start,prior,capture,run} = job;
   const {now = Date.now, execute = runInvestigationStage} = options;
   const final = stage === stageOrder[row.mode].at(-1);
-  let output, usage, failure, providerDenied = false;
+  let output, usage, failure, providerDenied = false, retryAt = 0;
   try {
     // Keep a little time to record a timeout while this worker still owns the lease.
     const margin = Math.min(100, Math.max(1, Math.floor((leaseUntil - start) / 10)));
-    const candidate = await execute({env,send,stage,run,capture,prior,now,leaseDeadline:leaseUntil-margin});
+    const signal=options.signal;
+    signal?.throwIfAborted();
+    const candidate = await execute({env,send,stage,run,capture,prior,now,leaseDeadline:leaseUntil-margin,signal});
+    signal?.throwIfAborted();
     usage = candidate?.usage;
     if (!candidate?.check || (['lead','reviewer'].includes(stage) && !candidate.result))
       throw Object.assign(Error('Некорректный результат проверки.'), {invalidModelResponse:true});
     output = candidate;
   } catch (error) {
     usage ??= error?.usage;
-    providerDenied = [401,403,404].includes(error?.status);
+    providerDenied = [401,402,403,404].includes(error?.status);
+    retryAt = error?.retryAt || 0;
     failure = failureReason(error);
   }
   const {db} = store;
@@ -517,7 +521,7 @@ async function executeRole(store, job, env, send, options) {
     if (!owns) return null;
     const delay = providerDenied ? providerWait : Math.min(300_000,15_000 * 2 ** Math.min(attempt-1,5));
     db.prepare(`UPDATE case_investigation_role_state SET status=?,reason=?,next=?,lease=NULL,lease_until=0
-      WHERE run_id=? AND role=?`).run(output ? 'done' : 'retry',failure || null,output ? 0 : finished+delay,row.id,stage);
+      WHERE run_id=? AND role=?`).run(output ? 'done' : 'retry',failure || null,output ? 0 : Math.max(finished+delay,retryAt),row.id,stage);
     if (final && output)
       db.prepare("UPDATE case_investigations SET status='ready',reason=NULL,result=? WHERE id=?").run(JSON.stringify(output.result),row.id);
     else updateRunProgress(db,row.id);
@@ -538,7 +542,9 @@ export function tryStartInvestigation(store,work,env,send,options = {}) {
   });
   if (!job) return null;
   if (job.saved) return Promise.resolve(job.saved);
-  return work.kind === 'prepare' ? finishPreparation(store,job,env,send,options) : executeRole(store,job,env,send,options);
+  if (work.kind === 'prepare') return finishPreparation(store,job,env,send,options);
+  options.onRoleClaim?.({runId:work.runId,role:job.stage,lease:job.lease,leaseUntil:job.leaseUntil});
+  return executeRole(store,job,env,send,options);
 }
 
 export async function workInvestigation(store, env = process.env, send = fetch, options = {}) {

@@ -119,7 +119,15 @@ const writeCases=[
     'Добавь в заметки этого разбора вывод: нужна проверка разметки корзины.',
     'Запиши в текущий разбор, что команде нужна проверка разметки корзины.',
     'Сохрани в заметках разбора договорённость проверить разметку корзины.',
-  ],(x,t)=>{const notes=x.inspectCase().body.notes;assert.equal(notes.length,1);assert.match(notes[0].text,/разметк.{0,40}корзин/iu);},{allowedWrites:['append_case']}),
+  ],async(x,t)=>{
+    const replay=await x.ask(t.question,{requestId:'workspace-note-replay'});
+    assert.equal(replay.job,t.job);
+    assert.equal(x.one('SELECT count(*) n FROM jobs').n,1);
+    assert.deepEqual(replay.receipts,t.receipts);
+    const notes=x.inspectCase().body.notes;
+    assert.equal(notes.length,1);
+    assert.match(notes[0].text,/разметк.{0,40}корзин/iu);
+  },{allowedWrites:['append_case'],body:()=>({requestId:'workspace-note-replay'})}),
   scenario('personal-view',['set_view'],[
     'Оставь в моём личном виде только сводку и динамику, закрепи этот набор карточек.',
     'Измени мой личный экран: закрепи только две карточки, сводку и тренд.',
@@ -223,6 +231,20 @@ function verifyCTR(answer) {
   assert.doesNotMatch(text,/(?:однозначно|точно|доказанно)\s+(?:вызван|обусловлен)|(?:данные|падение|совпадение)\s+(?:доказыва[ею]т|устанавлива[ею]т)\s+причин/iu);
 }
 const conversationCases=[
+
+  scenario('private-case-report',[],[
+    'Сделай разбор выделенных периодов. Назови значения индекса Kaspersky в первом и втором периоде и дай вывод в чате.',
+    'Собери короткий разбор двух выделений на графике Kaspersky. Сравни индекс заказов между ними и объясни, что видно.',
+    'Подготовь вывод по двум отмеченным участкам Kaspersky. Укажи индекс заказов на каждом и направление изменения.',
+  ],(x,t)=>{
+    assert.equal(t.answer.outcome,'done');
+    assert.equal(t.answer.caseId,x.caseId);
+    assert.ok(t.answer.rangeId,'Ожидалась ссылка на исходное выделение');
+    texts(t.answer,/100/u,/70/u);
+    assert.equal(x.inspectCase().body.notes?.length || 0,0);
+    assert.equal(x.one('SELECT count(*) n FROM draft_actions').n,0);
+    assert.equal(x.one('SELECT count(*) n FROM personal_views').n,0);
+  },{body:x=>({selection:{...x.selection,series:['Kaspersky']}})}),
   scenario('ctr-causality',[],compareCTR,(x,t)=>verifyCTR(t.answer),{body:ctrSelection}),
   scenario('ctr-draft-followup',['draft'],[
     'Подготовь по этому выводу один черновик задачи для QA с планом проверки причин. Оставь его на моё подтверждение.',

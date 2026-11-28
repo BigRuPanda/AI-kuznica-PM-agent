@@ -21,6 +21,9 @@ import {
   digest,
 } from './evidence.mjs';
 import { apiConfigured, providerCall } from './agent.mjs';
+import { chatWriteRequests } from './chat-write-intent.mjs';
+
+export const chatJobLimit = 2;
 import {
   chatPresentationRecovery, chatPresentationStatus, initPresentations, lostPresentationNotice,
   queueChatPresentation, requestsPresentation,
@@ -357,9 +360,14 @@ function snapshotControl(view, preference) {
   return view.summary?.[1]?.product ?? (preference === false ? false : undefined);
 }
 
-export function enqueue(store, user, b, { telegramReply } = {}) {
-  const q = String(b.question || '').trim();
+export function chatQuestion(value) {
+  const q = String(value || '').trim();
   if (!q || q.length > 2400) throw Error('Введите вопрос до 2400 символов');
+  return q;
+}
+
+export function enqueue(store, user, b, { telegramReply } = {}) {
+  const q = chatQuestion(b.question);
   if (b.caseId) visibleCase(store.db, user, b.caseId);
   return store.tx(() => {
     const t = thread(store.db, user, b.thread);
@@ -511,7 +519,9 @@ export function messages(db, user, id) {
           const job = db.prepare('SELECT status FROM jobs WHERE id=? AND user=?').get(body.jobId,user.id);
           if (job) {
             body.resuming = ['queued','running'].includes(job.status) || undefined;
-            body.canResume = !body.retryExhausted && !body.resuming;
+            const wait = Math.max(0, (body.retryAt || 0) - Date.now());
+            body.canResume = !body.retryExhausted && !body.resuming && !wait;
+            if (wait) body.text += '\nПовтор доступен через ' + Math.ceil(wait/1000) + ' с.';
           } else body.canResume = false;
         }
         if (x.role === 'assistant' && !body.materials) {
@@ -1082,7 +1092,7 @@ function completeMaterials(store, user, job, b, result) {
       text: 'Для запрошенного графика пока нет сохранённого расчёта. Уточните метрику или выберите участок с наблюдениями.',
       outcome: 'partial',
     };
-  } else if (draftClaim && !result.actions?.some((a) => a.op === 'draft')) {
+  } else if (draftClaim && !Array.isArray(result.actions)) {
     result = {
       ...result,
       text: 'Черновик пока не сохранён. Можно продолжить поручение или подготовить его в разделе «Решение по задаче».',
@@ -1129,7 +1139,7 @@ function completeMaterials(store, user, job, b, result) {
       children.set(chart.id, chart);
     }
     materials = [chart];
-    if (successful) text = briefConclusion(text, r?.findings || []);
+    if (successful && !result.rangeId) text = briefConclusion(text, r?.findings || []);
   }
   if (intent.report && (children.size || r?.sections.length) && !result.actions?.length) {
     const summary = successful ? briefConclusion(text, r?.findings || []) : text;
@@ -1172,6 +1182,7 @@ export function resumeJob(db, user, id) {
   const repair = recovery?.action === 'repair';
   if (!['failed','partial'].includes(j.status) && !(j.status === 'done' && repair)) return { id };
   if (previous?.retryExhausted && !repair) throw Error('Для следующей попытки уточните вопрос.');
+  if (previous?.retryAt > Date.now()) throw Error('Повтор пока недоступен. Дождитесь окончания ограничения провайдера.');
   if (repair) queueChatPresentation(db,user,recovery.caseId,id,{rebuild:true,previousId:previous?.presentationId});
   const row = db.prepare('SELECT body FROM agent_turns WHERE job=?').get(id);
   if (row) {
@@ -1192,14 +1203,28 @@ export function resumeJob(db, user, id) {
   return { id };
 }
 
+function claimChatJob(store) {
+  const db=store.db;
+  return store.tx(() => {
+    const running=db.prepare("SELECT thread,body FROM jobs WHERE status='running'").all();
+    if (running.length >= chatJobLimit) return null;
+    const isWriting = job => chatWriteRequests(JSON.parse(job.body).question || '').length > 0;
+    const writing = running.some(isWriting);
+    const unavailable = new Set(running.map(job=>job.thread));
+    for (const job of db.prepare("SELECT * FROM jobs WHERE status='queued' ORDER BY created,rowid").all()) {
+      if (unavailable.has(job.thread)) continue;
+      unavailable.add(job.thread);
+      if (writing && isWriting(job)) continue;
+      db.prepare("UPDATE jobs SET status='running' WHERE id=? AND status='queued'").run(job.id);
+      return job;
+    }
+    return null;
+  });
+}
+
 export async function workJobs(store, accounts, env, send, pageOptions) {
-  const db = store.db,
-    job = db.prepare("SELECT * FROM jobs WHERE status='queued' ORDER BY created,rowid LIMIT 1").get();
-  if (
-    !job ||
-    !db.prepare("UPDATE jobs SET status='running' WHERE id=? AND status='queued'").run(job.id).changes
-  )
-    return;
+  const db=store.db, job=claimChatJob(store);
+  if (!job) return;
   const user = accounts.publicUser(job.user),
     b = JSON.parse(job.body);
   let result,

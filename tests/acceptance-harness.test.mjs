@@ -6,8 +6,8 @@ import { openWorkspace } from '../scripts/acceptance/workspace-fixture.mjs';
 
 const target = 'https://anymodel.org/v1/chat/completions';
 const toy = {type:'function',function:{name:'look',parameters:{type:'object',properties:{id:{type:'string'}},required:['id'],additionalProperties:false}}};
-const request = (choice='auto', messages=[]) => ({method:'POST',body:JSON.stringify({tools:[toy],tool_choice:choice,messages})});
-const wire = (args, id='x') => Response.json({choices:[{message:{role:'assistant',tool_calls:[{id,type:'function',function:{name:'look',arguments:args}}]},finish_reason:'tool_calls'}],usage:{prompt_tokens:19,completion_tokens:3}});
+const request = (choice='auto', messages=[]) => ({method:'POST',body:JSON.stringify({tools:[toy],tool_choice:choice,messages,max_tokens:4096})});
+const wire = (args, id='x') => Response.json({choices:[{message:{role:'assistant',tool_calls:[{id,type:'function',function:{name:'look',arguments:args}}]},finish_reason:'tool_calls'}],usage:{prompt_tokens:19,completion_tokens:3,completion_tokens_details:{reasoning_tokens:2}}});
 const spec = (run, overrides={}) => ({id:'a',family:'workspace',prompts:['one','two','three'],tools:['look'],run,...overrides});
 const run = (entry, replies) => runAttempt(entry,1,{},async()=>replies.shift());
 
@@ -41,7 +41,9 @@ test('natural selection includes observed schemas, call IDs, usage and validated
   assert.deepEqual(r.selected,['look']);
   assert.equal(r.calls[0].tools[0].id,'x');
   assert.equal(r.calls[0].tools[0].valid,true);
-  assert.equal(r.calls[0].usage.input,19);
+  assert.equal(r.calls[0].maxOutputTokens,4096);
+  assert.deepEqual(r.calls[0].usage,{input:19,output:3,reasoning:2});
+  assert.equal(r.calls[0].finish,'tool_calls');
   assert.deepEqual(coverage([entry],[r]).families.workspace.verified,[]);
   assert.deepEqual(coverage([entry],[r,{...r,attempt:2},{...r,attempt:3}]).families.workspace.verified,['look']);
 });
@@ -79,8 +81,8 @@ test('guard blocks all external destinations before transport, even when app cat
   assert.match(r.firstMismatch,/destination/i);
 });
 
-test('combined reports reject overlaps, omitted attempts, changed fingerprints and retain the first failure',async()=>{
-  const entry=spec(async({send})=>{await send(target,request());});
+test('combined reports accept required submissions and reject overlaps, omissions and changed fingerprints',async()=>{
+  const entry=spec(async({send})=>{await send(target,request());},{tools:[],requiredTools:['look']});
   const rows=[];
   for (const a of [1,2,3]) rows.push(await runAttempt(entry,a,{},async()=>wire(a===1?'{}':'{"id":"a"}')));
   const report={runId:'initial',head:'head',model:'model',productionFingerprint:'code',runtimeDiffSha256:'diff',status:'failed'};
@@ -119,6 +121,62 @@ test('all workspace prompt variants reach the intended entry point and account f
       assert.ok(row.calls[0].advertised.length>0,row.id);
     }
   }
+
+  const followup=workspaceCases.find(s=>s.id==='workspace-ctr-draft-followup');
+  const direct={...followup,run:async({question,env,send})=>{
+    const x=await followup.fixture(env,send);
+    try { await x.ask(question); } finally { x.close(); }
+  }};
+  for(const attempt of [1,2,3]){
+    const row=await runAttempt(direct,attempt,env,async()=>new Response(null,{status:401}));
+    assert.ok(row.exposed.includes('draft'),row.id+' #'+attempt);
+    row.exposed.forEach(name=>advertised.add(name));
+  }
   assert.equal(local,9);
   assert.deepEqual([...advertised].sort(),[...planned].sort());
+});
+
+test('private case report exercises the pinned chart and forbids unintended writes',async()=>{
+  const scenario=workspaceCases.find(item=>item.id==='workspace-private-case-report');
+  assert.ok(scenario);
+  assert.equal(new Set(scenario.prompts).size,3);
+  const env={LLM_BACKEND:'anymodel',LLM_MODEL:'fixture',ANYMODEL_API_KEY:'offline',LLM_DATA_MODE:'analysis'};
+  for(const attempt of [1,2,3]){
+    const result=await runAttempt(scenario,attempt,env,async(_url,init)=>{
+      const request=JSON.parse(init.body);
+      assert.ok(!request.tools.some(tool=>tool.function.name==='append_case'));
+      const conclusion='На первом выделении индекс 100, на втором 70. Индекс снизился.';
+      const content=attempt===2 ? '**Разбор двух выделений на графике заказов Kaspersky**\n\n'+conclusion : conclusion;
+      return Response.json({choices:[{message:{content}}]});
+    });
+    assert.equal(result.status,'passed',result.firstMismatch);
+    assert.equal(result.receipt.turns[0].outcome,'done');
+  }
+});
+
+test('each explicit note request keeps one receipt across request replay',async()=>{
+  const scenario=workspaceCases.find(item=>item.id==='workspace-note');
+  const env={LLM_BACKEND:'anymodel',LLM_MODEL:'fixture',ANYMODEL_API_KEY:'offline',LLM_DATA_MODE:'analysis'};
+  for(const attempt of [1,2,3]){
+    let modelCalls=0;
+    const result=await runAttempt(scenario,attempt,env,async(_url,init)=>{
+      const request=JSON.parse(init.body);
+      modelCalls++;
+      if(modelCalls===1){
+        assert.ok(request.tools.some(tool=>tool.function.name==='append_case'));
+        const {context}=JSON.parse(request.messages.at(-1).content);
+        return Response.json({choices:[{finish_reason:'tool_calls',message:{tool_calls:[{
+          id:'note',type:'function',function:{name:'append_case',arguments:JSON.stringify({
+            caseId:context.caseId,note:'Нужна проверка разметки корзины.'
+          })}
+        }]}}]});
+      }
+      assert.equal(modelCalls,2);
+      return Response.json({choices:[{message:{content:'Заметка сохранена.'}}]});
+    });
+    assert.equal(result.status,'passed',result.firstMismatch);
+    assert.equal(modelCalls,2);
+    assert.equal(result.receipt.turns.length,2);
+    assert.deepEqual(result.receipt.turns[0],result.receipt.turns[1]);
+  }
 });

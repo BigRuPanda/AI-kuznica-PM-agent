@@ -16,7 +16,7 @@ import { pack } from '../server/import.mjs';
 import { digest, facts, importDocs } from '../server/evidence.mjs';
 import { openReleaseCase } from '../server/release-cases.mjs';
 import { saveMetricRule } from '../server/metric-rules.mjs';
-import { addUserMessage, enqueue, initWorkbench, openCaseThread, openReleaseThread, saveReleaseDecisionContext, workJobs } from '../server/workbench.mjs';
+import { addUserMessage, createThread, enqueue, initWorkbench, openCaseThread, openReleaseThread, saveReleaseDecisionContext, workJobs } from '../server/workbench.mjs';
 import { workPresentations } from '../server/presentations.mjs';
 import { workspaceOperation } from '../server/workspace-operations.mjs';
 import { readMaterial, saveMaterial } from '../server/materials.mjs';
@@ -3006,4 +3006,29 @@ test('Softline workspace, upgrade and browser journeys', async t => {
     assert.deepEqual(await cardOrder(),defaults);
   });
   assert.deepEqual(errors,[]);
+});
+
+test('queued conversation shows waiting separately from a running reply',async t=>{
+  const dir=await mkdtemp(join(tmpdir(),'queued-chat-fixture-'));
+  const app=createTeamApp({base:join(dir,'release.sqlite'),env:fixtureEnv,background:false});
+  let browser;
+  t.after(async()=>{
+    await browser?.close();
+    await app.close();
+    await rm(dir,{recursive:true,force:true,maxRetries:3});
+  });
+  const {user,token}=await app.accounts.register({name:'Проверка очереди',login:'queue-fixture',
+    password:'fixture-password',code:fixtureEnv.ADMIN_INVITE_KEY},fixtureEnv);
+  const store=app.space('team'), thread=createThread(store.db,user,'Очередь');
+  const job=enqueue(store,user,{thread,question:'Сверь показатели.'});
+  await new Promise((resolve,reject)=>app.server.once('error',reject).listen(0,'127.0.0.1',resolve));
+  const base='http://127.0.0.1:'+app.server.address().port;
+  browser=await launchBrowser();
+  const session=await browser.newContext({locale:'ru-RU',viewport:{width:1440,height:900}});
+  await session.addCookies([{name:'pm_session',value:token,url:base}]);
+  const page=await session.newPage();
+  await page.goto(base+'/#chats/'+thread);
+  await page.getByRole('status').filter({hasText:'В очереди'}).waitFor({timeout:5000});
+  store.db.prepare("UPDATE jobs SET status='running' WHERE id=?").run(job);
+  await page.getByRole('status').filter({hasText:'Помощник отвечает'}).waitFor({timeout:5000});
 });

@@ -282,3 +282,104 @@ test('malformed provider tool calls are reported as an invalid model response',a
     assert.equal(requests,1,'malformed calls cannot be paired with correction messages');
   }
 });
+
+test('Qwen lead and reviewer assemble validated parts from inspected evidence', async t=>{
+  const qwen={LLM_BACKEND:'anymodel',LLM_MODEL:'qwen/qwen3.8-27b',ANYMODEL_API_KEY:'fixture',LLM_DATA_MODE:'analysis'};
+  const capture={calcId:'frozen',period:{label:'fixture'},summary:'Точный расчёт.',
+    context:{findings:[{id:'f1',kind:'calculation',label:'Снимок расчёта',text:'Данные проверки.'}]}};
+  const replies={
+    read_findings:{ids:['f1']}, search_findings:{query:'Снимок'},
+    submit_check:{question:'Что известно?',result:'Расчёт проверен.',impact:'Нужна проверка.',findingIds:['f1']},
+    submit_assessment:{summary:'Причину ещё нужно проверить.',
+      hypotheses:[{title:'Гипотеза',for:[{id:'f1',text:'Данные расчёта.'}],against:[],test:'Сверить период.'}]},
+    submit_plan:{action:'Проверить.',plan:'Сверить источник.',outcomes:['Выполнить проверку.']},
+  };
+  for (const stage of ['analyst','researcher','lead','reviewer']) await t.test(stage,async()=>{
+    const decisionStage=['lead','reviewer'].includes(stage);
+    const requests=[], names=['read_findings','search_findings','submit_check',...(decisionStage?['submit_assessment','submit_plan']:[])];
+    const send=async(_url,init)=>{
+      requests.push(JSON.parse(init.body));
+      const name=names[requests.length-1];
+      return response([call(name,replies[name])]);
+    };
+    const prior=stage==='reviewer' ? [{check:{role:'lead',result:'Краткая оценка. '.repeat(70),impact:'Значение для решения.',
+      sources:[{findingId:'f1',url:'https://example.invalid/raw-source-link'}]},result:{
+      summary:'Точный расчёт.\n\nРешение ведущего.', action:'Проверить гипотезу.',
+      hypotheses:[{title:'Гипотеза',test:'Сверка данных. '.repeat(36),
+        sourceRefs:{for:[{findingId:'f1',url:'https://example.invalid/raw-source-link'}],against:[]}}],
+    }}] : [];
+    const out=await runInvestigationStage({env:qwen,stage,run:{question:'Почему?'},capture,send,prior});
+    assert.equal(out.check.role,stage);
+    assert.equal(out.check.sources[0].findingId,'f1');
+    assert.deepEqual(requests[0].tools.map(t=>t.function.name),['read_findings']);
+    assert.ok(requests[1].tools.some(t=>t.function.name==='search_findings'));
+    assert.deepEqual(requests[2].tools.map(t=>t.function.name),['submit_check']);
+    if(stage==='analyst'){
+      const payload=JSON.parse(requests[2].messages.at(-1).content);
+      assert.equal(payload.investigationQuestion,'Почему?');
+      assert.match(payload.question,/сохранённ.*контрол/iu);
+    }
+    assert.equal(requests[2].tool_choice,'required');
+    if(decisionStage){
+      assert.equal(out.result.hypotheses[0].sourceRefs.for[0].findingId,'f1');
+      assert.deepEqual(requests.slice(3).map(r=>r.tools.map(t=>t.function.name)),[['submit_assessment'],['submit_plan']]);
+      assert.deepEqual(requests.slice(3).map(r=>r.max_tokens),[8192,4096]);
+      const assessment=requests[3].tools[0].function.parameters.properties.hypotheses.items.properties;
+      assert.deepEqual(assessment.for.items.properties.id.enum,['f1']);
+      assert.deepEqual(assessment.against.items.properties.id.enum,['f1']);
+      assert.deepEqual(Object.keys(requests[4].tools[0].function.parameters.properties),['action','plan','outcomes']);
+    }
+    if(prior.length){
+      assert.equal(JSON.parse(requests[0].messages.at(-1).content).prior,undefined);
+      const facts=JSON.parse(requests[2].messages.at(-1).content).prior[0];
+      assert.deepEqual(facts.facts,['f1']);
+      assert.equal(facts.decision.summary,'Решение ведущего.');
+      assert.deepEqual(facts.decision.hypotheses[0].sourcesFor,['f1']);
+      assert.ok(facts.result.length < prior[0].check.result.length);
+      assert.equal(JSON.stringify(requests).includes('raw-source-link'),false);
+    }
+    assert.equal(out.usage.calls,names.length);
+  });
+});
+
+test('Qwen investigation retries an interrupted reading response with the same inspected evidence', async () => {
+  const env={LLM_BACKEND:'anymodel',LLM_MODEL:'qwen/qwen3.8-27b',ANYMODEL_API_KEY:'fixture',LLM_DATA_MODE:'analysis'};
+  const capture={calcId:'frozen',period:{label:'fixture'},context:{findings:[
+    {id:'f1',kind:'calculation',label:'Расчёт',text:'Контроль сопоставим.'},
+  ]}};
+  const requests=[];
+  const send=async(_url,init)=>{
+    requests.push(JSON.parse(init.body));
+    if(requests.length===1)return response([call('read_findings',{ids:['f1']})]);
+    if(requests.length===2)return new Response(new ReadableStream({
+      start(controller){controller.error(new Error('fixture body interrupted'));},
+    }));
+    assert.equal(requests.length,3);
+    assert.deepEqual(requests[2].tools.map(t=>t.function.name),['submit_check']);
+    const facts=JSON.parse(requests[2].messages.at(-1).content).findings;
+    assert.deepEqual(facts.map(finding=>finding.id),['f1']);
+    return response([call('submit_check',{question:'Что сравнили?',result:'Контроль сопоставим.',
+      impact:'Есть основание для сравнения.',findingIds:['f1']})]);
+  };
+  const result=await runInvestigationStage({env,stage:'analyst',run:{question:'Проверь влияние релиза.'},capture,send});
+  assert.equal(result.check.sources[0].findingId,'f1');
+  assert.equal(requests.length,3);
+});
+
+test('Qwen retries a transient initial read before attempting to submit a stage result',async()=>{
+  const env={LLM_BACKEND:'anymodel',LLM_MODEL:'qwen/qwen3.8-27b',ANYMODEL_API_KEY:'fixture',LLM_DATA_MODE:'analysis'};
+  const capture={calcId:'frozen',period:{label:'fixture'},context:{findings:[
+    {id:'f1',kind:'calculation',label:'Сравнение',text:'Оба периода полные.'},
+  ]}};
+  const toolNames=[];
+  const send=async(_url,init)=>{
+    toolNames.push(JSON.parse(init.body).tools.map(tool=>tool.function.name));
+    if(toolNames.length===1)return new Response(null,{status:503});
+    if(toolNames.length===2)return response([call('read_findings',{ids:['f1']})]);
+    return response([call('submit_check',{question:'Результат?',result:'Оба периода полные.',
+      impact:'Сравнение доступно.',findingIds:['f1']})]);
+  };
+  const result=await runInvestigationStage({env,stage:'researcher',run:{question:'Проверь период.'},capture,send});
+  assert.equal(result.check.sources[0].findingId,'f1');
+  assert.deepEqual(toolNames,[['read_findings'],['read_findings'],['submit_check']]);
+});

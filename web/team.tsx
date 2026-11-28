@@ -377,6 +377,7 @@ function Chat({
   const { open: openMaterial, load: loadMaterial, listen } = useMaterials();
   const { hiddenDemoPage, visibleTrackerStep } = useTrackingVisibility();
   const [progress, setProgress] = useState<string[]>([]);
+  const [queued, setQueued] = useState(false);
   const [jobIssue, setJobIssue] = useState('');
   const [material, setMaterial] = useState<MaterialRef | null>(null);
   const [sharing, setSharing] = useState(false);
@@ -493,7 +494,7 @@ function Chat({
   const resultHandler = useRef(onResult);
   resultHandler.current = onResult;
   const refresh = useCallback(async () => {
-    return await post<{ items: Msg[]; jobs: { steps: string[]; issue?: string }[] }>('messages', {
+    return await post<{ items: Msg[]; jobs: { status: 'queued' | 'running'; steps: string[]; issue?: string }[] }>('messages', {
       thread: id,
     });
   }, [id]);
@@ -504,6 +505,7 @@ function Chat({
     const seen = new Map<number, string | undefined>();
     follow.current = true;
     setItems([]);
+    setQueued(false);
     setLoaded(false);
     setErr('');
     const read = async () => {
@@ -516,8 +518,10 @@ function Chat({
         work(!!data.jobs.length);
         setLoaded(true);
         setErr('');
-        setProgress(data.jobs.flatMap((j) => j.steps || []).filter(visibleTrackerStep));
-        setJobIssue(data.jobs.find((j) => j.issue)?.issue || '');
+        const active = data.jobs.filter(j=>j.status==='running');
+        setQueued(data.jobs.length > 0 && !active.length);
+        setProgress(active.flatMap(j=>j.steps || []).filter(visibleTrackerStep));
+        setJobIssue(active.find(j=>j.issue)?.issue || '');
         for (const m of data.items)
           if (m.role === 'assistant') {
             if (!initial && (!seen.has(m.seq) || seen.get(m.seq) !== m.body.outcome))
@@ -813,7 +817,8 @@ function Chat({
         {err && <p role="alert">{err}</p>}
         {running && (
           <p className="chat-typing" role="status">
-            <span aria-hidden="true"><i /><i /><i /></span> {jobIssue || (progress.length ? 'Выполнено · ' + [...new Set(progress.map(stepLabel))].join(' · ') : 'Помощник отвечает')}
+            {!queued && <span aria-hidden="true"><i /><i /><i /></span>} {queued ? 'В очереди' :
+              jobIssue || (progress.length ? 'Выполнено · ' + [...new Set(progress.map(stepLabel))].join(' · ') : 'Помощник отвечает')}
           </p>
         )}
         </div>

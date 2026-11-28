@@ -43,8 +43,10 @@ function releaseCase(id, tools, prompts, verify, { releaseId = 'R-001', metric =
           text: 'Сохранил расчёт доли оплат.', context, created: 1,
           refs: [{ id: prior.id, title: 'Доля оплат', op: prior.op }] });
       }
-      const reply = await makeAgent(store, { env, send }).ask({ ...context, question,
+      const agent = makeAgent(store, { env, send });
+      const reply = await agent.ask({ ...context, question,
         author: actor.name, requestId: 'acceptance' }, actor.name, actor.id);
+      await agent.waitForReviews();
       assert.ok(reply.text.trim());
       const calculations = reply.refs.map(({ id: calcId }) => store.getCalc(calcId));
       for (const calculation of calculations) {
@@ -248,12 +250,11 @@ const alternativePrompts = [
 ];
 
 function investigationCase(mode, { alternate = false, gap = false } = {}) {
-  const tools = [...new Set(stageOrder[mode].map(stage => stage === 'lead' ? 'submit_decision'
-    : stage === 'reviewer' ? 'submit_review' : 'submit_check'))];
-  if (alternate) tools.push('search_findings');
+  const tools = alternate ? ['search_findings'] : [];
+  const forcedTools = ['read_findings', 'submit_assessment', 'submit_plan', ...(gap ? ['submit_verification'] : [])];
   return {
     id: 'investigation-' + (alternate ? 'alternative-' : gap ? 'measurement-' : '') + mode,
-    family: 'investigation', tools, forcedTools: ['read_findings'],
+    family: 'investigation', tools, forcedTools, requiredTools:['submit_check'],
     prompts: alternate ? alternativePrompts : gap ? [
       'Проверь гипотезу о регистрации добавления в корзину Альфа. Предложи один прогон проверки действия и события.',
       'Сверь замечание про учёт корзины. Опиши, что проверить в интерфейсе и какое событие сверить в аналитике.',

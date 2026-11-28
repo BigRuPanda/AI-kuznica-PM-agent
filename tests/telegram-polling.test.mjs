@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import { contactAction } from '../server/notification-contacts.mjs';
+import { setting } from '../server/evidence.mjs';
 import { createTeamApp } from '../server/team-http.mjs';
 import { deliver, messages, workJobs } from '../server/workbench.mjs';
 
@@ -94,4 +95,50 @@ test('Telegram polling resumes from the saved offset and does not duplicate chat
     assert.equal(replies.some(reply => reply.chat_id === '-124'), false);
   });
   assert.deepEqual(unexpectedRequests, []);
+});
+
+test('Telegram advances past invalid input and retries storage failures',async t=>{
+  const dir=await mkdtemp(join(tmpdir(),'pm-telegram-recovery-'));
+  const env={ADMIN_INVITE_KEY:'local-admin',DATA_PROFILE:'configured',TELEGRAM_BOT_TOKEN:'fixture',
+    TELEGRAM_BOT_USERNAME:'fixture_bot',TELEGRAM_BIND_POLLING:'true',NOTIFICATIONS_ENABLED:'false'};
+  const polls=[], batches=[];
+  const send=async(url,init)=>{
+    const method=new URL(url).pathname.split('/').at(-1);
+    if(method==='getUpdates'){
+      polls.push(JSON.parse(init.body).offset);
+      return Response.json({ok:true,result:batches.shift() || []});
+    }
+    assert.equal(method,'sendMessage');
+    return Response.json({ok:true,result:{message_id:1}});
+  };
+  const app=createTeamApp({base:join(dir,'team.sqlite'),env,send,background:false});
+  t.after(async()=>{await app.close();await rm(dir,{recursive:true,force:true,maxRetries:3});});
+  const {user}=await app.accounts.register({login:'owner',name:'Owner',password:'fixture-password',code:env.ADMIN_INVITE_KEY},env);
+  const {command}=await contactAction('bind',{},user,app.accounts.db,env);
+  const update=(id,text)=>({update_id:id,message:{message_id:id,from:{id:57},chat:{id:57,type:'private'},text}});
+  const store=app.space('team'), db=store.db;
+  let now=Date.now();
+  t.mock.method(Date,'now',()=>now);
+  const poll=async batch=>{
+    batches.push(batch);
+    await app.tick();
+    for(let i=0;i<8;i++)await new Promise(resolve=>setImmediate(resolve));
+  };
+  const offset=()=>setting(db,'telegram_offset',0);
+  await poll([update(40,command)]);
+  assert.equal(offset(),41);
+  now+=5_001;
+  db.exec("CREATE TEMP TRIGGER fail_telegram_job BEFORE INSERT ON jobs BEGIN SELECT RAISE(ABORT,'fixture storage failure'); END");
+  const valid=update(42,'Какие есть сигналы?');
+  await poll([update(41,'a'.repeat(2401)),valid]);
+  assert.equal(offset(),42);
+  assert.equal(store.one('SELECT count(*) n FROM jobs').n,0);
+  db.exec('DROP TRIGGER fail_telegram_job');
+  now+=60_001;
+  await poll([valid,valid]);
+  assert.equal(offset(),43);
+  assert.deepEqual(polls,[0,41,42]);
+  assert.equal(store.one('SELECT count(*) n FROM jobs').n,1);
+  assert.deepEqual(messages(db,user,'tg-'+user.id).items.filter(m=>m.role==='user').map(m=>m.body.text),
+    ['Какие есть сигналы?']);
 });

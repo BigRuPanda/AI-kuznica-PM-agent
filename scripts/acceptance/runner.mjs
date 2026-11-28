@@ -6,6 +6,7 @@ import { AjvJsonSchemaValidator } from '@modelcontextprotocol/sdk/validation/ajv
 
 const endpoint = 'https://anymodel.org/v1/chat/completions';
 const sorted = values => [...new Set(values)].sort();
+const expectedTools = scenario => [...scenario.tools,...(scenario.requiredTools || [])];
 const validators = new Map();
 const ajv = new AjvJsonSchemaValidator();
 function validate(schema, input) {
@@ -46,7 +47,7 @@ export async function runAttempt(scenario, attempt, env, transport) {
     const tools = new Map((req.tools||[]).map(t=>[t.function.name,t.function.parameters]));
     const choice = req.tool_choice || 'auto';
     const forced = typeof choice === 'object' || choice === 'required' && tools.size === 1;
-    const call = {round:calls.length+1,advertised:[...tools.keys()],choice,tools:[],usage:{}};
+    const call = {round:calls.length+1,advertised:[...tools.keys()],choice,maxOutputTokens:req.max_tokens??null,tools:[],usage:{}};
     calls.push(call);
     for (const name of tools.keys()) exposed.add(name);
     if (scenario.local) problem('Expected local execution with zero model calls');
@@ -59,7 +60,7 @@ export async function runAttempt(scenario, attempt, env, transport) {
       if (msg.role==='tool' && !pending.delete(msg.tool_call_id)) problem('Unmatched tool result ID');
       const payload = parse(msg.content);
       if (msg.role === 'tool' && payload?.error) problem('Tool result error: '+payload.error);
-      if (msg.role === 'user' && payload?.correction ||
+      if (msg.role === 'user' && (payload?.correction || payload?.validationError) ||
           msg.role === 'system' && msg.content?.includes('Дай содержательный ответ на текущий вопрос'))
         problem('Internal correction');
     }
@@ -76,7 +77,8 @@ export async function runAttempt(scenario, attempt, env, transport) {
         const reply = data?.choices?.[0], message = reply?.message;
         call.responseText = typeof message?.content==='string' ? scrub(message.content,env) : null;
         call.finish = reply?.finish_reason;
-        call.usage = {input:data?.usage?.prompt_tokens??null,output:data?.usage?.completion_tokens??null};
+        call.usage = {input:data?.usage?.prompt_tokens??null,output:data?.usage?.completion_tokens??null,
+          reasoning:data?.usage?.completion_tokens_details?.reasoning_tokens??null};
         if (!message || !Array.isArray(message.tool_calls ?? []) ||
             (!message.tool_calls?.length && !message.content?.trim?.()))
           problem('Malformed or empty model response');
@@ -95,7 +97,7 @@ export async function runAttempt(scenario, attempt, env, transport) {
           call.tools.push({name,id,valid:!!valid,forced,arguments:evidenceValue(args,env),argumentKeys:Object.keys(args||{}),
             argumentHash:createHash('sha256').update(JSON.stringify(args??null)).digest('hex')});
           if (!forced && name) selected.add(name);
-          if (forced && !(scenario.forcedTools || []).includes(name))
+          if (forced && ![...(scenario.forcedTools || []),...(scenario.requiredTools || [])].includes(name))
             problem('Unexpected forced selection: '+name);
         }
       }
@@ -111,10 +113,12 @@ export async function runAttempt(scenario, attempt, env, transport) {
   catch (e) { if(e.receipt) receipt=e.receipt; problem(e.message || e); }
   if (!scenario.local && !calls.length) problem('Expected model execution, no model call');
   for (const name of scenario.tools) if (!selected.has(name)) problem('Missing natural tool selection: '+name);
+  for (const name of scenario.requiredTools || []) if (!calls.some(c=>c.tools.some(t=>t.name===name && t.valid)))
+    problem('Missing required submission: '+name);
   for (const name of scenario.forcedTools || []) if (!calls.some(c=>c.tools.some(t=>t.name===name && t.forced && t.valid)))
     problem('Missing required application-forced tool: '+name);
   return {id:scenario.id,family:scenario.family,attempt,question,status:mismatches.length?'failed':'passed',
-    expected:scenario.tools,expectedLocal:!!scenario.local,wallMs:Math.round(performance.now()-start),
+    expected:expectedTools(scenario),expectedLocal:!!scenario.local,wallMs:Math.round(performance.now()-start),
     exposed:sorted(exposed),selected:sorted(selected),calls,denied,receipt:evidenceValue(receipt,env),
     firstMismatch:mismatches[0]??null,mismatches};
 }
@@ -123,10 +127,10 @@ export function coverage(scenarios,results) {
   const families={};
   for (const family of sorted(scenarios.map(s=>s.family))) {
     const cases=scenarios.filter(s=>s.family===family), rows=results.filter(r=>r.family===family);
-    const expected=sorted(cases.flatMap(s=>s.tools)), bookkeeping=sorted(cases.flatMap(s=>s.forcedTools||[]));
+    const expected=sorted(cases.flatMap(expectedTools)), bookkeeping=sorted(cases.flatMap(s=>s.forcedTools||[]));
     const exposed=sorted(rows.flatMap(r=>r.exposed)), selected=sorted(rows.flatMap(r=>r.selected));
     const verified=sorted(cases.filter(s=>[1,2,3].every(attempt=>
-      rows.some(r=>r.id===s.id && r.attempt===attempt && r.status==='passed'))).flatMap(s=>s.tools));
+      rows.some(r=>r.id===s.id && r.attempt===attempt && r.status==='passed'))).flatMap(expectedTools));
     families[family]={expected,bookkeeping,exposed,selected,verified,
       unexpected:exposed.filter(n=>!expected.includes(n)&&!bookkeeping.includes(n)),
       missing:expected.filter(n=>!verified.includes(n))};
@@ -158,7 +162,7 @@ export function combineReports(scenarios, reports) {
   for (const report of reports) for (const row of report.results) {
     const scenario=cases.get(row.id), key=row.id+'#'+row.attempt;
     if (!scenario || ![1,2,3].includes(row.attempt) || scenario.prompts[row.attempt-1]!==row.question ||
-      JSON.stringify(scenario.tools)!==JSON.stringify(row.expected) || scenario.family!==row.family)
+      JSON.stringify(expectedTools(scenario))!==JSON.stringify(row.expected) || scenario.family!==row.family)
       throw Error('Scenario does not match the catalog: '+key);
     if (seen.has(key)) throw Error('Duplicate attempt: '+key);
     seen.add(key);

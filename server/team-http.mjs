@@ -38,6 +38,8 @@ import {
   openCaseThread,
   saveReleaseDecisionContext,
   readReleaseDecisionContext,
+  chatJobLimit,
+  chatQuestion,
   workJobs,
   deliver,
 } from './workbench.mjs';
@@ -81,7 +83,7 @@ export function createTeamApp({
     busy = new Set(),
     investigationSubscriptions = [],
     tracking = new Set(),
-    chatting = new Set(),
+    chatting = new Map(),
     presenting = new Set(),
     reconciledAt = new Map(),
     authAttempts = new Map();
@@ -160,14 +162,18 @@ export function createTeamApp({
       if (user?.space === 'team' && user.role !== 'judge' &&
           (!group || telegramGroupAllowed(env, chat)) &&
           (!group || msg.text.startsWith('/ask') || msg.reply_to_message?.from?.is_bot)) {
-        const thread = group ? 'tg-group-' + chat : 'tg-' + user.id;
-        db.prepare('INSERT OR IGNORE INTO conversations VALUES(?,?,?,?)').run(
-          thread, user.id, group ? 'group' : 'private', 'Telegram · ' + (group ? 'Команда' : user.name),
-        );
-        enqueue(store, user, {
-          question: msg.text.replace(/^\/ask(?:@\w+)?\s*/, '').trim() || 'Обзор',
-          thread, requestId: 'tg' + update.update_id,
-        }, { telegramReply: { chat, group } });
+        let question;
+        try {
+          question = chatQuestion(msg.text.replace(/^\/ask(?:@\w+)?\s*/, '').trim() || 'Обзор');
+        } catch { /* Invalid input is acknowledged below without creating a job. */ }
+        if (question) {
+          const thread = group ? 'tg-group-' + chat : 'tg-' + user.id;
+          db.prepare('INSERT OR IGNORE INTO conversations VALUES(?,?,?,?)').run(
+            thread, user.id, group ? 'group' : 'private', 'Telegram · ' + (group ? 'Команда' : user.name),
+          );
+          enqueue(store, user, {question, thread, requestId:'tg'+update.update_id},
+            {telegramReply:{chat,group}});
+        }
       }
     }
     db.prepare('INSERT OR IGNORE INTO known_updates VALUES(?)').run(update.update_id);
@@ -212,11 +218,15 @@ export function createTeamApp({
         }
         void Promise.allSettled(operations).finally(() => tracking.delete(id));
       }
-      if (!chatting.has(id)) {
-        chatting.add(id);
+      for (let active=chatting.get(id) || 0; active<chatJobLimit; active++) {
+        chatting.set(id, active+1);
         void workJobs(s, accounts, env, send)
           .catch(() => console.error('Не удалось обработать очередь чата'))
-          .finally(() => chatting.delete(id));
+          .finally(() => {
+            const remaining = chatting.get(id)-1;
+            if (remaining) chatting.set(id,remaining);
+            else chatting.delete(id);
+          });
       }
       if (!presenting.has(id)) {
         presenting.add(id);
@@ -692,6 +702,7 @@ export function createTeamApp({
     if (server.listening) await new Promise((r) => server.close(r));
     investigationSubscriptions.forEach(unsubscribe => unsubscribe());
     await investigations.close();
+    await Promise.all([...legacy.values()].map(app=>app.closeReviews()));
     while (busy.size || chatting.size || tracking.size || presenting.size) await new Promise((r) => setTimeout(r, 50));
     for (const s of spaces.values()) s.close();
     accounts.db.close();

@@ -79,10 +79,13 @@ export function updateRunProgress(db, id) {
 }
 
 export function failureReason(error) {
+  if (error?.modelCode === 'cancelled' || error?.name === 'AbortError') return 'Проверка была прервана.';
   if ([401,403,404].includes(error?.status)) return 'Провайдер отклонил подключение. Ожидаем доступа к модели.';
+  if (error?.status === 402) return 'Провайдер ограничил доступ. Проверьте состояние аккаунта и лимит ключа.';
   if (error?.status === 429) return 'Провайдер ограничил частоту запросов.';
   if (error?.timedOut || error?.name === 'TimeoutError') return 'Модель не успела ответить вовремя.';
   if (error?.status >= 500) return 'На стороне провайдера произошла ошибка.';
+  if (error?.modelCode === 'body_interrupted') return 'Соединение с провайдером прервалось при получении ответа.';
   if (error?.retryable) return 'Не удалось связаться с провайдером.';
   if (error instanceof InvestigationValidationError) return 'Ответ модели не прошёл проверку. ' + error.message;
   if (error?.invalidModelResponse || error instanceof SyntaxError) return 'Ответ модели не прошёл проверку.';

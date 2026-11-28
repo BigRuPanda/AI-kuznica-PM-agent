@@ -12,7 +12,7 @@ import {localData} from './data-profile.mjs';
 export function application(store,{env=liveModelEnv,send=fetch}={}){
   const mode=()=>localData(env)?'local':apiConfigured(env)?(env.LLM_BACKEND||'api'):env.LLM_BACKEND==='codex'?'codex':'offline';
   const agent=makeAgent(store,{env,send,alternate:codexTurn});
-  return createServer(async(req,res)=>{
+  const app=createServer(async(req,res)=>{
     const json=(status,body)=>{res.writeHead(status,{'Content-Type':'application/json; charset=utf-8','Cache-Control':'no-store'});res.end(JSON.stringify(body));};
     try{
       const url=new URL(req.url,'http://localhost'),p=url.pathname;
@@ -59,6 +59,9 @@ export function application(store,{env=liveModelEnv,send=fetch}={}){
       res.writeHead(200,{'Content-Type':mime+'; charset=utf-8','Cache-Control':'no-store','X-Content-Type-Options':'nosniff'});res.end(content);
     }catch(e){json(e.code==='ENOENT'?503:400,{error:e.code==='ENOENT'?'Сначала выполните pnpm build.':String(e.message).slice(0,1000)});}
   });
+  app.closeReviews=agent.closeReviews;
+  app.once('close',()=>{void app.closeReviews();});
+  return app;
 }
 if(process.argv[1]&&import.meta.url===pathToFileURL(process.argv[1]).href){
   const store=openStore(),port=Number(process.env.PORT||8090);

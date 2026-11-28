@@ -1,6 +1,10 @@
 import {archiveInquiry,archiveEvidence} from './archive-search.mjs';
 import { z } from 'zod/v4';
-import { modelTimeout, providerCall } from './agent.mjs';
+import { legacyOutputLimit, modelTimeout, providerCall } from './agent.mjs';
+import { normalizeModelReply } from './model-response.mjs';
+import { chatWriteCase, chatWriteRequests } from './chat-write-intent.mjs';
+import { withAiNotice } from './tracker-clients.mjs';
+import { preview as draftPreview } from './tracker-workflow.mjs';
 import { checkReleaseReferencePeriod, checkReleaseSourceVersions } from './release-chat-scope.mjs';
 import { observationWithin } from './metric-observations.mjs';
 import { operations, writes, workspaceOperation } from './workspace-operations.mjs';
@@ -82,31 +86,6 @@ function concise(name, r) {
     };
   return r;
 }
-const mutationRequests = {
-  page_draft: /опублик|созда|подготов|обнов|измен|добав|замен|publish|update|create|edit/i,
-  draft:
-    /измен|обнов|коммент|назнач|статус|приоритет|подготов|состав|заве[дс]|созда|оформи|сдела|запиш|отправ|черновик.{0,15}(?:нужен|для)|draft|create|prepare/i,
-  'create-case': /разбер|расслед|созда|заве[дс]|подготов|оформи|сохрани|черновик|create|investigate|prepare/i,
-  append_case: /дополни|добав|сохрани|запиш|append|save/i,
-  set_view: /добав|покаж|построй|убери|оставь|закреп|верни|измени|открой|show|plot|pin|add/i,
-  prepare_publish: /опублик|подел|публикац|для команды|отправ|publish|share/i,
-  feedback: /запомни|учти|исправ|отметь|сохрани|remember|correct/i,
-  watch: /наблюда|отсле[дж]|прослед|назнач|проверь через|monitor|watch/i,
-  decide: /закрой|заверши|поменяй статус|возобнов|close|reopen/i,
-};
-function authorizedWrite(op, question) {
-  if (/^(?:как |нужно ли|можно ли|стоит ли|что будет|умеешь ли|should |how )/iu.test(question.trim()))
-    return false;
-  if (/не (?:создавай|делай|заводи|оформляй)/i.test(question) && ['draft', 'create-case'].includes(op))
-    return false;
-  if (/не (?:публикуй|отправляй|рассылай)/i.test(question) && ['prepare_publish', 'page_draft'].includes(op))
-    return false;
-  if (op === 'draft' && /прочита|покаж|како|цитир|процит|что напис|назови|read|what/i.test(question) &&
-      /статус|комментар|закрыти|status|comment/i.test(question) &&
-      !/измени|поменяй|обнови|создай|добавь|оставь|напиши|подготовь|назначь|create|change|add|prepare/i.test(question))
-    return false;
-  return mutationRequests[op]?.test(question);
-}
 function note(state, op, r) {
   if (r.error) return;
   const refs=op==='release_decision' ?
@@ -174,6 +153,32 @@ function note(state, op, r) {
   if (op === 'set_view') state.personal = r;
   if (writes.has(op)) state.actions.push({ op, ...r });
 }
+const savedClaim = /(?:(?:заметк|план(?: наблюдения)?|черновик|предпросмотр|страниц|задач|разбор).{0,38}(?:сохран[её]н|создан|готов[аы]? к подтверждению|опубликован|назначен)|(?:сохранил|создал|опубликовал|назначил|добавил).{0,32}(?:заметк|наблюден|черновик|страниц|задач|разбор)|(?:подготовил[аи]?|оформил[аи]?).{0,28}(?:черновик|предпросмотр)|(?:черновик|предпросмотр).{0,38}подготовлен)/iu;
+
+const actionLabels = {
+  'create-case':'создать личный разбор', append_case:'добавить заметку', set_view:'изменить личный вид',
+  draft:'сохранить черновик задачи', page_draft:'сохранить предпросмотр страницы',
+  prepare_publish:'подготовить предпросмотр публикации', feedback:'сохранить поправку',
+  watch:'сохранить план наблюдения', decide:'изменить статус разбора',
+};
+
+function sameAction(action, op, receipt) {
+  const { op: recorded, ...body } = action;
+  if (recorded !== op || !receipt) return false;
+  return receipt.id ? body.id === receipt.id : JSON.stringify(body) === JSON.stringify(receipt);
+}
+
+function actionText(action) {
+  if (action.op === 'draft') return 'Сохранён черновик «' + action.title + '». Проверьте описание и подтвердите создание задачи.';
+  if (action.op === 'page_draft') return 'Предпросмотр страницы «' + action.title + '» готов к подтверждению.';
+  if (action.op === 'prepare_publish') return 'Предпросмотр публикации готов к подтверждению.';
+  if (action.op === 'append_case') return 'Заметка сохранена.';
+  if (action.op === 'watch') return 'План наблюдения сохранён.';
+  return 'Действие сохранено.';
+}
+
+const withoutClaims = text => text.split(/(?<=[.!?])\s+|\n+/u).filter(line=>!savedClaim.test(line));
+
 function artifactResult(state, text, warning) {
   const suggestions = [...new Map(state.suggestions.map((s) => [s.calc, s])).values()];
   return {
@@ -198,6 +203,61 @@ function artifactResult(state, text, warning) {
     steps: state.completed, readSources:state.readSources, closingQuotes: state.closingQuotes,
   };
 }
+function legacyIssuePreview(db, job, user, args, shared) {
+  const signature = digest(JSON.stringify(['draft',[args.caseId,args.key || '',args.rangeId || '']]));
+  const step = db.prepare('SELECT body FROM agent_steps WHERE job=? AND signature=?').get(job,signature);
+  const id = step ? JSON.parse(step.body).id : digest(job+'/'+signature);
+  if (!id) return null;
+  const row = db.prepare('SELECT * FROM draft_actions WHERE id=? AND user=? AND case_id=?')
+    .get(id,user.id,args.caseId);
+  if (!row) return null;
+  const draft = JSON.parse(row.body);
+  if (draft.kind !== 'issue' || (draft.key || '') !== (args.key || '') ||
+      draft.target?.service !== 'redmine' || shared && !draft.target.local || draft.report && !args.includeReport) return null;
+
+  const proposed = Object.fromEntries(['title','description','comment','assigneeId','statusId','trackerId','priorityId']
+    .filter(key => args[key] !== undefined).map(key => [key,args[key]]));
+  if (args.priority && !proposed.priorityId) proposed.priorityId = args.priority;
+  if (args.rangeId) {
+    const evidence = '\nДоказательство: #range/' + args.rangeId;
+    if (!args.key || proposed.description !== undefined) proposed.description = (proposed.description || '').slice(0,3800)+evidence;
+    else if (proposed.comment) proposed.comment = proposed.comment.slice(0,3800)+evidence;
+  }
+  const {origin, ...saved} = draft.changes || {};
+  if (!args.key || saved.description === withAiNotice(proposed.description)) {
+    proposed.description = withAiNotice(proposed.description);
+  }
+  if (JSON.stringify(Object.entries(saved).sort()) !== JSON.stringify(Object.entries(proposed).sort())) return null;
+  visibleCase(db,user,args.caseId);
+  return draftPreview(row);
+}
+
+// Keep complete tool/result pairs, plus the remaining calls of a valid pending batch.
+function invalidHistoryAt(messages, pending) {
+  for (let index = 0; index < messages.length; index++) {
+    const message = messages[index];
+    if (!message || message.role === 'tool') return index;
+    if (message.role !== 'assistant' || message.tool_calls == null) continue;
+    let calls;
+    try {
+      calls = normalizeModelReply(message).tool_calls;
+    } catch {
+      return index;
+    }
+    const remaining = new Map(calls.map(call => [call.id, call]));
+    let end = index + 1;
+    while (messages[end]?.role === 'tool') {
+      if (!remaining.delete(messages[end++].tool_call_id)) return index;
+    }
+    if (remaining.size) {
+      return end === messages.length && JSON.stringify([...remaining.values()]) === JSON.stringify(pending)
+        ? -1 : index;
+    }
+    index = end - 1;
+  }
+  return Array.isArray(pending) && !pending.length ? -1 : messages.length;
+}
+
 export async function runAssistant(
   store,
   user,
@@ -353,14 +413,33 @@ export async function runAssistant(
     };
     if(archive.length){note(state,'search',archive.flatMap(r=>r.refs));state.completed.push('search');}
     save(state);
+  } else {
+    const receipts = db.prepare('SELECT body FROM agent_steps WHERE job=? ORDER BY rowid').all(job)
+      .map(row=>JSON.parse(row.body));
+    state.actions = state.actions.filter(action=>receipts.some(receipt=>sameAction(action,action.op,receipt)));
+    const invalid = invalidHistoryAt(state.messages, state.pending);
+    if (invalid !== -1) {
+      state.messages.length = invalid;
+      state.pending = [];
+      state.messages.push({role:'user', content:JSON.stringify({
+        question:b.question,
+        recoveredSteps:receipts,
+      })});
+      save(state);
+    }
   }
-  const singleIssue = state.caseId && authorizedWrite('draft', b.question) &&
+  const requested = new Map(chatWriteRequests(b.question).map(({op,count})=>[op,count]));
+  const remainingWrites = op => (requested.get(op) || 0) - state.actions.filter(action=>action.op===op).length;
+  const singleIssue = state.caseId && requested.size === 1 && requested.get('draft') === 1 &&
     /^(?:подготовь|создай|заведи|оформи|составь).{0,50}(?:задач|заявк|тикет)/iu.test(b.question) &&
     !/существующ|статус|приоритет|комментар|исполнител|#[0-9]|№\s*\d|страниц|confluence|публикац|построй|график/iu.test(b.question);
+  const allowedTools = tools.filter(t => {
+    const op = opNames[t.function.name];
+    return !writes.has(op) || requested.has(op);
+  });
   const turnTools = singleIssue
-    ? tools.filter(t=>['draft','source_value','issue_search','search','view','knowledge_source','release_decision'].includes(t.function.name))
-    : tools;
-  const compact = state.compactRetry && !singleIssue && ![...writes].some(op=>authorizedWrite(op,b.question));
+    ? allowedTools.filter(t=>['draft','source_value','issue_search','search','view','knowledge_source','release_decision'].includes(t.function.name))
+    : allowedTools;
   const readTools = new Set(['overview','metrics','view','calc','search','source_value','knowledge_source','knowledge_sources']);
   if (state.anchorId || /график|период|воронк|динамик|участ/iu.test(b.question))
     for (const name of ['chart','range_read','selection_context','neighboring','funnel']) readTools.add(name);
@@ -369,9 +448,7 @@ export async function runAssistant(
   if (/страниц|confluence|документ/iu.test(b.question))
     for (const name of ['page_search','page_read']) readTools.add(name);
   if (/релиз|выкладк/iu.test(b.question)) readTools.add('release_decision');
-  const modelTools = compact ? turnTools.filter(t=>readTools.has(t.function.name)) : turnTools;
-  const promptStart = state.compactRetry ? state.messages.findIndex(m=>m.role==='user' && m.content?.startsWith('{"question":')) : -1;
-  const stop = (message, warning, outcome = 'done', retryExhausted = false) => {
+  const stop = (message, warning, outcome = 'done', retryExhausted = false, retryAt) => {
     const identifiers = [
       ...(state.rangeIds || []).map((id) => [id, 'выделенный участок']),
       [state.calc, 'сохранённый расчёт'],
@@ -388,6 +465,7 @@ export async function runAssistant(
     const result = artifactResult(state, message, warning);
     result.outcome = outcome;
     if (retryExhausted) result.retryExhausted = true;
+    if (retryAt > Date.now()) result.retryAt = retryAt;
     state.final = result;
     save(state);
     return result;
@@ -395,19 +473,38 @@ export async function runAssistant(
   const anyModelBudget = modelTimeout(env, null);
   const deadline = Date.now() + (anyModelBudget ?? 90_000);
   const stopAtDeadline = () => stop('Время разбора истекло. Уже выполненные шаги сохранены.', undefined, 'partial');
+  const startCompact = () => {
+    if (state.compactRetry || state.round >= 6 || Date.now() >= deadline) return false;
+    state.compactRetry = true;
+    state.providerRetried = true;
+    save(state);
+    return true;
+  };
   while (state.round < 6 || state.pending.length) {
     if (!state.pending.length) {
       const start = Date.now();
       let response;
       try {
         if (start >= deadline) return stopAtDeadline();
-        const messages = promptStart > 3 ? [state.messages[0],...state.messages.slice(promptStart-2)] : state.messages;
-        response = await providerCall(env, messages, modelTools, 'auto', send,
-          {timeout:deadline-start,...(state.compactRetry ? { maxTokens:160 } : {})});
+        const compact = Boolean(state.compactRetry);
+        const promptStart = compact ? state.messages.findIndex(m=>m.role==='user' && m.content?.startsWith('{"question":')) : -1;
+        const history = promptStart > 3 ? [state.messages[0],...state.messages.slice(promptStart-2)] : state.messages;
+        const messages = compact ? [{...history[0], content:history[0].content+
+          '\nДай краткий итог по уже полученным результатам. Используй только нужные проверки.'}, ...history.slice(1)] : history;
+        const available = turnTools.filter(tool => {
+          const op = opNames[tool.function.name];
+          if (writes.has(op)) return remainingWrites(op) > 0;
+          return !compact || singleIssue || readTools.has(tool.function.name);
+        });
+        response = await providerCall(env, messages, available, 'auto', send,
+          {timeout:deadline-start,maxTokens:compact ? legacyOutputLimit(env,160) : undefined,step:'workspace-chat.'+(state.round+1)});
         if (state.issues) delete state.issues.provider;
       } catch (e) {
         state.round++;
-        const transient = e.retryable || [429, 502, 503, 504].includes(e.status);
+        const shorten = ['body_interrupted','context_limit'].includes(e.modelCode);
+        if (shorten && startCompact()) continue;
+        const transient = !shorten && !(e.retryAt > Date.now()) &&
+          (e.retryable || [429, 502, 503, 504].includes(e.status));
         if (transient && !state.providerRetried && state.round < 6) {
           state.providerRetried = true;
           (state.issues ??= {}).provider = 'Модель временно недоступна. Повторяю запрос.';
@@ -420,9 +517,12 @@ export async function runAssistant(
         const measured = range && 'Локальный расчёт по выделению:\n' + rangeComparisonText(range);
         const repeatedTimeout = e.timedOut && state.compactRetry && state.lastTimeout===state.completed.length;
         if (e.timedOut) state.lastTimeout = state.completed.length;
+        const reason = e.modelCode === 'quota'
+          ? 'Провайдер ограничил доступ к модели. Проверьте состояние аккаунта и лимит ключа.'
+          : e.message;
         return stop(
           [
-            'Не удалось завершить поручение с помощью модели. ' + e.message,
+            'Не удалось завершить поручение с помощью модели. ' + reason,
             measured,
             state.completed.length ? 'Результаты выполненных шагов сохранены.' : null,
             repeatedTimeout ? 'Сокращённый запрос тоже превысил лимит времени. Укажите один показатель или одно действие в новом сообщении.' :
@@ -430,9 +530,10 @@ export async function runAssistant(
           ]
             .filter(Boolean)
             .join('\n'),
-          e.message,
+          reason,
           measured || state.completed.length || research?.children.length ? 'partial' : 'failed',
           repeatedTimeout,
+          e.retryAt,
         );
       }
       db.prepare('INSERT INTO costs(job,model,elapsed,input,output) VALUES(?,?,?,?,?)').run(
@@ -444,14 +545,28 @@ export async function runAssistant(
       );
       state.round++;
       if (anyModelBudget !== null && Date.now() >= deadline) return stopAtDeadline();
+      const incomplete = {
+        length: 'Модель исчерпала лимит генерации.',
+        refusal: 'Модель отклонила запрос.',
+        content_filter: 'Ответ модели остановлен фильтром.',
+      }[response.finishReason];
+      if (response.finishReason === 'length' && startCompact()) continue;
+      if (incomplete) {
+        const completed = state.completed.length || research?.children.length;
+        const artifact = completed ? 'Результаты выполненных шагов сохранены.' : '';
+        return stop([incomplete,artifact].filter(Boolean).join(' '), incomplete, completed ? 'partial' : 'failed');
+      }
       if (!response.tool_calls?.length) {
-        const result = response.content?.trim() || 'Уточните, какой результат нужно получить.';
-        const issues = Object.values(state.issues || {});
-        if (issues.length)
+        const text = response.content?.trim();
+        const result = text || 'Уточните, какой результат нужно получить.';
+        const checked = state.completed.length || state.anchorId;
+        const issues = Object.entries(state.issues || {}).filter(([op])=>!checked || !writes.has(op) || requested.has(op));
+        const warning = issues.length ? issues.map(([,message])=>message).join('\n') : undefined;
+        if (warning && (!text || !checked))
           return stop(
-            issues.join('\n') + (state.completed.length ? '\nРезультаты успешных проверок сохранены.' : ''),
+            warning + (checked ? '\nРезультаты успешных проверок сохранены.' : ''),
             undefined,
-            state.completed.length ? 'partial' : 'failed',
+            checked ? 'partial' : 'failed',
           );
         if (state.caseId && !state.completed.length && !userGreeting && greeting.test(result)) {
           if (state.round < 6 && !state.greetingRetried) {
@@ -463,18 +578,15 @@ export async function runAssistant(
           }
           return stop('Уточните, что оценить в разборе: вывод, данные или следующий шаг?');
         }
-        const draftRequested =
-          authorizedWrite('draft', b.question) && /задач|заявк|черновик|тикет/i.test(b.question);
+        const draftRequested = requested.has('draft');
+        const missingWrite = [...requested.keys()].find(op=>remainingWrites(op) > 0);
         // A plan in the draft describes future work. Keep any separate causal question in scope.
         const evidenceQuestion = draftRequested
           ? b.question.replace(/план(?:ом|а|е|у)?\s+(?:проверки|поиска|выяснения)\s+причин[а-яё]*/giu, '')
           : b.question;
         const causal = state.rangeIds.length && /почему|причин|опроверг/i.test(evidenceQuestion);
         const missing =
-          (draftRequested || /черновик.{0,25}(?:сохран[её]н|создан|подготовлен)/i.test(result)) &&
-          !state.actions.some((a) => a.op === 'draft')
-            ? 'draft'
-            : (intent.chart || /график (?:построен|готов)|построил[аи]? график/i.test(result)) &&
+          missingWrite || ((intent.chart || /график (?:построен|готов)|построил[аи]? график/i.test(result)) &&
                 !research?.requestedChart &&
                 !state.funnelChart &&
                 !state.chartMaterial &&
@@ -494,7 +606,7 @@ export async function runAssistant(
                       ['selection_context', 'search', 'view', 'funnel'].includes(x),
                     )
                   ? 'selection_context'
-                  : null;
+                  : null);
         if (missing && !(result.endsWith('?') && !/построен|сохран[её]н|проверил/i.test(result))) {
           if (state.round < 6 && !state.reminder) {
             state.reminder = true;
@@ -512,10 +624,13 @@ export async function runAssistant(
             save(state);
             continue;
           }
+          if (missingWrite) {
+            return stop([...withoutClaims(result),...state.actions.map(actionText),
+              'Осталось '+actionLabels[missingWrite]+'.'].filter(Boolean).join('\n'), warning, 'partial');
+          }
           return stop(
             'Поручение выполнено частично. Следующий шаг: ' +
               ({
-                draft: 'подготовить и сохранить черновик.',
                 chart: 'уточнить показатель и построить график.',
                 funnel: 'добавить данные этапов воронки.',
               }[missing] || 'проверить возможную причину по независимому свидетельству.'),
@@ -525,8 +640,15 @@ export async function runAssistant(
         }
         const draft = singleIssue && state.actions.find(action=>action.op==='draft' && action.state==='draft');
         if (draft) return stop('Сохранён черновик «' + draft.title + '». Проверьте описание и подтвердите создание задачи.');
-        return stop(result);
+        if (missingWrite) return stop(result,warning,'clarification');
+        if (savedClaim.test(result)) {
+          const receipts = state.actions.map(actionText);
+          return stop([...withoutClaims(result),...(receipts.length ? receipts : ['Для этого действия нет сохранённой квитанции.'])]
+            .join('\n'),warning,receipts.length ? 'done' : 'partial');
+        }
+        return stop(result, warning);
       }
+      state.deniedWriteOnly = true;
       state.messages.push({
         role: 'assistant',
         content: response.content || '',
@@ -540,7 +662,9 @@ export async function runAssistant(
       const call = state.pending[0],
         op = opNames[call.function.name];
       let value, signature;
+      let deniedWrite = writes.has(op) && !requested.has(op);
       try {
+        if (deniedWrite) throw Error('Для этой операции нужно явное поручение пользователя.');
         if (!op || singleIssue && !turnTools.some(t=>t.function.name===call.function.name))
           throw Error('Операция недоступна для этого поручения');
         let args = JSON.parse(call.function.arguments || '{}');
@@ -601,7 +725,10 @@ export async function runAssistant(
           if (releaseSnapshot && args.calc) checkReleaseReferencePeriod(readSnapshot(db,user,args.calc),scope);
           args.product ||= state.product;
         }
-        if (!args.caseId && operations[op][1].caseId && state.caseId) args.caseId = state.caseId;
+        if (operations[op][1].caseId) {
+          if (writes.has(op)) args.caseId = chatWriteCase(b.question, state.caseId, op);
+          else if (!args.caseId && state.caseId) args.caseId = state.caseId;
+        }
         if (['range_read', 'selection_context'].includes(op) && !args.id) args.id = state.rangeIds.at(-1);
         if (
           ['draft', 'prepare_publish'].includes(op) &&
@@ -620,8 +747,6 @@ export async function runAssistant(
               'Ключ существующей задачи должен быть найден в поиске. Для нового черновика опусти key и priority.',
             );
         }
-        if (writes.has(op) && !authorizedWrite(op, b.question))
-          throw Error('Для этой операции нужно явное поручение пользователя.');
         if (shared) {
           if (args.caseId && visibleCase(db, user, args.caseId).body.owner)
             throw Error('Личный разбор недоступен в группе');
@@ -633,20 +758,19 @@ export async function runAssistant(
           ].filter(Boolean))
             access(db, user, id, true);
         }
-        signature = digest(
-          JSON.stringify([
-            op,
-            op === 'draft' ? [args.caseId, args.key || '', args.rangeId || ''] : Object.entries(args).sort(),
-          ]),
-        );
-        const prior = db
-          .prepare('SELECT body FROM agent_steps WHERE job=? AND signature=?')
-          .get(job, signature);
+        signature = digest(JSON.stringify([op, Object.entries(args).sort()]));
+        const prior = db.prepare('SELECT body FROM agent_steps WHERE job=? AND signature=?').get(job,signature);
+        const legacy = !prior && op === 'draft' ? legacyIssuePreview(db,job,user,args,shared) : null;
         if (prior) {
           value = JSON.parse(prior.body);
+          if (writes.has(op) && !state.actions.some(action=>sameAction(action,op,value))) note(state,op,value);
         } else {
+          if (writes.has(op) && !legacy && remainingWrites(op) <= 0) {
+            deniedWrite = true;
+            throw Error('Запрошенное действие уже выполнено. Используйте сохранённую квитанцию.');
+          }
           let matches;
-          if (op === 'draft') {
+          if (op === 'draft' && !legacy) {
             const query = state.product || args.title,
               lookupKey = digest(JSON.stringify(['issue_search', [['query', query]]]));
             const saved = db
@@ -655,18 +779,16 @@ export async function runAssistant(
             if (saved) matches = JSON.parse(saved.body);
             else {
               matches = await workspaceOperation(store, user, 'issue_search', { query }, env, send, shared);
+              const searched = {...state, completed:[...state.completed,'issue_search']};
               store.tx(() => {
-                db.prepare('INSERT INTO agent_steps VALUES(?,?,?)').run(
-                  job,
-                  lookupKey,
-                  JSON.stringify(matches),
-                );
-                state.completed.push('issue_search');
-                save(state);
+                db.prepare('INSERT INTO agent_steps VALUES(?,?,?)').run(job, lookupKey, JSON.stringify(matches));
+                save(searched);
               });
+              state = searched;
             }
           }
           const execute = () => {
+            if (legacy) return legacy;
             if (op==='release_decision' && releaseSnapshot?.decision && args.releaseId===releaseSnapshot.releaseId &&
                 args.through===releaseSnapshot.through && (!args.product || args.product===releaseSnapshot.product))
               return releaseSnapshot.decision;
@@ -724,9 +846,10 @@ export async function runAssistant(
               args.product ||= state.product;
               if (!args.calc && args.product === state.product) args.calc = b.screen?.calc;
             }
-            return workspaceOperation(store, user, op, args, env, send, shared, digest(job + '/' + signature), true);
+            const value = workspaceOperation(store, user, op, args, env, send, shared, digest(job + '/' + signature), true);
+            return op === 'effect-preview' && value == null ? {available:false, reason:'План наблюдения ещё не задан.'} : value;
           };
-          const record = (r) => {
+          const record = (r, state) => {
             if (releaseSnapshot && ['search','source_value'].includes(op) && Array.isArray(r)) {
               const versions = {
                 releases:releaseSnapshot.releaseVersions, metrics:releaseSnapshot.metricVersions, sales:releaseSnapshot.salesVersions,
@@ -771,7 +894,7 @@ export async function runAssistant(
               r = { ...r, material };
             }
             if (op === 'range_compare') grant(db, r.id, 'thread', t.id);
-            note(state, op, r);
+            if (!legacy || !state.actions.some(action=>sameAction(action,op,r))) note(state, op, r);
             if (op === 'issue_read' && r.closingNote?.text &&
                 /комментар|цитат|цитир|процит|что напис|comment|quote/i.test(b.question)) {
               const quotes = state.closingQuotes ??= [];
@@ -784,12 +907,14 @@ export async function runAssistant(
             save(state);
             return reduced;
           };
+          const next = structuredClone(state);
           if (writes.has(op) && !['draft','page_draft'].includes(op)) {
-            value = store.tx(() => record(execute()));
+            value = store.tx(() => record(execute(), next));
           } else {
             const r = await execute();
-            value = store.tx(() => record(r));
+            value = store.tx(() => record(r, next));
           }
+          state = next;
         }
         if (op === 'funnel' && value?.available === false)
           (state.issues ??= {}).funnel =
@@ -809,14 +934,22 @@ export async function runAssistant(
           }[op] || 'выполнить запрошенную операцию';
         const issue = 'Не удалось ' + caption + '. ' + e.message;
         (state.issues ??= {})[op || 'tool'] = issue;
-        const key = op + ':' + e.message;
-        state.failures[key] = (state.failures[key] || 0) + 1;
-        if (state.failures[key] >= 2)
-          return stop(issue, undefined, state.completed.length ? 'partial' : 'failed');
+        if (!deniedWrite) {
+          const key = op + ':' + e.message;
+          state.failures[key] = (state.failures[key] || 0) + 1;
+          if (state.failures[key] >= 2)
+            return stop(issue, undefined, state.completed.length ? 'partial' : 'failed');
+        }
       }
       state.messages.push({ role: 'tool', tool_call_id: call.id, content: JSON.stringify(value) });
       state.pending.shift();
+      if (!deniedWrite) state.deniedWriteOnly = false;
+      const deniedOnly = !state.pending.length && state.deniedWriteOnly;
+      const repeatedDenial = deniedOnly && state.lastDeniedWriteRound === state.round - 1;
+      if (deniedOnly) state.lastDeniedWriteRound = state.round;
       save(state);
+      if (repeatedDenial)
+        return stop(Object.values(state.issues).join('\n'), undefined, state.completed.length ? 'partial' : 'failed');
     }
   }
   return stop(

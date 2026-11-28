@@ -1,6 +1,12 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { nonWorkspaceCases } from '../scripts/acceptance/cases-nonworkspace.mjs';
+import { openStore } from '../server/store.mjs';
+import { initEvidence } from '../server/evidence.mjs';
+import { initWorkbench } from '../server/workbench.mjs';
+import { publicAnswer } from '../server/source-chat.mjs';
+import { briefConversation } from '../server/chat-brief.mjs';
+import { archiveAnswer } from '../server/archive-search.mjs';
 
 const env = { DATA_PROFILE: 'configured', LLM_BACKEND: 'anymodel', LLM_MODEL: 'qwen/qwen3.8-27b',
   LLM_DATA_MODE: 'analysis', ANYMODEL_API_KEY: 'fixture' };
@@ -23,11 +29,11 @@ function scenario(id) {
 
 test('acceptance matrix covers release and investigation wire tools across independent prompts', () => {
   const declared = family => new Set(nonWorkspaceCases.filter(item => item.family === family)
-    .flatMap(item => [...item.tools, ...(item.forcedTools || [])]));
+    .flatMap(item => [...item.tools, ...(item.forcedTools || []), ...(item.requiredTools || [])]));
   assert.deepEqual(declared('release'), new Set(['get_release', 'compare_metric', 'breakdown', 'funnel',
     'get_calculation', 'build_chart', 'record_findings']));
   assert.deepEqual(declared('investigation'), new Set(['read_findings', 'search_findings', 'submit_check',
-    'submit_decision', 'submit_review']));
+    'submit_assessment', 'submit_plan', 'submit_verification']));
   assert.deepEqual(declared('selection'), new Set(['investigate']));
   assert.equal(new Set(nonWorkspaceCases.map(item => item.id)).size, nonWorkspaceCases.length);
   for (const item of nonWorkspaceCases) assert.equal(new Set(item.prompts).size, 3, item.id);
@@ -103,39 +109,36 @@ test('AnyModel has the same maximum budget for all direct synthesis routes', asy
 async function runInvestigationFixture(item, includeInterviews) {
   let reads = 0;
   const result = await item.run({ question: item.prompts[0], attempt: 1, env, send: async (_url, init) => {
-      const request = JSON.parse(init.body);
-      const last = request.messages.at(-1);
-      const submit = request.tools.find(tool => tool.function.name.startsWith('submit_')).function;
-      if (request.tool_choice?.function?.name === 'read_findings') {
-        reads++;
-        const { catalog } = JSON.parse(last.content);
-        return toolReply('read_findings', {
-          ids: catalog.filter(finding => finding.kind === 'calculation' || finding.measurementGap ||
-            (includeInterviews && finding.kind === 'interview'))
-            .map(finding => finding.id),
-        });
+    const request = JSON.parse(init.body);
+    const last = request.messages.at(-1);
+    if (request.tool_choice?.function?.name === 'read_findings') {
+      reads++;
+      const {catalog} = JSON.parse(last.content);
+      return toolReply('read_findings',{ids:catalog.filter(f=>f.kind==='calculation' || f.measurementGap ||
+        (includeInterviews && f.kind==='interview')).map(f=>f.id)});
+    }
+    const submit = request.tools.find(t=>t.function.name.startsWith('submit_')).function.name;
+    const data = JSON.parse(last.content), findings = data.findings || data;
+    if (submit === 'submit_check') return toolReply(submit,{question:'Почему снизился индекс?',
+      result:'Падение наблюдалось в расчёте.',impact:'Причину нужно проверить.',findingIds:[findings[0].id]});
+    if (submit === 'submit_assessment') {
+      const hypothesis={title:'Сбой оплаты',for:[],against:[],test:'Проверить покупку.'};
+      for (const [relation,side] of [['подтверждает','for'],['опровергает','against']]) {
+        const evidence=findings.find(f=>f.kind==='interview' && f.relation===relation);
+        if(evidence) hypothesis[side].push({id:evidence.id,text:evidence.text});
       }
-      const findings = JSON.parse(last.content);
-      const followUp = { question: 'Почему снизился индекс?', result: 'Падение наблюдалось в расчёте.',
-        impact: 'Причину нужно проверить.', findingIds: [findings[0].id] };
-      if (submit.parameters.properties.decision) {
-        followUp.decision = { summary: 'Причина пока требует проверки.', action: 'Пройти путь оплаты.',
-          plan: 'Сопоставить действие покупателя с записью об оплате.', outcomes: ['Проверить учёт события.'],
-          hypotheses: [{ title: 'Сбой оплаты', for: [], against: [], test: 'Проверить покупку.' }] };
-        for (const [relation, side] of [['подтверждает', 'for'], ['опровергает', 'against']]) {
-          const evidence = findings.find(finding => finding.kind === 'interview' && finding.relation === relation);
-          if (evidence) followUp.decision.hypotheses[0][side].push({ id: evidence.id, text: evidence.text });
-        }
-        const gap = findings.find(finding => finding.measurementGap);
-        if (gap) followUp.decision.verification = { findingId: gap.id, scenario: 'Выполнить тестовое добавление.',
-          behavior: 'появление товара в корзине', telemetry: 'регистрацию добавления в корзину',
-          eventMissing: 'Исправить учёт события.', behaviorFailed: 'Проверить интерфейс.',
-          bothPassed: 'Оценить следующий этап пути.' };
-      }
-      return toolReply(submit.name, followUp);
-    } });
-  assert.equal(reads, result.stages.length, item.id);
-  assert.ok(result.hasPlan, item.id);
+      return toolReply(submit,{summary:'Причина пока требует проверки.',hypotheses:[hypothesis]});
+    }
+    if (submit === 'submit_plan') return toolReply(submit,{action:'Пройти путь оплаты.',
+      plan:'Сопоставить действие покупателя с записью об оплате.',outcomes:['Проверить учёт события.']});
+    const gap=findings.find(f=>f.measurementGap);
+    return toolReply(submit,{findingId:gap.id,scenario:'Выполнить тестовое добавление.',
+      behavior:'появление товара в корзине',telemetry:'регистрацию добавления в корзину',
+      eventMissing:'Исправить учёт события.',behaviorFailed:'Проверить интерфейс.',
+      bothPassed:'Оценить следующий этап пути.'});
+  }});
+  assert.equal(reads,result.stages.length,item.id);
+  assert.ok(result.hasPlan,item.id);
 }
 
 test('investigation cases reach the scheduler and require one accepted submission per role', async () => {
@@ -144,4 +147,46 @@ test('investigation cases reach the scheduler and require one accepted submissio
   }
   await assert.rejects(runInvestigationFixture(scenario('investigation-alternative-roles'), false),
     /свидетельств.*за и против/iu);
+});
+
+function sourceStore(t) {
+  const store=openStore(':memory:');
+  t.after(()=>store.close());
+  initEvidence(store.db);
+  initWorkbench(store.db);
+  return store;
+}
+
+test('source synthesis saves partial results and accepts one fenced verdict',async t=>{
+  const store=sourceStore(t);
+  const url='https://museum.example/visit', quote='Экспозиция закрыта по пятницам.';
+  store.db.prepare('INSERT INTO agent_steps VALUES(?,?,?)').run('source','read_public_page:'+url,
+    JSON.stringify({title:'Музей',url,text:quote,checkedAt:Date.UTC(2026,10,28)}));
+  const question='Проверь, что экспозиция работает по пятницам '+url;
+  const verdict=JSON.stringify({verdict:'опровергнуто',answer:'В пятницу музей закрыт.',quote});
+  const run=send=>publicAnswer(store,{question},env,send,'source');
+  const plain=await run(async()=>modelReply({content:verdict}));
+  const fenced=await run(async()=>modelReply({content:'```json\n'+verdict+'\n```'}));
+  assert.equal(plain.text,fenced.text);
+  assert.match(fenced.text,new RegExp(quote,'u'));
+  const fallback=await run(async()=>Response.json({}, {status:503}));
+  assert.equal(fallback.outcome,'partial');
+  assert.equal(fallback.readSources.at(-1).url,url);
+  const text='Это способ сравнить несколько групп. Что изменилось у первой группы?»';
+  const brief=await briefConversation(store,'brief','Что такое когортный анализ?',null,env,
+    async()=>Response.json({choices:[{finish_reason:'stop',message:{content:text}}]}),[]);
+  assert.equal(brief.text,text);
+});
+
+test('archive preserves dates tied to the correct release',async t=>{
+  const store=sourceStore(t);
+  const evidence=[
+    {kind:'releases',text:'TEST-31 выпущен 2026-03-04.',refs:[{version:'v',file:'Релизы.xlsx',loc:'A2'}]},
+    {kind:'releases',text:'TEST-42 выпущен 2026-05-12.',refs:[{version:'v',file:'Релизы.xlsx',loc:'A3'}]},
+  ];
+  const reply=await archiveAnswer(store,'Когда вышел TEST-31?',evidence,env,
+    async()=>modelReply({content:'TEST-31 выпущен 2026-05-04.'}),'archive');
+  assert.equal(reply.outcome,'partial');
+  assert.match(reply.text,/2026-03-04/u);
+  assert.doesNotMatch(reply.text,/2026-05-04/u);
 });

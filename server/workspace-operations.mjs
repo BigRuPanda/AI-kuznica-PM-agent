@@ -948,98 +948,101 @@ export function workspaceOperation(
       : effect(db, c, b.asOf);
     return result && { caseId: c.id, ...result };
   }
-  if (op === 'watch') return store.tx(() => {
-    const c = current(), precommitted = c.body.plan?.measurement, signal = c.body.signal;
-    const previous = c.body.watch, agreement = c.body.plan?.measurementAgreement;
-    const previousKind = watchKind(previous);
-    if (b.agreementId && b.agreementId !== agreement?.id)
-      throw Error('План измерения уже обновлён. Откройте текущий критерий.');
-    if (agreement && previous?.agreementId !== agreement.id &&
-      (signal?.status === 'withdrawn' || agreement.signalRevision !== (signal?.revision ?? 0)))
-      throw Error('Сигнал уточнён. Согласуйте критерий в актуальном исследовании перед назначением проверки.');
-    if (agreement && (b.measurement || b.percent || b.control || b.metric))
-      throw Error('Используется согласованный критерий проверки. Передайте дату выкладки.');
-    if (precommitted && b.metric)
-      throw Error('Для этого разбора используется план проверки, заданный до выкладки. Передайте только дату.');
-    const reuse = () => {
-      if (c.state !== 'Наблюдаем эффект' && !c.body.watchReviewed && !previous.reviewed) {
+  if (op === 'watch') {
+    const apply = () => {
+      const c = current(), precommitted = c.body.plan?.measurement, signal = c.body.signal;
+      const previous = c.body.watch, agreement = c.body.plan?.measurementAgreement;
+      const previousKind = watchKind(previous);
+      if (b.agreementId && b.agreementId !== agreement?.id)
+        throw Error('План измерения уже обновлён. Откройте текущий критерий.');
+      if (agreement && previous?.agreementId !== agreement.id &&
+        (signal?.status === 'withdrawn' || agreement.signalRevision !== (signal?.revision ?? 0)))
+        throw Error('Сигнал уточнён. Согласуйте критерий в актуальном исследовании перед назначением проверки.');
+      if (agreement && (b.measurement || b.percent || b.control || b.metric))
+        throw Error('Используется согласованный критерий проверки. Передайте дату выкладки.');
+      if (precommitted && b.metric)
+        throw Error('Для этого разбора используется план проверки, заданный до выкладки. Передайте только дату.');
+      const reuse = () => {
+        if (c.state !== 'Наблюдаем эффект' && !c.body.watchReviewed && !previous.reviewed) {
+          c.state = 'Наблюдаем эффект';
+          updateCase(db, c);
+        }
+        return { caseId: c.id, ...effect(db, c) };
+      };
+      const save = (watch) => {
+        if (previous) {
+          const prior = analysisView(db, { caseId: c.id });
+          grant(db, prior.id, 'case', c.id);
+          c.body.watchHistory = [...(c.body.watchHistory || []),
+            { revision: previous.revision ?? 1, calc: prior.id, deployed: previous.deployed }];
+        }
+        watch.revision = previous ? (previous.revision ?? 1) + 1 : 1;
+        c.body.watch = watch;
+        delete c.body.watchReviewed;
         c.state = 'Наблюдаем эффект';
         updateCase(db, c);
+        return { caseId: c.id, ...effect(db, c) };
+      };
+      if (b.metric) {
+        if (b.measurement || b.percent)
+          throw Error('Передайте поля одного плана проверки.');
+        const plan = proposedObservation(db, c, b, env);
+        if (!plan.taskId && !plan.deployed) throw Error('Выберите задачу или укажите подтверждённую выкладку.');
+        if (previousKind === 'archive-observation' && plan.request === previous.request)
+          return reuse();
+        return save(plan);
       }
-      return { caseId: c.id, ...effect(db, c) };
-    };
-    const save = (watch) => {
-      if (previous) {
-        const prior = analysisView(db, { caseId: c.id });
-        grant(db, prior.id, 'case', c.id);
-        c.body.watchHistory = [...(c.body.watchHistory || []),
-          { revision: previous.revision ?? 1, calc: prior.id, deployed: previous.deployed }];
+      if (typeof b.deployed !== 'string') throw Error('Укажите дату выкладки.');
+      if (!b.measurement && !b.percent && previousKind === 'measurement' && previous.deployed === b.deployed)
+        return reuse();
+      if (precommitted && b.measurement)
+        throw Error('Для этого разбора используется план проверки, заданный до выкладки. Передайте только дату.');
+      const automatic = measuredSignal(signal?.metric) ? {
+        ...signalMeasurement(c),
+        baselineFrom: signal.baselineFrom, baselineThrough: signal.baselineThrough,
+        control: b.control, minDenominator: signal.minDenominator,
+      } : null;
+      if (automatic && b.measurement && ['metric', 'product', 'segment', 'sourceId', 'definitionId']
+        .some(key => automatic[key] && b.measurement[key] && automatic[key] !== b.measurement[key]))
+        throw Error('Выберите метрику, продукт, сегмент и источник сигнала.');
+      const spec = precommitted || (b.measurement && { ...automatic, ...b.measurement }) ||
+        (!b.percent && previousKind === 'measurement' && previous.measurement) || (automatic && {
+        ...automatic, comparison: 'gte', targetMode: 'baseline_percent',
+        targetValue: b.percent ?? setting(db, 'rules', defaultRules).recovery,
+      });
+      if (agreement) return save(startMeasurementWatch({
+        version: 2, measurement: precommitted, agreementId: agreement.id, control: precommitted.control,
+        target: agreement.target, tolerance: agreement.tolerance, baseline: agreement.baseline,
+        controlBaseline: agreement.controlBaseline, signalRevision: agreement.signalRevision,
+      }, b.deployed));
+      if (spec) {
+        const normalized = measurementSpec(spec, c.product);
+        const request = digest(JSON.stringify([normalized, b.deployed]));
+        if (previousKind === 'measurement' && previous.request === request)
+          return reuse();
+        return save({ ...createMeasurementWatch(db, normalized, b.deployed), request });
       }
-      watch.revision = previous ? (previous.revision ?? 1) + 1 : 1;
-      c.body.watch = watch;
-      delete c.body.watchReviewed;
-      c.state = 'Наблюдаем эффект';
-      updateCase(db, c);
-      return { caseId: c.id, ...effect(db, c) };
+      if (!legacyOrderMetric(c.body.plan?.metric))
+        throw Error('Уточните целевую метрику и критерий старого плана в форме наблюдения.');
+      if (!b.percent) throw Error('Укажите процент от базы индекса заказов или план измерения.');
+      const v = analysisView(db, { caseId: c.id, control: b.control });
+      if (
+        !/^\d{4}-\d\d-\d\d$/.test(b.deployed) ||
+        new Date(b.deployed + 'T12:00:00Z').toISOString().slice(0, 10) !== b.deployed ||
+        !v.summary[1]?.before ||
+        !v.summary[0]?.before
+      )
+        throw Error('Нужны дата выкладки, база и контроль');
+      return save({
+        deployed: b.deployed,
+        target: (v.summary[0].before * b.percent) / 100,
+        control: v.summary[1].product,
+        controlBase: v.summary[1].before,
+        tolerance: setting(db, 'rules', defaultRules).controlTolerance,
+      });
     };
-    if (b.metric) {
-      if (b.measurement || b.percent)
-        throw Error('Передайте поля одного плана проверки.');
-      const plan = proposedObservation(db, c, b, env);
-      if (!plan.taskId && !plan.deployed) throw Error('Выберите задачу или укажите подтверждённую выкладку.');
-      if (previousKind === 'archive-observation' && plan.request === previous.request)
-        return reuse();
-      return save(plan);
-    }
-    if (typeof b.deployed !== 'string') throw Error('Укажите дату выкладки.');
-    if (!b.measurement && !b.percent && previousKind === 'measurement' && previous.deployed === b.deployed)
-      return reuse();
-    if (precommitted && b.measurement)
-      throw Error('Для этого разбора используется план проверки, заданный до выкладки. Передайте только дату.');
-    const automatic = measuredSignal(signal?.metric) ? {
-      ...signalMeasurement(c),
-      baselineFrom: signal.baselineFrom, baselineThrough: signal.baselineThrough,
-      control: b.control, minDenominator: signal.minDenominator,
-    } : null;
-    if (automatic && b.measurement && ['metric', 'product', 'segment', 'sourceId', 'definitionId']
-      .some(key => automatic[key] && b.measurement[key] && automatic[key] !== b.measurement[key]))
-      throw Error('Выберите метрику, продукт, сегмент и источник сигнала.');
-    const spec = precommitted || (b.measurement && { ...automatic, ...b.measurement }) ||
-      (!b.percent && previousKind === 'measurement' && previous.measurement) || (automatic && {
-      ...automatic, comparison: 'gte', targetMode: 'baseline_percent',
-      targetValue: b.percent ?? setting(db, 'rules', defaultRules).recovery,
-    });
-    if (agreement) return save(startMeasurementWatch({
-      version: 2, measurement: precommitted, agreementId: agreement.id, control: precommitted.control,
-      target: agreement.target, tolerance: agreement.tolerance, baseline: agreement.baseline,
-      controlBaseline: agreement.controlBaseline, signalRevision: agreement.signalRevision,
-    }, b.deployed));
-    if (spec) {
-      const normalized = measurementSpec(spec, c.product);
-      const request = digest(JSON.stringify([normalized, b.deployed]));
-      if (previousKind === 'measurement' && previous.request === request)
-        return reuse();
-      return save({ ...createMeasurementWatch(db, normalized, b.deployed), request });
-    }
-    if (!legacyOrderMetric(c.body.plan?.metric))
-      throw Error('Уточните целевую метрику и критерий старого плана в форме наблюдения.');
-    if (!b.percent) throw Error('Укажите процент от базы индекса заказов или план измерения.');
-    const v = analysisView(db, { caseId: c.id, control: b.control });
-    if (
-      !/^\d{4}-\d\d-\d\d$/.test(b.deployed) ||
-      new Date(b.deployed + 'T12:00:00Z').toISOString().slice(0, 10) !== b.deployed ||
-      !v.summary[1]?.before ||
-      !v.summary[0]?.before
-    )
-      throw Error('Нужны дата выкладки, база и контроль');
-    return save({
-      deployed: b.deployed,
-      target: (v.summary[0].before * b.percent) / 100,
-      control: v.summary[1].product,
-      controlBase: v.summary[1].before,
-      tolerance: setting(db, 'rules', defaultRules).controlTolerance,
-    });
-  });
+    return db.isTransaction ? apply() : store.tx(apply);
+  }
   if (op === 'decide') {
     const c = current();
     c.state = b.state;
