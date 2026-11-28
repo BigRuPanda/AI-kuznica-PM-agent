@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { DataForm } from './forms';
 import { Icon } from './icons';
 import { ReleaseCaseLink } from './release-case-link';
+import { ReleaseHelp } from './release-help';
 import type { Release } from './team-data';
 import { api, type Journal } from './types';
 import './releases.css';
@@ -66,17 +67,22 @@ export function ReleaseJournal({ calendar, initialFilter, admin, archiveOnly, on
     <header className="page-head release-journal-head">
       <h1>Релизы</h1>
       <div className="toolbar release-journal-toolbar">
-        <label>
-          Источник
-          <select value={filter} onChange={event => setFilter(event.target.value as Filter)}>
-            {filters.map(([key, label]) => <option key={key} value={key}>{label}</option>)}
-          </select>
-        </label>
+        <div className="release-help-label">
+          <label>
+            Источник
+            <select value={filter} onChange={event => setFilter(event.target.value as Filter)}>
+              {filters.map(([key, label]) => <option key={key} value={key}>{label}</option>)}
+            </select>
+          </label>
+          <ReleaseHelp text="«Из календаря» показывает записи из документов, а «С метриками» — релизы с дневными данными CSV." />
+        </div>
         {journal && (canImport || canCreate) && <details className="release-management" ref={menu}>
-          <summary>Управление</summary>
+          <summary title="Открыть действия с релизами и наборами событий.">Управление</summary>
           <div className="release-management-actions">
-            {canCreate && <button type="button" onClick={() => openForm('release')}>Добавить релиз</button>}
-            {canImport && <button type="button" onClick={() => openForm('import')}>Импорт CSV</button>}
+            {canCreate && <button type="button" title="Создать релиз по загруженному набору событий."
+              onClick={() => openForm('release')}>Добавить релиз</button>}
+            {canImport && <button type="button" title="Загрузить события для расчёта метрик релиза."
+              onClick={() => openForm('import')}>Импорт CSV</button>}
           </div>
         </details>}
       </div>
@@ -107,7 +113,8 @@ export function ReleaseJournal({ calendar, initialFilter, admin, archiveOnly, on
             {entry.title !== entry.id && <small className="release-id">{entry.id}</small>}
           </div>
           <h2 className="release-card-title">
-            {href ? <a className="release-entry-link" href={href}>
+            {href ? <a className="release-entry-link" href={href}
+              title={release ? 'Открыть данные этого релиза.' : 'Открыть отчёт с метриками релиза.'}>
               <span>{entry.title}</span><span className="release-open-icon"><Icon name="arrow" /></span>
             </a> : entry.title}
           </h2>
@@ -115,10 +122,12 @@ export function ReleaseJournal({ calendar, initialFilter, admin, archiveOnly, on
             {detailsLabel && <button type="button" aria-expanded={expanded}
               aria-controls={expanded ? detailsId : undefined}
               aria-label={'Связанные ' + detailsLabel.toLowerCase() + ' ' + entry.id}
+              title={(expanded ? 'Свернуть' : 'Показать') + ' связанные ' + detailsLabel.toLowerCase()}
               onClick={() => setExpandedRelease(expanded ? null : entry.id)}>{detailsLabel}<Icon name="down" /></button>}
             {release.decisionAvailable || release.releaseCaseId
               ? <ReleaseCaseLink releaseId={entry.id} caseId={release.releaseCaseId} className="release-plan" />
               : <button type="button" className="release-plan" aria-label={'Запланировать разбор ' + entry.id}
+                 title="Открыть форму разбора с выбранным релизом."
                 onClick={() => onPlan(entry.id)}>Запланировать разбор</button>}
           </div>}
           {expanded && linkedTasks && <div className="release-card-related" id={detailsId}>

@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { Icon } from './icons';
 import { ReleaseCaseLink } from './release-case-link';
+import { ReleaseHelp, releaseCutHelp } from './release-help';
 import { post } from './team-data';
 import { PreviewCard, type TrackerPreview } from './tracking';
 import './release-decision.css';
@@ -82,7 +83,8 @@ function CurrentOffer({ offer }: { offer: NonNullable<Decision['competitor']> })
   }
   return <div className="offer-check">
     {offer.url && <a href={offer.url} target="_blank" rel="noreferrer">Карточка из исследования ↗</a>}
-    <button type="button" disabled={busy} onClick={() => void refresh()}>{busy ? 'Проверяем предложение…' : 'Проверить предложение сегодня'}</button>
+    <button type="button" disabled={busy} title="Проверить, доступно ли это предложение сейчас."
+      onClick={() => void refresh()}>{busy ? 'Проверяем предложение…' : 'Проверить предложение сегодня'}</button>
     {error && <p role="alert">{error}</p>}
     {check && <div role="status">
       <strong>Веб-проверка · {new Date(check.checkedAt).toLocaleString('ru-RU')}</strong>
@@ -96,6 +98,7 @@ function CurrentOffer({ offer }: { offer: NonNullable<Decision['competitor']> })
 function WeeklyIndex({ trend, caveat }: { trend: Trend; caveat?: string }) {
   return <section className="paper decision-trend">
     <h2>Недельный индекс заказов</h2>
+    <ReleaseHelp text="Среднее за последние четыре полные недели сравнивается со средним за предыдущие двенадцать недель." />
     {trend.available ? <>
       <div className="decision-values">
         <div><small>Предыдущие 12 недель</small><strong>{number(trend.baseline.mean)}</strong>
@@ -185,7 +188,8 @@ function TrackerActions({ product, releaseId, caseId, action }: {
   }
   return <section className="paper">
     <h3>Задача по решению</h3>
-    <button type="button" disabled={pending} onClick={() => void run('search')}>
+    <button type="button" disabled={pending} title="Найти связанные задачи и совпадения по названию."
+      onClick={() => void run('search')}>
       {pending && !search ? 'Ищем…' : search ? 'Повторить поиск' : 'Найти задачу и проверить дубли'}
     </button>
     {error && <p role="alert">{error}</p>}
@@ -199,15 +203,17 @@ function TrackerActions({ product, releaseId, caseId, action }: {
               !item.canComment && 'Доступна для просмотра в Redmine'].filter(Boolean).join(' · ')}</small>
           </div>
           {search.caseId && item.canComment && (!hasExact || item.exact) && <button
-            type="button" disabled={pending} onClick={() => void run('draft', item.key)}
+            type="button" disabled={pending} title="Подготовить черновик комментария к выбранной задаче."
+            onClick={() => void run('draft', item.key)}
           >Подготовить комментарий</button>}
         </li>)}
       </ul>
       {!search.caseId && canDraft && <button
-        type="button" disabled={pending} onClick={() => void run('case')}
+        type="button" disabled={pending} title="Создать разбор для задачи по этому релизу." onClick={() => void run('case')}
       >Создать связанный разбор</button>}
       {search.caseId && !hasExact && <button
-        type="button" disabled={pending} onClick={() => void run('draft')}
+        type="button" disabled={pending} title="Подготовить задачу для проверки перед добавлением в трекер."
+        onClick={() => void run('draft')}
       >Подготовить черновик задачи</button>}
     </>}
     {draft && <PreviewCard item={draft} action={action} reload={async () => {}} />}
@@ -274,9 +280,12 @@ export function ReleaseDecision({
         {data.releases.map(row => <option key={row.id} value={row.id}>{row.id} · {date(row.date)}</option>)}
       </select>
     </label>
-    <label>Дата среза <input type="date" value={cut} onChange={event => setCut(event.target.value)} /></label>
-    <button type="submit" disabled={!cut}>Показать на дату</button>
-    {criteria.through && <button type="button" onClick={() => {
+    <div className="release-help-label">
+      <label>Дата среза <input type="date" value={cut} onChange={event => setCut(event.target.value)} /></label>
+      <ReleaseHelp text={releaseCutHelp} />
+    </div>
+    <button type="submit" disabled={!cut} title="Применить выбранную дату среза.">Показать на дату</button>
+    {criteria.through && <button type="button" title="Показать последние доступные данные." onClick={() => {
       setCut('');
       select({ product: selectedProduct, releaseId: selectedRelease?.id });
     }}>Вернуться к текущему срезу</button>}

@@ -10,7 +10,7 @@ import { importDocs } from '../server/evidence.mjs';
 import { fixtureEnv, seedWorkspace } from './workspace-fixture.mjs';
 
 test('release cards sort both sources and keep their routes and actions distinct', async t => {
-  const { app, page, origin } = await openWorkspace(t);
+  const { app, page, origin, caseId } = await openWorkspace(t);
   const store = app.space('team');
   const calendarTitle = 'Календарная запись R-001 для Kaspersky';
   importDocs(store, [{
@@ -37,6 +37,15 @@ test('release cards sort both sources and keep their routes and actions distinct
   const journal = page.getByRole('list', { name: 'Журнал релизов' });
   const source = page.getByRole('combobox', { name: 'Источник', exact: true });
   await journal.waitFor();
+  const releaseTab = page.getByRole('navigation', { name: 'Основные разделы' })
+    .getByRole('link', { name: 'Релизы', exact: true });
+  const sourceHint = page.getByTitle('«Из календаря» показывает записи из документов, а «С метриками» — релизы с дневными данными CSV.',
+    { exact: true });
+  assert.equal(await releaseTab.getAttribute('title'), 'Релизы');
+  assert.equal(await sourceHint.count(), 1);
+  assert.equal(await sourceHint.textContent(), '?');
+  await releaseTab.hover();
+  await sourceHint.hover();
   assert.equal(await source.inputValue(), 'all');
   await journal.getByRole('link', { name: calendarTitle, exact: true }).waitFor();
   await page.getByRole('button', { name: 'Повторить', exact: true }).click();
@@ -53,8 +62,13 @@ test('release cards sort both sources and keep their routes and actions distinct
   await assertOutlined(source);
   await assertOutlined(cards.first());
   await assertOutlined(cards.first().getByRole('link', { name: calendarTitle, exact: true }).locator('.release-open-icon'));
-  await assertOutlined(cards.first().getByRole('link', { name: 'Открыть разбор' }));
-  await assertOutlined(cards.first().getByRole('button', { name: 'Связанные задачи и разборы R-001' }));
+  const openCase = cards.first().getByRole('link', { name: 'Открыть разбор' });
+  const related = cards.first().getByRole('button', { name: 'Связанные задачи и разборы R-001' });
+  await assertOutlined(openCase);
+  await assertOutlined(related);
+  await related.hover();
+  assert.equal(await openCase.getAttribute('title'), 'Открыть сохранённый разбор этого релиза.');
+  assert.equal(await related.getAttribute('title'), 'Показать связанные задачи и разборы');
   const management = page.getByText('Управление', { exact: true });
   await assertOutlined(management);
   await management.click();
@@ -84,7 +98,8 @@ test('release cards sort both sources and keep their routes and actions distinct
     dateAboveTitle: true, dateOnLeft: true, actionsBelowTitle: true, actionAtRightEdge: true, equalButtons: true,
     separateCards: true, horizontalScroll: false,
   });
-  await cards.first().getByRole('button', { name: 'Связанные задачи и разборы R-001' }).press('Enter');
+  await related.press('Enter');
+  assert.equal(await related.getAttribute('title'), 'Свернуть связанные задачи и разборы');
   const tasks = cards.first().getByRole('table', { name: 'Связанные задачи' });
   await tasks.getByRole('cell', { name: 'Обновить документацию' }).waitFor();
   await tasks.getByRole('cell', { name: 'Проверить публикацию' }).waitFor();
@@ -107,12 +122,28 @@ test('release cards sort both sources and keep their routes and actions distinct
   await cards.first().getByRole('link', { name: calendarTitle, exact: true }).click();
   await page.getByRole('heading', { name: 'Данные релиза', exact: true }).waitFor();
   await page.waitForURL('**/#release-decision/R-001');
+  const cutHint = page.getByTitle('Показывает данные, доступные к выбранной дате.', { exact: true });
+  await cutHint.waitFor();
+  assert.equal(await cutHint.textContent(), '?');
   await page.goto(origin + '/#releases');
   assert.equal(await source.inputValue(), 'metrics');
   await journal.getByRole('link', { name: 'Кнопка «Скачать счёт»' }).waitFor();
   assert.equal(await cards.count(), 2);
   await cards.first().getByRole('link').click();
   await page.getByRole('columnheader', { name: 'После выпуска' }).waitFor();
+
+  const period = page.getByRole('button', { name: 'Период расчёта', exact: true });
+  const periodTitle = 'Выбрать даты расчёта для этого разбора.';
+  await page.goto(origin + '/#case/related-case');
+  assert.equal(await period.getAttribute('title'), periodTitle);
+  store.db.prepare('UPDATE cases SET body=? WHERE id=?').run(JSON.stringify({
+    signal: { rule: 'relative', status: 'confirmed', week: '2026-10-05', releaseId: 'R-001' },
+  }), 'related-case');
+  await page.reload();
+  assert.equal(await period.getAttribute('title'), periodTitle);
+  await page.goto(origin + '/#case/' + caseId);
+  await page.getByRole('heading', { name: 'Проверка синтетического кейса', exact: true }).waitFor();
+  assert.equal(await period.getAttribute('title'), null);
 });
 
 test('metric charts and calculations open over the release and restore focus when closed', async t => {
@@ -136,6 +167,7 @@ test('metric charts and calculations open over the release and restore focus whe
   await segment.selectOption('new');
   await page.getByText('Другие метрики', { exact: true }).click();
   const graphButton = page.getByRole('button', { name: 'График: ' + metric, exact: true });
+  assert.equal(await graphButton.getAttribute('title'), 'Показать динамику метрики «' + metric + '» по дням.');
   await graphButton.click();
   const graph = page.getByRole('dialog', { name: 'График: ' + metric });
   await graph.locator('.range-plot').waitFor();
@@ -154,6 +186,7 @@ test('metric charts and calculations open over the release and restore focus whe
   assert.ok(await graphButton.evaluate(button => button === document.activeElement));
 
   const proofButton = page.getByRole('button', { name: 'Расчёт: ' + metric, exact: true });
+  assert.equal(await proofButton.getAttribute('title'), 'Сравнить значения метрики «' + metric + '» до и после выпуска.');
   const [response] = await Promise.all([
     page.waitForResponse(reply => reply.url().endsWith('/api/compare') && reply.ok()),
     proofButton.click(),
@@ -169,8 +202,17 @@ test('metric charts and calculations open over the release and restore focus whe
   assert.equal(await segment.inputValue(), 'new');
 
   await page.getByRole('button', { name: 'Показать расчёт', exact: true }).click();
-  await page.getByRole('dialog', { name: /^Расчёт:/u }).waitFor();
+  const targetProof = page.getByRole('dialog', { name: /^Расчёт:/u });
+  await targetProof.waitFor();
   await page.keyboard.press('Escape');
+  await targetProof.waitFor({ state: 'hidden' });
+  await page.getByRole('combobox', { name: 'Дата среза', exact: true }).selectOption('2');
+  const target = page.locator('.release-metrics > .card');
+  await target.getByText('2 из 7 суток', { exact: true }).waitFor();
+  const metricHint = target.getByTitle(
+    'По этому показателю оценивается релиз. Сравниваются семь суток до выпуска и до семи суток после выпуска к дате среза.',
+    { exact: true });
+  assert.equal(await metricHint.textContent(), '?');
   await page.goto(origin + '/#calc/' + id);
   await page.getByRole('heading', { name: metric, exact: true }).waitFor();
 });

@@ -4,10 +4,11 @@ import { positionPopover } from './popover-position';
 
 type Period = { from?: string; through?: string };
 
-export function CasePeriodFilter({ period, onApply, boundaryRef }: {
+export function CasePeriodFilter({ period, onApply, boundaryRef, triggerTitle }: {
   period: Period;
   onApply: (period: Period) => void;
   boundaryRef: RefObject<HTMLElement | null>;
+  triggerTitle?: string;
 }) {
   const id = useId();
   const title = id + '-title';
@@ -44,7 +45,7 @@ export function CasePeriodFilter({ period, onApply, boundaryRef }: {
   }
 
   return <>
-    <button ref={trigger} type="button" className="case-period-trigger" data-active={active}
+    <button ref={trigger} type="button" className="case-period-trigger" data-active={active} title={triggerTitle}
       popoverTarget={id} aria-controls={id} aria-expanded={open} aria-haspopup="dialog"
       onClick={event => {
         event.preventDefault();

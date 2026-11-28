@@ -3,6 +3,7 @@ import type {Card,Report,Row,Series,Derived} from './types';
 import {Trend,lines} from './trend';
 import {eventSample,metricSample} from './metric-values';
 import {PeriodSummary} from './period-summary';
+import {ReleaseHelp} from './release-help';
 
 export function Comparisons({series,unit,metric}:{series:Record<string,Pick<Series,'before'|'after'>>,unit:string;metric:number}){
   function cell(row:Row){
@@ -54,14 +55,18 @@ export function MetricCard({card:c,report:r,insight,openComparison,openCalculati
   const {before,after} = c.series.all;
   return <article className={'card ' + (mark ? 'important' : '')}>
     <div className="metric-head">
-      <h3>{c.title}</h3>
+      <div className="release-help-label">
+        <h3>{c.title}</h3>
+        <ReleaseHelp text="По этому показателю оценивается релиз. Сравниваются семь суток до выпуска и до семи суток после выпуска к дате среза." />
+      </div>
       <PeriodSummary before={{...before,sample:metricSample(before,c.metric)}} after={{...after,sample:metricSample(after,c.metric)}}
         unit={c.unit} launch={r.release.launch} day={r.context.day} status={c.status} asTable/>
     </div>
     <MetricChart card={c} report={r} openCalculation={openCalculation}/>
     <p className="caption">{c.status==='ready'&&mark&&r.context.segment==='all'&&r.report?.version===r.context.version ? mark.reason : c.caption}</p>
     {insight&&<p className="caption">{insight}</p>}
-    <button type="button" className="text-action release-card-action" aria-haspopup="dialog" onClick={openComparison}>
+    <button type="button" className="text-action release-card-action" aria-haspopup="dialog"
+      title="Открыть сравнение метрики до и после выпуска." onClick={openComparison}>
       Показать расчёт
     </button>
   </article>;

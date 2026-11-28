@@ -1420,6 +1420,7 @@ function Investigation({
   const v = d.view,
     c = d.case;
   const signal = c.body.signal;
+  const releaseLinked = Boolean(caseReleaseId(c));
   const redmine = home.integrations.redmine;
   const watchNext = c.state === 'Наблюдаем эффект';
   const specified = c.body.plan?.measurement;
@@ -1504,9 +1505,11 @@ function Investigation({
       <button className={shareAsPrimary ? 'primary arrow-action' : undefined} onClick={openShare} disabled={updating}>
         Поделиться {shareAsPrimary && <Icon name="arrow" />}
       </button>
-      <CasePeriodFilter period={period} onApply={applyPeriod} boundaryRef={caseControls} />
+      <CasePeriodFilter period={period} onApply={applyPeriod} boundaryRef={caseControls}
+        triggerTitle={releaseLinked ? 'Выбрать даты расчёта для этого разбора.' : undefined} />
     </div>
-    {!researchAvailable && !completed && <button className="primary arrow-action" onClick={openNext}>
+    {!researchAvailable && !completed && <button className="primary arrow-action" onClick={openNext}
+      title={releaseLinked && watchNext ? 'Открыть результаты проверки эффекта.' : undefined}>
       {watchNext ? 'Проверить эффект' : 'К задаче'}
       <Icon name="arrow" />
     </button>}
@@ -1638,7 +1641,7 @@ function Investigation({
             reload={load}
           />
           <details className="paper effect-panel" ref={effectSection}>
-            <summary>Проверка эффекта</summary>
+            <summary title={releaseLinked ? 'Открыть план и результаты проверки эффекта.' : undefined}>Проверка эффекта</summary>
             {useArchiveForm ? <EffectPlan key={id + '/' + (archiveMonitoring?.plan.revision || 0)}
               caseId={id} saved={archiveMonitoring?.result ?? null} archiveOnly={home.archiveOnly}
               readOnly={completed} reload={async () => { await load(); await refresh(); }} /> : <>

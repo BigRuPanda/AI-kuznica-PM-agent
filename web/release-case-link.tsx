@@ -43,10 +43,12 @@ export function ReleaseCaseLink({ releaseId, caseId, className }: {
     }
   }
 
-  if (caseId) return <a className={className} href={'#case/' + caseId}>Открыть разбор</a>;
+  if (caseId) return <a className={className} href={'#case/' + caseId}
+    title="Открыть сохранённый разбор этого релиза.">Открыть разбор</a>;
   const selected = options.find(option => option.product === selection.product);
   return <>
-    <button className={className} type="button" disabled={pending} onClick={() => void create()}>
+    <button className={className} type="button" disabled={pending}
+      title="Создать исследование по продукту и метрике релиза." onClick={() => void create()}>
       {pending ? 'Создаём разбор…' : 'Создать разбор'}
     </button>
     {!options.length && error && <p role="alert">{error}</p>}
@@ -77,7 +79,8 @@ export function ReleaseCaseLink({ releaseId, caseId, className }: {
           </select>
         </label>
         {error && <p role="alert">{error}</p>}
-        <button className="primary" disabled={pending || !selection.metric}>Создать разбор</button>
+        <button className="primary" disabled={pending || !selection.metric}
+          title="Начать исследование по выбранному продукту и метрике.">Создать разбор</button>
       </form>
     </Dialog>}
   </>;

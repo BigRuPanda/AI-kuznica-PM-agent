@@ -9,6 +9,7 @@ import { Answer } from './answer';
 import { Icon } from './icons';
 import { useDiscussionDock } from './panel-size';
 import { ProfileAvatar } from './profile';
+import { ReleaseHelp, releaseCutHelp } from './release-help';
 import type { User } from './team-data';
 import './style.css';
 import './releases.css';
@@ -235,13 +236,16 @@ function ReleasePanels({ release, mode, user }: { release: Release; mode: string
         {reportError && <p role="alert">{reportError}</p>}
         {report && target ? <>
           <div className="filters release-report-filters">
-            <label>Дата среза<select value={report.context.day} onChange={event => {
-              setDay(Number(event.target.value));
-              remember(id + '/day', event.target.value);
-            }}>
-              {Array.from({ length: report.last + 1 }, (_, offset) =>
-                <option key={offset} value={offset}>{dayDate(release.launch, offset)}</option>)}
-            </select></label>
+            <div className="release-help-label">
+              <label>Дата среза<select value={report.context.day} onChange={event => {
+                setDay(Number(event.target.value));
+                remember(id + '/day', event.target.value);
+              }}>
+                {Array.from({ length: report.last + 1 }, (_, offset) =>
+                  <option key={offset} value={offset}>{dayDate(release.launch, offset)}</option>)}
+              </select></label>
+              <ReleaseHelp text={releaseCutHelp} />
+            </div>
             <label>Сегмент<select value={segment} onChange={event => {
               setSegment(event.target.value as Segment);
               remember(id + '/seg', event.target.value);
@@ -262,8 +266,10 @@ function ReleasePanels({ release, mode, user }: { release: Release; mode: string
                   <th scope="row">{card.title}
                     <div className="actions metric-row-actions">
                       <button type="button" aria-haspopup="dialog" aria-label={'График: ' + card.title}
+                        title={'Показать динамику метрики «' + card.title + '» по дням.'}
                         onClick={() => openMetric('chart', card)}>График</button>
                       <button type="button" aria-haspopup="dialog" aria-label={'Расчёт: ' + card.title}
+                        title={'Сравнить значения метрики «' + card.title + '» до и после выпуска.'}
                         onClick={() => openMetric('comparison', card)}>Расчёт</button>
                     </div>
                   </th>
