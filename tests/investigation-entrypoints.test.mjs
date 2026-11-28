@@ -110,3 +110,80 @@ test('startup, committed imports and manual cases wake investigations without re
   await waitForCalls(6);
   assert.deepEqual(calls.sort(),[first,first,second,second,signal.id,signal.id].sort());
 });
+
+test('participants explicitly choose a scope and share one durable investigation for a release', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'pm-release-case-'));
+  const env = { DATA_PROFILE: 'local', ADMIN_INVITE_KEY: 'admin-case', DEMO_INVITE_KEY: 'judge-case' };
+  const open = () => createTeamApp({ base: join(dir, 'team.sqlite'), env, background: false });
+  let app = open();
+  t.after(async () => {
+    await app.close();
+    await rm(dir, { recursive: true, force: true, maxRetries: 3 });
+  });
+  async function listen() {
+    await new Promise(resolve => app.server.listen(0, '127.0.0.1', resolve));
+  }
+  async function post(op, input, cookie) {
+    const base = 'http://127.0.0.1:' + app.server.address().port + '/api/team/';
+    const response = await fetch(base + op, { method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...(cookie && { cookie }) }, body: JSON.stringify(input) });
+    return { status: response.status, body: await response.json(), cookie: response.headers.get('set-cookie')?.split(';')[0] };
+  }
+  async function register(login, code) {
+    const result = await post('register', { login, name: login, code, password: 'fixture-release-password' });
+    assert.equal(result.status, 200, result.body.error);
+    return result.cookie;
+  }
+  await listen();
+  const admin = await register('release-admin', env.ADMIN_INVITE_KEY);
+  const member = await register('release-member', app.accounts.invite('team'));
+  const judge = await register('release-judge', env.DEMO_INVITE_KEY);
+  const store = app.space('team');
+  const releaseId = 'MIX-1';
+  importDocs(store, [{ file: 'Календарь', facts: [
+    { kind: 'releases', loc: 'Релизы!A2', row: { release_id: releaseId, release_type: 'major',
+      status: 'выпущен', release_date: '2026-10-05', description: 'Обновление Astra и Kaspersky',
+      affected_metrics: 'orders_index' } },
+    ...['Astra', 'Kaspersky'].map((product_family, index) => ({ kind: 'sales', loc: 'Продажи!A' + (index + 2),
+      row: { product_family, week_start: '2026-09-28', orders_index: 100 } })),
+  ] }], { notify: false });
+  const personal = await post('create-case', { title: 'Мой разбор', product: 'Astra', release: releaseId }, admin);
+  assert.equal(personal.status, 200, personal.body.error);
+
+  const options = await post('ensure-release-case', { releaseId }, admin);
+  assert.equal(options.status, 200, options.body.error);
+  assert.deepEqual(options.body, { caseId: null, options: [
+    { product: 'Astra', metrics: ['orders_index'] }, { product: 'Kaspersky', metrics: ['orders_index'] },
+  ] });
+  assert.equal((await post('ensure-release-case', { releaseId, product: 'Store', metric: 'orders_index' }, member)).status, 400);
+  assert.equal((await post('ensure-release-case', { releaseId: 'UNKNOWN' }, admin)).status, 400);
+  assert.equal((await post('ensure-release-case', { releaseId }, judge)).status, 400);
+
+  const input = { releaseId, product: 'Astra', metric: 'orders_index' };
+  const [first, second] = await Promise.all([
+    post('ensure-release-case', input, admin), post('ensure-release-case', input, member),
+  ]);
+  assert.equal(first.status, 200, first.body.error);
+  assert.equal(second.status, 200, second.body.error);
+  const { caseId } = first.body;
+  assert.ok(caseId);
+  assert.equal(second.body.caseId, caseId);
+  assert.notEqual(caseId, personal.body.id);
+  const { body: detail } = await post('view', { caseId }, member);
+  assert.equal(detail.case.product, 'Astra');
+  assert.equal(detail.case.body.release, releaseId);
+  assert.equal(detail.case.body.plan.metric, 'orders_index');
+  assert.equal((await post('view', { caseId: personal.body.id }, member)).status, 400);
+
+  const { current } = (await post('investigation-status', { caseId }, member)).body;
+  assert.equal(current.caseId, caseId);
+  await app.close();
+  app = open();
+  await listen();
+  assert.equal((await post('ensure-release-case', { releaseId }, member)).body.caseId, caseId);
+  const restarted = (await post('investigation-status', { caseId }, member)).body;
+  assert.equal(restarted.current.id, current.id);
+  assert.equal(app.space('team').db.prepare(
+    'SELECT count(*) AS n FROM case_investigations WHERE case_id=? AND parent_id IS NULL'
+  ).get(caseId).n, 1);
+});

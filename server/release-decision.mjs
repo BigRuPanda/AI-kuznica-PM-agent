@@ -35,7 +35,7 @@ function weeklyTrend(rows, asOf) {
   return { available: true, baseline, current, change, latest: recent };
 }
 
-function released({ data }) {
+export function released({ data }) {
   return ['major', 'minor'].includes(data.release_type) && /^(выпущен[аоы]?|released)$/iu.test(data.status || '');
 }
 
@@ -43,7 +43,7 @@ export function canDecideRelease(row, products) {
   return matchedProducts(row, products).length > 0;
 }
 
-function matchedProducts(row, products) {
+export function matchedProducts(row, products) {
   if (!released(row)) return [];
   return isAccountFeature(row) ? ['ЛК'] : products.filter(name => mentions(row.data.description, name));
 }

@@ -1,5 +1,6 @@
 import { initSourcePolicy, approveSource, sourcePermission, importApproved, sourceHistory, protectedSources, protectedProducts } from './source-policy.mjs';
 import { operations as catalog, workspaceOperation } from './workspace-operations.mjs';
+import { openReleaseCase } from './release-cases.mjs';
 import { knowledge } from './knowledge.mjs';
 import { createServer } from 'node:http';
 import { dirname, join } from 'node:path';
@@ -485,6 +486,7 @@ export function createTeamApp({
           return reply(200, { threshold });
         }
         if (op === 'case-thread') return reply(200, { id: openCaseThread(db, user, b.caseId) });
+        if (op === 'ensure-release-case') return reply(200, openReleaseCase(store, b));
         if (op === 'release_decision') {
           const decision = workspaceOperation(store, user, op, b, env, send);
           return reply(200, { ...decision, decisionContext: saveReleaseDecisionContext(db, user, decision) });
