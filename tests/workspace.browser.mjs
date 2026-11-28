@@ -283,7 +283,7 @@ test('release decisions preserve the historical cutoff, cited cells and manual i
     release('DEC-1', '2026-10-01', 'Изменение Kaspersky', 2),
     release('DEC-2', '2026-11-24', 'Поздний релиз Kaspersky', 3),
     release('DEC-3', '2026-10-02', 'Изменение Astra', 4, { related_task_ids: 'DEC-ASTRA' }),
-    release('R-50', '2026-10-04', 'Карусель рекомендаций ЛК', 5, { affected_metrics: 'lk_reco_click_visits', related_task_ids: 'T-9' }),
+    release('R-50', '2026-10-04', 'Карусель рекомендаций ЛК', 5, { affected_metrics: 'lk_reco_ctr,lk_reco_click_visits', related_task_ids: 'T-9' }),
     release('MIX-1', '2026-10-03', 'Изменения для Astra и Kaspersky', 6),
     release('OLD-1', '2026-10-01', 'Обновление Astra', 7),
     release('DEC-TECH', '2026-10-10', 'Обновление сбора событий для семейств Astra и Kaspersky', 8, { release_type: 'analytics' }),
@@ -305,6 +305,11 @@ test('release decisions preserve the historical cutoff, cited cells and manual i
       date: new Date(Date.UTC(2026, 8, 20 + day)).toISOString().slice(0, 10), value: day < 14 ? 1 : 2,
     } });
   }
+  // This release was already in the calendar when the shared release cases were introduced.
+  const oldRelease = imported[0].facts.find(fact => fact.row?.release_id === 'OLD-1');
+  store.db.prepare('INSERT INTO facts VALUES(?,?,?,?,?,?)').run(
+    'releases', 'OLD-1', 'old-calendar', imported[0].file, oldRelease.loc, JSON.stringify(oldRelease.row),
+  );
   importDocs(store, imported, { notify: false });
   const legacy = digest(user.id + '/release/OLD-1');
   const legacyMixed = digest(user.id + '/release/MIX-1');
@@ -338,6 +343,9 @@ test('release decisions preserve the historical cutoff, cited cells and manual i
   assert.equal(store.db.prepare('SELECT product FROM release_threads WHERE thread=?').get(legacy).product, 'Astra');
   assert.throws(() => call('release-tracker-draft', { caseId: linked.id, releaseId: 'DEC-1' }), /другому релизу/);
   assert.equal(call('release_decision', { releaseId: 'DEC-1' }).caseId, null);
+  const sharedCaseId = call('release_decision', { releaseId: 'DEC-2' }).releaseCaseId;
+  assert.ok(sharedCaseId);
+  assert.notEqual(sharedCaseId, linked.id);
   assert.equal(call('release_decision', { releaseId: 'DEC-2' }).asOf, '2026-11-24');
   assert.throws(() => call('release_decision', { releaseId: 'DEC-2', through: '2026-11-23' }), /нет такого релиза/);
   const account = call('release_decision', { releaseId: 'R-50' });
@@ -370,7 +378,11 @@ test('release decisions preserve the historical cutoff, cited cells and manual i
   const page = await browser.newPage({ locale: 'ru-RU', viewport: { width: 1440, height: 900 }, reducedMotion: 'reduce' });
   page.setDefaultTimeout(20000);
   const errors = [];
+  const releaseThreadRequests = [];
   page.on('pageerror', error => errors.push(error.message));
+  page.on('request', request => {
+    if (request.url().endsWith('/api/team/release-thread')) releaseThreadRequests.push(request.url());
+  });
   await page.goto(base + '/#overview');
   await field(page, 'Логин').fill('fixture-admin');
   await field(page, 'Пароль').fill('fixture-password');
@@ -380,58 +392,56 @@ test('release decisions preserve the historical cutoff, cited cells and manual i
   const journalLink = page.getByRole('navigation', { name: 'Основные разделы' })
     .getByRole('link', { name: 'Релизы', exact: true });
   const journalHeading = page.getByRole('heading', { name: 'Релизы', exact: true });
-  const releaseHeading = page.getByRole('heading', { name: 'Разбор релиза', exact: true });
+  const releaseHeading = page.getByRole('heading', { name: 'Данные релиза', exact: true });
   const releaseLink = page.getByRole('link', { name: 'Поздний релиз Kaspersky', exact: true });
   await journalLink.click();
+  const journalCase = page.locator('.release-journal-card').filter({ has: releaseLink })
+    .getByRole('link', { name: 'Открыть разбор', exact: true });
+  assert.equal(await journalCase.getAttribute('href'), '#case/' + sharedCaseId);
   await releaseLink.click();
   await page.waitForURL('**/#release-decision/DEC-2');
+  await visible(releaseHeading);
   const releaseSelect = field(page.locator('.decision-filters'), 'Релиз');
   assert.equal(await releaseSelect.inputValue(), 'DEC-2');
-  const chatPanel = page.locator('.decision-chat');
-  const conversation = page.getByRole('region', { name: 'Переписка' });
-  await conversation.waitFor({ state: 'visible', timeout: 5000 });
-  assert.equal(await role(page, 'Открыть чат разбора').count(), 0);
+  assert.equal(await page.getByRole('region', { name: 'Переписка' }).count(), 0);
+  assert.equal(await role(page, 'Подготовить вывод').count(), 0);
+  assert.equal(await page.getByRole('heading', { name: 'Вывод агента', exact: true }).count(), 0);
   const evidenceCards = page.locator('.decision-evidence > section');
   await visible(evidenceCards.last());
   const effectLink = page.locator('.decision-hero').getByRole('link', { name: 'Настроить проверку эффекта', exact: true });
   assert.equal(await effectLink.count(), 0);
-  for (const width of [1440, 980, 821, 820, 390]) {
+  for (const width of [1440, 390]) {
     await page.setViewportSize({ width, height: 900 });
     const heights = await evidenceCards.evaluateAll(cards => cards.map(card => card.getBoundingClientRect().height));
     assert.equal(heights.length, 3);
     assert.ok(Math.max(...heights) - Math.min(...heights) < 1, `Uneven evidence cards at ${width}px: ${heights.join(', ')}`);
-    const panel = await chatPanel.boundingBox();
-    if (width > 820) {
-      const releaseCard = await page.locator('.decision-hero').boundingBox();
-      assert.ok(panel.x >= releaseCard.x + releaseCard.width, `Expected chat to the right at ${width}px`);
-    } else {
-      const heading = await releaseHeading.boundingBox();
-      const filters = await page.locator('.decision-filters').boundingBox();
-      assert.ok(panel.y >= heading.y + heading.height && panel.y + panel.height <= filters.y,
-        `Expected chat between the title and filters at ${width}px`);
-    }
+    const wrapper = await page.locator('.release-decision').boundingBox();
+    const releaseCard = await page.locator('.decision-hero').boundingBox();
+    assert.ok(Math.abs(releaseCard.width - wrapper.width) < 1, `Unused release width at ${width}px`);
     assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth),
       `Unexpected horizontal scroll at ${width}px`);
   }
-  await page.setViewportSize({ width: 1440, height: 720 });
-  await page.evaluate(() => localStorage.setItem('pm-menu-layout', 'top'));
-  await page.reload();
-  await visible(conversation);
-  await page.evaluate(() => window.scrollTo(0, 220));
-  await page.waitForFunction(() => {
-    const menu = document.querySelector('.team-app[data-menu="top"] > .side');
-    const panel = document.querySelector('.decision-chat');
-    const input = panel?.querySelector('.chat-composer textarea');
-    return window.scrollY > 0 && menu && panel && input &&
-      Math.abs(panel.getBoundingClientRect().top - menu.getBoundingClientRect().bottom - 16) < 2 &&
-      input.getBoundingClientRect().bottom <= innerHeight;
-  }, undefined, { timeout: 5000 });
-  await page.evaluate(() => localStorage.removeItem('pm-menu-layout'));
+  const openCase = page.getByRole('link', { name: 'Открыть разбор', exact: true });
+  assert.equal(await openCase.getAttribute('href'), '#case/' + sharedCaseId);
+  await openCase.click();
+  await page.waitForURL('**/#case/' + sharedCaseId);
+  await visible(page.getByRole('heading', { name: 'Разбор релиза DEC-2 · Kaspersky', exact: true }));
   await page.setViewportSize({ width: 1440, height: 900 });
-  await page.reload();
+  await page.goBack();
   await visible(releaseHeading);
   await page.getByRole('link', { name: '← Журнал релизов' }).click();
   await visible(journalHeading);
+
+  const oldRow = page.locator('.release-journal-card').filter({ hasText: 'OLD-1' });
+  await oldRow.locator('a[href="#release-decision/OLD-1"]').click();
+  const [created] = await submit(page, 'ensure-release-case', () => role(page, 'Создать разбор').click());
+  const { caseId: oldCaseId } = await created.json();
+  assert.ok(oldCaseId);
+  await page.waitForURL('**/#case/' + oldCaseId);
+  await page.goto(base + '/#release-decision/OLD-1');
+  assert.equal(await openCase.getAttribute('href'), '#case/' + oldCaseId);
+  await page.getByRole('link', { name: '← Журнал релизов', exact: true }).click();
+  assert.equal(await oldRow.getByRole('link', { name: 'Открыть разбор' }).getAttribute('href'), '#case/' + oldCaseId);
 
   const compoundId = page.locator('.decision-hero').getByText('DEC K/1 · 01.10.2026', { exact: true });
   await page.locator('a[href="#release-decision/DEC%20K%2F1"]').click();
@@ -463,6 +473,7 @@ test('release decisions preserve the historical cutoff, cited cells and manual i
   await releaseLink.click();
 
   await field(page, 'Семейство или раздел').selectOption('Kaspersky');
+  await page.getByText('Интервью покупателей', { exact: true }).click();
   await page.getByText('Интервью покупателей', { exact: true }).click();
   await visible(page.getByText('«Неясно, какую лицензию выбрать»'));
   await page.getByRole('link', { name: /Интервью!L9/ }).click();
@@ -511,55 +522,33 @@ test('release decisions preserve the historical cutoff, cited cells and manual i
   await releaseSelect.selectOption('DEC-3');
   await visible(page.locator('.decision-hero').getByText('DEC-3 · 02.10.2026', { exact: true }));
   assert.equal(await releaseSelect.inputValue(), 'DEC-3');
-  await visible(conversation.getByText('История до создания связанного разбора', { exact: true }));
 
   await releaseSelect.selectOption('MIX-1');
-  const astraHistory = conversation.getByText('Частные выводы Astra', { exact: true });
-  const kasperskyHistory = conversation.getByText('Частные выводы Kaspersky', { exact: true });
-  await visible(astraHistory);
-  assert.equal(await kasperskyHistory.count(), 0);
-
-  const chatEndpoint = '**/api/team/release-thread';
-  const resumeAstra = Promise.withResolvers();
-  const isAstraMixedChat = request => request.url().endsWith('/api/team/release-thread') &&
-    request.postDataJSON()?.product === 'Astra' && request.postDataJSON()?.releaseId === 'MIX-1';
-  const delayAstra = async route => {
-    if (isAstraMixedChat(route.request())) await resumeAstra.promise;
-    await route.continue();
-  };
-  await page.route(chatEndpoint, delayAstra);
-  try {
-    await releaseSelect.selectOption('DEC-3');
-    await visible(conversation.getByText('История до создания связанного разбора', { exact: true }));
-    await Promise.all([
-      page.waitForRequest(isAstraMixedChat, { timeout: 5000 }),
-      releaseSelect.selectOption('MIX-1'),
-    ]);
-    await field(page, 'Семейство или раздел').selectOption('Kaspersky');
-    await releaseSelect.selectOption('MIX-1');
-    await visible(kasperskyHistory);
-    const astraReply = page.waitForResponse(response => isAstraMixedChat(response.request()), { timeout: 5000 });
-    resumeAstra.resolve();
-    await (await astraReply).finished();
-    await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
-    assert.equal(await kasperskyHistory.isVisible(), true);
-    assert.equal(await astraHistory.count(), 0);
-  } finally {
-    resumeAstra.resolve();
-    await page.unroute(chatEndpoint, delayAstra);
-  }
+  await visible(page.locator('.decision-hero').getByText('MIX-1 · 03.10.2026', { exact: true }));
+  await journalLink.click();
+  const mixedRow = page.locator('.release-journal-card').filter({ hasText: 'MIX-1' });
+  await role(mixedRow, 'Создать разбор').click();
+  const setup = page.getByRole('dialog', { name: 'Создать разбор релиза' });
+  await field(setup, 'Продукт').selectOption('Astra');
+  assert.equal(await field(setup, 'Метрика').inputValue(), 'orders_index');
+  const [mixed] = await submit(page, 'ensure-release-case', () => role(setup, 'Создать разбор').click());
+  const { caseId: mixedCaseId } = await mixed.json();
+  await page.waitForURL('**/#case/' + mixedCaseId);
+  await page.goto(base + '/#release-decision/MIX-1');
+  await field(page, 'Семейство или раздел').selectOption('Kaspersky');
+  await releaseSelect.selectOption('MIX-1');
+  assert.equal(await openCase.getAttribute('href'), '#case/' + mixedCaseId);
 
   await page.goto(base + '/#release-detail/DEC-2');
   await page.waitForURL('**/#release-decision/DEC-2');
   await visible(releaseHeading);
-  await visible(page.getByRole('heading', { name: 'Чат разбора · DEC-2' }));
   await role(page, 'Найти задачу и проверить дубли').click();
   await visible(page.getByRole('link', { name: /^DEC-T ·/ }));
   assert.equal(await role(page, 'Подготовить черновик задачи').count(), 0);
   await role(page, 'Подготовить комментарий').click();
   await visible(page.locator('.tracker-preview').getByText(/Метрики!A4/));
   assert.equal(store.db.prepare('SELECT count(*) AS n FROM local_issues').get().n, 0);
-  assert.equal(store.db.prepare('SELECT state FROM draft_actions WHERE case_id=?').get(linked.id).state, 'draft');
+  assert.equal(store.db.prepare('SELECT state FROM draft_actions WHERE case_id=?').get(sharedCaseId).state, 'draft');
   await role(page, 'Подтвердить запись').click();
   await visible(page.getByRole('link', { name: 'Открыть задачу · DEC-T' }));
   assert.equal(store.db.prepare("SELECT count(*) AS n FROM local_issues WHERE key='DEC-T'").get().n, 1);
@@ -573,14 +562,13 @@ test('release decisions preserve the historical cutoff, cited cells and manual i
   await page.getByRole('link', { name: /Клики!A2$/ }).click();
   await visible(page.getByText('Клики!A2', { exact: true }));
   await page.goBack();
-  await visible(page.getByRole('heading', { name: 'Чат разбора · R-50' }));
-  const thread = store.db.prepare("SELECT id FROM conversations WHERE title='ЛК · R-50'").get().id;
+  await visible(releaseHeading);
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
+  const beforeAccountSearch = caseCount();
   await role(page, 'Найти задачу и проверить дубли').click();
   await visible(page.getByRole('link', { name: /^T-9 ·/ }));
-  assert.equal(caseCount(), countBeforeSearch + 1);
+  assert.equal(caseCount(), beforeAccountSearch);
   assert.equal(await role(page, 'Подготовить черновик задачи').count(), 0);
-  await role(page, 'Создать связанный разбор').click();
   await role(page, 'Подготовить комментарий').click();
   await visible(page.locator('.tracker-preview').getByText(/Клики!A2/));
   const accountCase = JSON.parse(store.db.prepare("SELECT body FROM cases WHERE product='ЛК'").get().body);
@@ -589,39 +577,15 @@ test('release decisions preserve the historical cutoff, cited cells and manual i
   await role(page, 'Подтвердить запись').click();
   await visible(page.getByRole('link', { name: 'Открыть задачу · T-9' }));
   assert.equal(store.db.prepare("SELECT count(*) AS n FROM local_issues WHERE key='T-9'").get().n, 1);
-  const question = 'Что известно про карусель рекомендаций ЛК после выкладки?';
-  await page.locator('textarea').fill(question);
-  await submit(page, 'ask', () => role(page, 'Отправить').click());
-  assert.equal(JSON.parse(store.db.prepare('SELECT body FROM jobs WHERE thread=?').get(thread).body).decisionReleaseId, 'R-50');
-  await workJobs(store, app.accounts, fixtureEnv, transport);
-  await visible(conversation.getByText(/14 → 28/));
-  await conversation.getByRole('link', { name: /Клики!A2$/ }).click();
-  await visible(page.getByText('Клики!A2', { exact: true }));
-  await page.goto(base + '/#overview');
-  await page.goto(base + '/#release-decision/R-50');
-  await visible(conversation.getByText(question, { exact: true }));
-  assert.deepEqual(store.db.prepare("SELECT id FROM conversations WHERE title='ЛК · R-50'").all().map(r => r.id), [thread]);
   await field(page, 'Дата среза').fill('2026-10-10');
   await role(page, 'Показать на дату').click();
   await visible(page.getByText('Исторический срез · 10.10.2026', { exact: true }));
-  await page.locator('textarea').fill(question);
-  await submit(page, 'ask', () => role(page, 'Отправить').click());
-  const scopedJob = JSON.parse(store.db.prepare('SELECT body FROM jobs WHERE thread=? ORDER BY rowid DESC LIMIT 1').get(thread).body);
-  assert.equal(scopedJob.decisionThrough, '2026-10-10');
-  assert.equal(scopedJob.releaseDecisionSnapshot.through, '2026-10-10');
-  await workJobs(store, app.accounts, fixtureEnv, transport);
-  await visible(conversation.getByText(/14\/14 и 6\/14/));
 
   await field(page, 'Дата среза').fill('2026-09-01');
   await role(page, 'Показать на дату').click();
-  await visible(chatPanel.getByRole('status').filter({ hasText: 'На выбранную дату нет релиза для обсуждения.' }));
-  assert.equal(await conversation.count(), 0);
-  await page.route(chatEndpoint, route => route.fulfill({ status: 500, json: { error: 'Не удалось загрузить чат' } }),
-    { times: 1 });
-  await page.goto(base + '/#release-decision/DEC-2');
-  await visible(chatPanel.getByRole('alert').filter({ hasText: 'Не удалось загрузить чат' }));
-  await visible(evidenceCards.last());
-  assert.equal(await conversation.count(), 0);
+  await visible(page.getByText('К этой дате в календаре нет выпущенной функции семейства.'));
+  assert.equal(await openCase.count(), 0);
+  assert.deepEqual(releaseThreadRequests, []);
 
   assert.equal(store.db.prepare("SELECT count(*) AS n FROM local_issues WHERE key='DEC-ASTRA'").get().n, 0);
   assert.equal((await call('confirm', { id: astraDraft.id })).key, 'DEC-ASTRA');
@@ -634,7 +598,7 @@ test('release decisions preserve the historical cutoff, cited cells and manual i
     }));
   await page.getByRole('navigation', { name: 'Основные разделы' })
     .getByRole('link', { name: 'Разборы', exact: true }).click();
-  const releaseCard = page.locator('a[href="#case/' + linked.id + '"]');
+  const releaseCard = page.locator('a[href="#case/' + sharedCaseId + '"]');
   const standaloneCard = page.locator('a[href="#case/' + unrelated.id + '"]');
   const signalCard = page.locator('a[href="#case/' + releaseSignalId + '"]');
   await visible(releaseCard);

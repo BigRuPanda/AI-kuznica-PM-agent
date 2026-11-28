@@ -171,7 +171,7 @@
   inline-size: min(100%, var(--release-actions-width));
   gap: 8px;
 }
-.release-card-actions button {
+.release-card-actions :is(button, a.release-plan) {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -188,6 +188,11 @@
   border-color: var(--accent-text);
   background: var(--accent-soft);
   color: var(--accent-text);
+}
+.release-card-actions a.release-plan {
+  border: 1px solid;
+  border-radius: var(--radius);
+  text-decoration: none;
 }
 .release-journal .release-card-actions .release-plan:is(:hover, :focus-visible) {
   border-color: var(--accent);

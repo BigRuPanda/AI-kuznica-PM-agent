@@ -1,6 +1,6 @@
-import React, { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Icon } from './icons';
-import { useDiscussionDock } from './panel-size';
+import { ReleaseCaseLink } from './release-case-link';
 import { post } from './team-data';
 import { PreviewCard, type TrackerPreview } from './tracking';
 import './release-decision.css';
@@ -14,10 +14,11 @@ type Trend =
   | { available: true; baseline: Period; current: Period; change: number | null }
   | { available: false; reason: string };
 type Decision = {
-  decisionContext?: string;
   scope?: 'account';
   accountEvidence?: { lines: string[]; sources: Citation[] };
   caseId: string | null;
+  releaseCaseId: string | null;
+  releaseCaseProduct: string | null;
   product: string;
   products: string[];
   asOf: string;
@@ -155,22 +156,20 @@ function CompetitorPrices({ offer, historical }: { offer: Decision['competitor']
   </section>;
 }
 
-function TrackerActions({ product, releaseId, action }: { product: string; releaseId: string; action: Action }) {
+function TrackerActions({ product, releaseId, caseId, action }: {
+  product: string; releaseId: string; caseId: string | null; action: Action;
+}) {
   const [search, setSearch] = useState<TrackerSearch>();
   const [draft, setDraft] = useState<TrackerPreview>();
   const [pending, setPending] = useState(false);
   const [error, setError] = useState('');
-  const payload = { product, releaseId };
+  const payload = { product, releaseId, caseId: caseId ?? undefined };
   const hasExact = search?.items.some(item => item.exact);
-  const canDraft = !hasExact || search?.items.some(item => item.exact && item.canComment);
-  async function run(op: 'search' | 'case' | 'draft', key?: string) {
+  async function run(op: 'search' | 'draft', key?: string) {
     setPending(true);
     setError('');
     try {
-      if (op === 'case' && search) {
-        const { caseId } = await post<{ caseId: string }>('release-tracker-case', payload);
-        setSearch({ ...search, caseId });
-      } else if (op === 'draft' && search?.caseId) {
+      if (op === 'draft' && search?.caseId) {
         setDraft(await post<TrackerPreview>('release-tracker-draft', { ...payload, caseId: search.caseId, key }));
       } else if (op === 'search') {
         setSearch(await post<TrackerSearch>('release-tracker', payload));
@@ -201,9 +200,6 @@ function TrackerActions({ product, releaseId, action }: { product: string; relea
           >Подготовить комментарий</button>}
         </li>)}
       </ul>
-      {!search.caseId && canDraft && <button
-        type="button" disabled={pending} onClick={() => void run('case')}
-      >Создать связанный разбор</button>}
       {search.caseId && !hasExact && <button
         type="button" disabled={pending} onClick={() => void run('draft')}
       >Подготовить черновик задачи</button>}
@@ -213,49 +209,28 @@ function TrackerActions({ product, releaseId, action }: { product: string; relea
 }
 
 export function ReleaseDecision({
-  action, renderChat, initialRelease,
+  action, initialRelease,
 }: {
   action: Action;
   initialRelease?: string;
-  renderChat: (thread: string, caseId: string | undefined, releaseId: string, product: string,
-    decisionContext: string | undefined) => React.ReactNode;
 }) {
   const [criteria, setCriteria] = useState<Criteria>(() => history.state?.releaseDecision ?? { releaseId: initialRelease });
   const [data, setData] = useState<Decision>();
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [cut, setCut] = useState(criteria.through || '');
-  const [thread, setThread] = useState('');
-  const [chatError, setChatError] = useState('');
-  const chatDock = useRef<HTMLDivElement>(null);
   const request = useRef(0);
-  useDiscussionDock(chatDock, true);
 
   useEffect(() => {
     const current = ++request.current;
     async function load() {
-      let decision: Decision;
       try {
-        decision = await post<Decision>('release_decision', criteria);
+        const decision = await post<Decision>('release_decision', criteria);
+        if (request.current === current) setData(decision);
       } catch (err) {
-        if (request.current === current) {
-          setError((err as Error).message);
-          setLoading(false);
-        }
-        return;
-      }
-      if (request.current !== current) return;
-      setData(decision);
-      setLoading(false);
-      if (!decision.release) return;
-
-      try {
-        const { id } = await post<{ id: string }>('release-thread', {
-          product: decision.product, releaseId: decision.release.id, decisionContext: decision.decisionContext,
-        });
-        if (request.current === current) setThread(id);
-      } catch (err) {
-        if (request.current === current) setChatError((err as Error).message);
+        if (request.current === current) setError((err as Error).message);
+      } finally {
+        if (request.current === current) setLoading(false);
       }
     }
     void load();
@@ -264,8 +239,6 @@ export function ReleaseDecision({
 
   function select(next: typeof criteria) {
     request.current++;
-    setThread('');
-    setChatError('');
     setError('');
     setLoading(true);
     history.replaceState({ ...history.state, releaseDecision: next }, '');
@@ -369,24 +342,19 @@ export function ReleaseDecision({
           </>}
         </details></section>
       </div>}
+      {release && (data.releaseCaseId || !data.historical) && <div>
+        <ReleaseCaseLink key={release.id} releaseId={release.id} caseId={data.releaseCaseId} className="primary" />
+      </div>}
       {release && !data.historical && <TrackerActions key={data.product + '/' + release.id}
-        product={data.product} releaseId={release.id} action={action} />}
+        product={data.product} releaseId={release.id}
+        caseId={data.releaseCaseProduct === data.product ? data.releaseCaseId : data.caseId} action={action} />}
     </>}
   </>;
-  const chatStatus = error ? 'Чат разбора недоступен.'
-    : loading || release ? 'Загружаем чат разбора…' : 'На выбранную дату нет релиза для обсуждения.';
-
   return <div className="release-decision">
-    <nav className="decision-breadcrumbs" aria-label="Путь к разбору релиза">
+    <nav className="decision-breadcrumbs" aria-label="Путь к данным релиза">
       <a className="crumb" href="#releases-list">← Журнал релизов</a>
     </nav>
-    <div className="page-head"><h1>Разбор релиза</h1></div>
-    <div className="decision-layout">
-      <div className="case-discussion decision-chat" ref={chatDock} role="complementary" aria-label="Чат разбора">
-        {thread && release && data ? renderChat(thread, data.caseId || undefined, release.id, data.product, data.decisionContext)
-          : <p className="paper" role={chatError ? 'alert' : 'status'}>{chatError || chatStatus}</p>}
-      </div>
-      <div className="decision-main">{details}</div>
-    </div>
+    <div className="page-head"><h1>Данные релиза</h1></div>
+    <div className="decision-main">{details}</div>
   </div>;
 }

@@ -2380,11 +2380,7 @@ function Workspace({ user, onLogout, onUpdate }: { user: User; onLogout: () => v
         ) : ['release', 'calc'].includes(route) ? (
           <ReleaseAnalytics route={route} requestedId={id} user={user} />
         ) : route === 'release-decision' ? (
-          <ReleaseDecision key={id} action={action} initialRelease={id || undefined} renderChat={(thread, caseId, releaseId, product, decisionContext) => (
-            <Chat key={thread} id={thread} title={'Чат разбора · ' + releaseId} caseId={caseId}
-              decisionReleaseId={releaseId} decisionContext={decisionContext} product={product}
-              userId={user.id} avatar={user.avatar} threads={home.threads} action={action} />
-          )} />
+          <ReleaseDecision key={id} action={action} initialRelease={id || undefined} />
         ) : route === 'case' ? (
           <Investigation key={home.user.id + '/' + id} id={id} selected={selected} documentation={documentation}
             home={home} avatar={user.avatar} action={action} refresh={refresh} />

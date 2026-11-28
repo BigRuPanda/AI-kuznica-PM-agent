@@ -3,6 +3,7 @@ import { archiveEvidence, archiveInquiry, archiveAnswer, archiveIdStatus, asksAr
 import { briefConversation, caseBrief, caseBriefKind } from './chat-brief.mjs';
 import { weeklySourceAnswer } from './weekly-source-chat.mjs';
 import { checkReleaseReferencePeriod, checkReleaseSourceVersions } from './release-chat-scope.mjs';
+import { findReleaseCaseId } from './release-cases.mjs';
 import { initRanges, access, grant, compareRanges, readRange, readSnapshot } from './chart-ranges.mjs';
 import { randomUUID } from 'node:crypto';
 import {
@@ -168,7 +169,8 @@ export function dashboard(db, user) {
         .map(task => ({
           id: String(task.task_id), title: String(task.title ?? '').trim(), status: String(task.status ?? '').trim(),
         }));
-      return { ...release, relatedTasks, decisionAvailable: canDecideRelease(fact, products) };
+      return { ...release, relatedTasks, decisionAvailable: canDecideRelease(fact, products),
+        releaseCaseId: findReleaseCaseId(db, release.release_id) };
     }),
     deliveries: db.prepare('SELECT channel,state,count(*) n FROM deliveries GROUP BY channel,state').all(),
   };

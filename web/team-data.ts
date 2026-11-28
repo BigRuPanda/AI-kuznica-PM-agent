@@ -92,6 +92,7 @@ export type Release = {
   related_task_ids: string;
   relatedTasks?: { id: string; title: string; status: string }[];
   decisionAvailable?: boolean;
+  releaseCaseId: string | null;
 };
 export type Home = {
   bridgeEnabled?: boolean;

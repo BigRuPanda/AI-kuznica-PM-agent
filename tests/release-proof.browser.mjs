@@ -88,7 +88,7 @@ test('release decisions and saved calculations present the result before its pro
   await t.test('assessment leads with the recommendation and keeps the cited weekly and price data accessible', async () => {
     await page.goto(origin + '/decision');
     assert.deepEqual(errors, []);
-    await page.getByRole('heading', { name: 'Разбор релиза' }).waitFor();
+    await page.getByRole('heading', { name: 'Данные релиза' }).waitFor();
     const next = page.getByText('Сверить события с заказами', { exact: true });
     await next.waitFor();
     assert.equal(await page.getByRole('heading', { level: 2 }).first().textContent(), 'Проверить сбор событий');

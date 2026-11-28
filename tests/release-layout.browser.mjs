@@ -46,14 +46,14 @@ test('release cards sort both sources and keep their routes and actions distinct
   assert.equal(await journal.getByRole('table').count(), 0);
   await cards.last().getByText('Дата не указана', { exact: true }).waitFor();
   assert.equal(await cards.first().locator('time').getAttribute('datetime'), '2026-11-08');
-  assert.equal(await cards.nth(0).getByRole('link').getAttribute('href'), '#release-decision/R-001');
+  assert.equal(await cards.nth(0).getByRole('link', { name: calendarTitle }).getAttribute('href'), '#release-decision/R-001');
   assert.equal(await cards.nth(2).getByRole('link').getAttribute('href'), '#release/R-001');
   assert.equal(await cards.last().getByRole('link').count(), 0);
   await page.mouse.move(0, 0);
   await assertOutlined(source);
   await assertOutlined(cards.first());
   await assertOutlined(cards.first().getByRole('link', { name: calendarTitle, exact: true }).locator('.release-open-icon'));
-  await assertOutlined(cards.first().getByRole('button', { name: 'Запланировать разбор R-001' }));
+  await assertOutlined(cards.first().getByRole('link', { name: 'Открыть разбор' }));
   await assertOutlined(cards.first().getByRole('button', { name: 'Связанные задачи и разборы R-001' }));
   const management = page.getByText('Управление', { exact: true });
   await assertOutlined(management);
@@ -94,7 +94,7 @@ test('release cards sort both sources and keep their routes and actions distinct
   const alignment = await journal.evaluate(list => {
     const primary = list.querySelector('.release-plan').getBoundingClientRect();
     const edges = [...list.querySelectorAll('.release-plan')].map(button => button.getBoundingClientRect().right);
-    const actions = [...list.querySelectorAll('.release-card-actions button')].map(button => button.getBoundingClientRect());
+    const actions = [...list.querySelectorAll('.release-card-actions :is(button, a.release-plan)')].map(button => button.getBoundingClientRect());
     const arrow = list.querySelector('.release-open-icon').getBoundingClientRect();
     const middle = rect => rect.top + rect.height / 2;
     return {
@@ -105,7 +105,7 @@ test('release cards sort both sources and keep their routes and actions distinct
   });
   assert.deepEqual(alignment, { actionsInOneColumn: true, arrowOnActionLine: true, equalButtons: true });
   await cards.first().getByRole('link', { name: calendarTitle, exact: true }).click();
-  await page.getByRole('heading', { name: 'Разбор релиза', exact: true }).waitFor();
+  await page.getByRole('heading', { name: 'Данные релиза', exact: true }).waitFor();
   await page.waitForURL('**/#release-decision/R-001');
   await page.goto(origin + '/#releases');
   assert.equal(await source.inputValue(), 'metrics');

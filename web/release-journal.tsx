@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { DataForm } from './forms';
 import { Icon } from './icons';
+import { ReleaseCaseLink } from './release-case-link';
 import type { Release } from './team-data';
 import { api, type Journal } from './types';
 import './releases.css';
@@ -115,8 +116,10 @@ export function ReleaseJournal({ calendar, initialFilter, admin, archiveOnly, on
               aria-controls={expanded ? detailsId : undefined}
               aria-label={'Связанные ' + detailsLabel.toLowerCase() + ' ' + entry.id}
               onClick={() => setExpandedRelease(expanded ? null : entry.id)}>{detailsLabel}<Icon name="down" /></button>}
-            <button type="button" className="release-plan" aria-label={'Запланировать разбор ' + entry.id}
-              onClick={() => onPlan(entry.id)}>Запланировать разбор</button>
+            {release.decisionAvailable || release.releaseCaseId
+              ? <ReleaseCaseLink releaseId={entry.id} caseId={release.releaseCaseId} className="release-plan" />
+              : <button type="button" className="release-plan" aria-label={'Запланировать разбор ' + entry.id}
+                onClick={() => onPlan(entry.id)}>Запланировать разбор</button>}
           </div>}
           {expanded && linkedTasks && <div className="release-card-related" id={detailsId}>
             {hasTasks && <RelatedTasks {...linkedTasks} />}

@@ -3,22 +3,13 @@
 .release-decision :is(.page-head, .paper) { margin-block: 0; }
 .release-decision .paper > h2:first-child { margin-block-start: 0; }
 .decision-breadcrumbs { display: flex; flex-wrap: wrap; gap: .45rem 1.2rem; }
-.decision-layout {
-  display: grid;
-  grid-template-areas: 'main chat';
-  grid-template-columns: minmax(0, 1fr) clamp(17rem, 38%, 27rem);
-  align-items: start;
-  gap: 1rem;
-}
 .decision-main {
-  grid-area: main;
   display: grid;
   grid-template-columns: minmax(0, 1fr);
   gap: 1rem;
   min-width: 0;
   container-type: inline-size;
 }
-.decision-chat { grid-area: chat; }
 .decision-main .tracker-preview { overflow-wrap: anywhere; }
 .decision-filters {
   display: flex;
@@ -86,12 +77,6 @@
 }
 @container (max-width: 465px) {
   .decision-evidence { grid-template-columns: minmax(0, 1fr); }
-}
-@media (max-width: 820px) {
-  .decision-layout {
-    grid-template-areas: 'chat' 'main';
-    grid-template-columns: minmax(0, 1fr);
-  }
 }
 .offer-check { display: grid; justify-items: start; gap: .6rem; margin-top: 1rem; }
 .offer-check small { display: block; margin-top: .4rem; }

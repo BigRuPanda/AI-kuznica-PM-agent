@@ -250,7 +250,7 @@ test('organizer archive supplies both families, verifiable evidence, and histori
   });
 });
 
-test('release chat requires a linked case before manual confirmation with the organizer workbook', {
+test('release data opens the shared case and keeps tracker confirmation manual with the organizer workbook', {
   skip: !hasArchive ? 'Organizer ZIP is unavailable' : process.env.SIGNAL_RELEASE_BROWSER !== '1',
 }, async t => {
   const { chromium } = await import('playwright');
@@ -276,22 +276,20 @@ test('release chat requires a linked case before manual confirmation with the or
   await quote.click();
   await page.getByText('Активные!L9', { exact: true }).waitFor();
   await page.goBack();
-  const conversation = page.getByRole('region', { name: 'Переписка' });
-  await conversation.getByRole('heading', { name: 'Чат разбора · R-09', exact: true }).waitFor();
+  const heading = page.getByRole('heading', { name: 'Данные релиза', exact: true });
+  await heading.waitFor();
+  assert.equal(await page.getByRole('region', { name: 'Переписка' }).count(), 0);
+  const caseId = (await call('release_decision', { releaseId: 'R-09' })).releaseCaseId;
+  assert.ok(caseId);
+  assert.equal(await page.getByRole('link', { name: 'Открыть разбор' }).getAttribute('href'), '#case/' + caseId);
   await page.getByRole('button', { name: 'Найти задачу и проверить дубли' }).click();
   await page.getByRole('link', { name: /^T-08 · Недочеты/ }).waitFor();
   assert.equal(await page.getByRole('button', { name: 'Подготовить черновик задачи' }).count(), 0);
   const comment = page.locator('.decision-issues li').filter({ hasText: /^T-08/ })
     .getByRole('button', { name: 'Подготовить комментарий' });
-  assert.equal(await comment.count(), 0);
-  await page.getByRole('button', { name: 'Создать связанный разбор' }).click();
   await comment.click();
   await page.locator('.tracker-preview').getByText(/Метрики_справочник!/).waitFor();
   const db = app.space('team').db;
-  const caseId = (await call('release_decision')).caseId;
-  assert.ok(caseId);
-  const releaseThread = await call('release-thread', { releaseId: 'R-09' });
-  assert.equal((await call('case-thread', { caseId })).id, releaseThread.id);
   const draft = db.prepare('SELECT case_id,state FROM draft_actions').get();
   assert.deepEqual({ ...draft }, { case_id: caseId, state: 'draft' });
   assert.equal(db.prepare('SELECT count(*) n FROM local_issues').get().n, 0);
@@ -300,7 +298,7 @@ test('release chat requires a linked case before manual confirmation with the or
   assert.equal(db.prepare('SELECT state FROM draft_actions').get().state, 'done');
   assert.equal(db.prepare('SELECT count(*) n FROM local_issues WHERE key=?').get('T-08').n, 1);
   await page.reload();
-  await conversation.getByRole('heading', { name: 'Чат разбора · R-09', exact: true }).waitFor();
+  await heading.waitFor();
   assert.equal(await page.getByRole('link', { name: 'Настроить проверку эффекта', exact: true }).count(), 0);
   await page.goto(base + '/#case/' + caseId + '/effect');
   assert.equal(new URL(page.url()).hash, '#case/' + caseId + '/effect');
@@ -313,7 +311,6 @@ test('release chat requires a linked case before manual confirmation with the or
   await page.getByText('Исторический срез · 05.05.2026', { exact: true }).waitFor();
   await page.getByText('В архиве нет датированного интервью для этого среза.').waitFor();
   assert.equal(await page.getByRole('combobox', { name: /^Релиз/ }).inputValue(), 'R-01');
-  await conversation.getByRole('heading', { name: 'Чат разбора · R-01', exact: true }).waitFor();
   assert.equal(await page.getByRole('button', { name: 'Найти задачу и проверить дубли' }).count(), 0);
   assert.equal(await page.getByRole('link', { name: 'Настроить проверку эффекта' }).count(), 0);
   await page.setViewportSize({ width: 390, height: 844 });
