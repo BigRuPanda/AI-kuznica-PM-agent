@@ -6,7 +6,7 @@ import { initWorkbench, createThread, enqueue, workJobs, messages } from '../ser
 import { workspaceOperation } from '../server/workspace-operations.mjs';
 import { apiConfigured } from '../server/agent.mjs';
 import { readMaterial } from '../server/materials.mjs';
-export function evaluationCase(s, user) {
+export function evaluationCase(s, user, env = process.env) {
   const facts = [],
     week = 604800000,
     start = Date.UTC(2026, 5, 29);
@@ -77,8 +77,8 @@ export function evaluationCase(s, user) {
   const c = workspaceOperation(s, user, 'create-case', {
     title: 'Проверка синтетического кейса',
     product: 'Kaspersky',
-  });
-  const v = workspaceOperation(s, user, 'view', { caseId: c.id, control: 'Astra' }).view;
+  }, env);
+  const v = workspaceOperation(s, user, 'view', { caseId: c.id, control: 'Astra' }, env).view;
   return {
     caseId: c.id,
     selection: {
@@ -96,6 +96,10 @@ export function evaluationCase(s, user) {
 }
 async function main() {
   const opts = Object.fromEntries(process.argv.slice(2).map((s) => s.replace(/^--/, '').split('=')));
+  if (opts.suite === 'first-pass') {
+    const { firstPass } = await import('./acceptance/runner.mjs');
+    return firstPass(opts);
+  }
   const env = {
     ...process.env,
     LLM_MODEL: opts.model || process.env.LLM_MODEL,

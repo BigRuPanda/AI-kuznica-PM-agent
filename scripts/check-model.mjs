@@ -1,6 +1,6 @@
 import {pathToFileURL} from 'node:url';
 import '../server/config.mjs';
-import {anymodelBaseUrl,apiConfigured,providerCall} from '../server/agent.mjs';
+import {anymodelBaseUrl,anymodelTimeoutMs,apiConfigured,providerCall} from '../server/agent.mjs';
 import {readModelResponse} from '../server/model-response.mjs';
 
 const tool={type:'function',function:{name:'check_value',description:'Получить тестовое значение.',parameters:{type:'object',properties:{},required:[]}}};
@@ -20,7 +20,7 @@ function valueCall(reply){
 }
 
 async function checkAnyModelCatalog(env,send){
-  const signal=AbortSignal.timeout(10000);
+  const signal=AbortSignal.timeout(anymodelTimeoutMs);
   let response;
   try {
     response=await send(anymodelBaseUrl+'/models',{method:'GET',redirect:'error',signal,
@@ -50,10 +50,10 @@ export async function checkModel(env=process.env,send=fetch){
 
   if(anymodel){
     const short=await providerCall(env,[{role:'user',content:'Верни только JSON: {"value":37}'}],[],'auto',send,
-      {maxTokens:56,temperature:0});
+      {temperature:0});
     const result=parseJson(short.content);
     if(result?.value!==37 || Object.keys(result).length!==1)
-      throw Error('Модель не вернула проверочный JSON в пределах 56 токенов.');
+      throw Error('Модель не вернула проверочный JSON.');
   }
 }
 

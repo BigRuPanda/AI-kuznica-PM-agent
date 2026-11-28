@@ -54,8 +54,19 @@ export function states(db, id) {
   return db.prepare('SELECT * FROM case_investigation_role_state WHERE run_id=? ORDER BY ordinal').all(id);
 }
 
-export function eligible(stage, siblings, now) {
-  if (stage.status === 'done' || stage.next > now || stage.lease_until > now) return false;
+export function retryPending(stage, now) {
+  return stage.status === 'retry' ||
+    (stage.status === 'running' && stage.lease != null && stage.lease_until <= now);
+}
+
+export function retryReason(stage, now) {
+  if (stage.status === 'running' && retryPending(stage, now)) return 'Истёк срок попытки.';
+  return stage.reason?.replace(/ (?:Этап будет повторён|Проверка будет повторена)\.$/u, '');
+}
+
+export function eligible(stage, siblings, now, automaticRetries = false) {
+  if (stage.status === 'done' || stage.next > now || stage.lease_until > now ||
+      (!automaticRetries && retryPending(stage, now))) return false;
   return !['lead','reviewer'].includes(stage.role) ||
     siblings.every(s => s.ordinal >= stage.ordinal || s.status === 'done');
 }
@@ -75,22 +86,24 @@ export function failureReason(error) {
   if (error?.retryable) return 'Не удалось связаться с провайдером.';
   if (error instanceof InvestigationValidationError) return 'Ответ модели не прошёл проверку. ' + error.message;
   if (error?.invalidModelResponse || error instanceof SyntaxError) return 'Ответ модели не прошёл проверку.';
-  return 'Не удалось завершить проверку. Этап будет повторён.';
+  return 'Не удалось завершить проверку.';
 }
 
-export function publicStages(db,row,mode,user) {
+export function publicStages(db,row,mode,user,automaticRetries,now) {
   const stored=states(db,row.id);
-  const canAct=Boolean(user && (!row.owner || row.owner === user.id) && !['superseded','ready'].includes(row.status) && !row.wait_for);
+  const canAct=Boolean(user && (!row.owner || row.owner === user.id) &&
+    !['superseded','ready'].includes(row.status) && !row.wait_for && row.lease_until<=now);
   const roles = ['ready','superseded'].includes(row.status) ? stored.filter(s=>s.status==='done').map(s=>s.role) : stageOrder[mode];
   return roles.map(role=>{
     const s=stored.find(item=>item.role===role);
-    let status=s?.status || 'queued', reason=s?.reason;
-    if (status!=='done' && (!row.prepared || row.wait_for)) {
+    let status=s && retryPending(s,now) ? 'retry' : s?.status || 'queued';
+    let reason=s && retryReason(s,now);
+    if (status!=='done' && (row.wait_for || (!row.prepared && status!=='retry'))) {
       status='waiting'; reason=row.reason || 'Ожидаем подготовку расчёта.';
     } else if (status==='queued' && s && !eligible(s,stored,Infinity)) {
       status='waiting'; reason='Ожидаем результаты предыдущих ролей.';
     }
-    return {role,status,attempt:s?.attempt || 0,canRetry:canAct && status==='retry',
-      ...(reason && {reason}), ...(status==='retry' && s?.next && {retryAt:s.next})};
+    return {role,status,attempt:s?.attempt || 0,canRetry:canAct && status==='retry' && s.lease_until<=now,
+      ...(reason && {reason}), ...(automaticRetries && status==='retry' && s?.next && {retryAt:s.next})};
   });
 }

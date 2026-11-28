@@ -7,7 +7,10 @@ export const researchModes = {
   roles: 'По ролям',
 };
 type Mode = keyof typeof researchModes;
-type Settings = { team: Mode; personal: Mode | 'inherit'; effective: Mode; maxConcurrentChecks: number };
+type Settings = {
+  team: Mode; personal: Mode | 'inherit'; effective: Mode;
+  maxConcurrentChecks: number; automaticRetries: boolean;
+};
 
 function InvestigationLimit({ limit, admin, onSave }: { limit: number; admin: boolean; onSave: (n: number) => void }) {
   const [busy,setBusy] = useState(false);
@@ -67,7 +70,8 @@ export function InvestigationSettings({ scope, admin }: { scope: 'team' | 'perso
         setError('');
         setSaved(false);
         try {
-          setSettings(await post<Settings>('save-research-settings', { scope, mode }));
+          const modes = await post<Settings>('save-research-settings', { scope, mode });
+          setSettings(current => current && {...current,team:modes.team,personal:modes.personal,effective:modes.effective});
           setSaved(true);
         } catch (err) {
           setError((err as Error).message);
@@ -84,7 +88,36 @@ export function InvestigationSettings({ scope, admin }: { scope: 'team' | 'perso
         <button disabled={saving}>Сохранить режим</button>
         {saved && <span role="status">Режим сохранён</span>}
       </form>)}
-    {team && settings && <InvestigationLimit limit={settings.maxConcurrentChecks} admin={admin}
-      onSave={n => setSettings(current => current && {...current,maxConcurrentChecks:n})} />}
+    {team && settings && <>
+      <InvestigationLimit limit={settings.maxConcurrentChecks} admin={admin}
+        onSave={n => setSettings(current => current && {...current,maxConcurrentChecks:n})} />
+      <AutomaticRetrySetting enabled={settings.automaticRetries} admin={admin}
+        onSave={automaticRetries => setSettings(current => current && {...current,automaticRetries})} />
+    </>}
   </section>;
+}
+
+function AutomaticRetrySetting({enabled,admin,onSave}: {enabled: boolean; admin: boolean; onSave: (enabled: boolean) => void}) {
+  const [busy,setBusy] = useState(false);
+  const [error,setError] = useState('');
+  if (!admin) return <p>Автоматические повторы ИИ-проверок · {enabled ? 'включены' : 'выключены'}</p>;
+  return <div>
+    <label className="tracker-search-switch">
+      <input type="checkbox" role="switch" className="search-switch-track" checked={enabled} disabled={busy} onChange={async event => {
+        const automaticRetries = event.currentTarget.checked;
+        setBusy(true);
+        setError('');
+        try {
+          const saved = await post<{automaticRetries: boolean}>('save-investigation-auto-retry', {automaticRetries});
+          onSave(saved.automaticRetries);
+        } catch (err) {
+          setError((err as Error).message);
+        } finally {
+          setBusy(false);
+        }
+      }} />
+      Автоматически повторять ИИ-проверки
+    </label>
+    {error && <p role="alert">{error}</p>}
+  </div>;
 }

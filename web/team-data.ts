@@ -186,6 +186,8 @@ export type InvestigationStage = {
 export type InvestigationRun = {
   id: string; caseId: string; revision: number | string; owner: string | null; mode: string;
   status: 'queued' | 'running' | 'waiting' | 'retry' | 'ready' | 'superseded';
+  automaticRetries?: boolean;
+  preparationRetry?: { attempt: number; reason?: string };
   reason?: string; question?: string; parentId?: string; published?: boolean; publishedBy?: string;
   result?: InvestigationResult | null; checks: InvestigationCheck[]; stages?: InvestigationStage[]; calcId?: string;
   period?: string; unit?: string; created?: number; summary?: string;

@@ -72,11 +72,14 @@ test('PM reads a progressing investigation, traces its evidence and publishes a 
         ] },
       ] } });
   });
+  bundle.current.status = 'retry';
+  bundle.current.automaticRetries = false;
   bundle.current.stages = [{role:'researcher',status:'retry',attempt:2,reason:'Модель не успела ответить вовремя.',canRetry:true}];
   let retries=0;
   await page.route('**/api/team/investigation-retry-stage',async route=>{
     assert.deepEqual(route.request().postDataJSON(),{caseId,runId:'root',role:'researcher',attempt:2});
     retries++;
+    bundle.current.status = 'queued';
     bundle.current.stages=[{role:'researcher',status:'queued',attempt:2,canRetry:false}];
     await route.fulfill({json:bundle.current});
   });
@@ -85,6 +88,7 @@ test('PM reads a progressing investigation, traces its evidence and publishes a 
   await page.getByText('Измерен недельный индекс.', { exact: true }).waitFor();
   assert.equal(await page.locator('.investigation-checks').evaluate(el=>el.open),false);
   await page.getByText('Модель не успела ответить вовремя.',{exact:true}).waitFor();
+  await page.getByText('Требуется ручной повтор',{exact:true}).waitFor();
   await page.getByRole('button',{name:'Повторить ИИ-проверку',exact:true}).click();
   await page.getByRole('button',{name:'Повторить ИИ-проверку',exact:true}).waitFor({state:'detached'});
   assert.equal(retries,1);

@@ -12,19 +12,31 @@ import {teamTools} from './team-mcp.mjs';
 const access=process.env.MCP_ACCESS_TOKEN,base=databasePath();
 const accounts=access?openAccounts(join(dirname(base),'accounts.sqlite')):null;
 const actor=accounts?.bearer(access);
-if(access&&!actor)throw Error('Недействительный персональный ключ MCP');
-const store=openStore(actor?workspacePath(base,actor.space):base),server=new McpServer({name:'release-analytics',version:'2.0.0'});
-if(actor){initRanges(store.db);initTracking(store.db);teamTools(server,store,actor);}
-const scope=process.env.RELEASE_MCP_CONTEXT?JSON.parse(process.env.RELEASE_MCP_CONTEXT):null;
-for(const [key,[description,inputSchema]] of Object.entries(operations)){
-  server.registerTool(key,{description,inputSchema},async input=>{
-    try{
-      const calc=runTool(store,key,scope?{...input,...scope,metric:input.metric??scope.metric,segment:input.segment??scope.segment}:input);
-      if(scope&&calc.context&&(calc.context.releaseId!==scope.releaseId||calc.context.day>scope.day))throw Error('Расчёт вне выбранного среза.');
-      return {content:[{type:'text',text:JSON.stringify(calc,scope&&calc.op!=='build_chart'?(k,v)=>k==='daily'||k==='days'?undefined:k==='both'&&Array.isArray(v)?v.length:v:undefined)}]};
-    }
-    catch(e){return {isError:true,content:[{type:'text',text:e.message}]};}
-  });
+const invalidKey='Недействительный персональный ключ MCP';
+if(access&&!actor)throw Error(invalidKey);
+function assertAccess() {
+  if (actor && accounts.bearer(access)?.id !== actor.id) throw Error(invalidKey);
 }
-if(!scope)server.registerTool('list_releases',{description:'Журнал релизов и их идентификаторы.'},async()=>({content:[{type:'text',text:JSON.stringify(store.releases())}]}));
+const store=openStore(actor?workspacePath(base,actor.space):base),server=new McpServer({name:'release-analytics',version:'2.0.0'});
+if(actor){initRanges(store.db);initTracking(store.db);teamTools(server,store,actor,process.env,fetch,assertAccess);}
+const scope=process.env.RELEASE_MCP_CONTEXT?JSON.parse(process.env.RELEASE_MCP_CONTEXT):null;
+function releaseTool(handler) {
+  return async input => {
+    try {
+      assertAccess();
+      return handler(input);
+    } catch (error) {
+      return { isError: true, content: [{ type: 'text', text: error.message }] };
+    }
+  };
+}
+for(const [key,[description,inputSchema]] of Object.entries(operations)){
+  const toolName = actor && key === 'funnel' ? 'release_funnel' : key;
+  server.registerTool(toolName,{description,inputSchema},releaseTool(input=>{
+    const calc=runTool(store,key,scope?{...input,...scope,metric:input.metric??scope.metric,segment:input.segment??scope.segment}:input);
+    if(scope&&calc.context&&(calc.context.releaseId!==scope.releaseId||calc.context.day>scope.day))throw Error('Расчёт вне выбранного среза.');
+    return {content:[{type:'text',text:JSON.stringify(calc,scope&&calc.op!=='build_chart'?(k,v)=>k==='daily'||k==='days'?undefined:k==='both'&&Array.isArray(v)?v.length:v:undefined)}]};
+  }));
+}
+if(!scope)server.registerTool('list_releases',{description:'Журнал релизов и их идентификаторы.'},releaseTool(()=>({content:[{type:'text',text:JSON.stringify(store.releases())}]})));
 await server.connect(new StdioServerTransport());

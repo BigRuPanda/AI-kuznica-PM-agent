@@ -3,11 +3,12 @@ import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/
 import { z } from 'zod/v4';
 import { operations, workspaceOperation } from './workspace-operations.mjs';
 import { dashboard, enqueue } from './workbench.mjs';
-export function teamTools(server, store, user, env = process.env, send = fetch) {
+export function teamTools(server, store, user, env = process.env, send = fetch, assertAccess) {
   const db = store.db;
   function register(name, description, inputSchema, fn) {
     server.registerTool(name, { description, inputSchema }, async (input) => {
       try {
+        assertAccess?.();
         return { content: [{ type: 'text', text: JSON.stringify(await fn(input)) }] };
       } catch (e) {
         return { isError: true, content: [{ type: 'text', text: e.message }] };

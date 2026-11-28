@@ -52,6 +52,8 @@ export async function verifyBrowser(caseUrl, to, access, product, loadRecovery) 
     assert.equal(saved.state,'done');
     const browserReviewMs = Math.round(performance.now() - opened);
     const peer = await login('reader');
+    const tasks = peer.locator('details.task-panel');
+    if (!await tasks.evaluate(el => el.open)) await tasks.locator('summary').first().click();
     await peer.getByLabel('Только с меткой ai-generated').check();
     const hits = await requestByClick(peer,'issue_search',peer.getByRole('button',{name:'Найти похожие задачи'}));
     assert.ok(hits.items.some(i=>i.key===saved.key && i.origin==='ai-generated'));

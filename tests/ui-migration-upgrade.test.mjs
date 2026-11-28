@@ -205,13 +205,26 @@ async function localMain({ origin, store, token, expected, state, boot }) {
   const investigation = async () => (await api(origin, 'investigation-status', token, { caseId: partial.caseId })).current;
   const before = await investigation();
   assert.equal(before.id, partial.id);
+  assert.equal(before.automaticRetries, false);
   const evidence = () => store.db.prepare('SELECT role,output FROM case_investigation_stages WHERE run_id=? AND role=?')
     .get(partial.id, partial.completed.role);
   assert.deepEqual({ ...evidence() }, partial.completed);
-  if (boot === 1) assert.equal(before.status, partial.status);
   const { listInvestigationWork, tryStartInvestigation } = await import('../server/case-investigations.mjs');
-  state.roleCalls ??= [];
   const clock = () => partial.resumeAt;
+  assert.deepEqual(listInvestigationWork(store, partial.env, clock(), partial.id), []);
+  if (boot === 1) {
+    assert.equal(before.status, partial.status);
+    const failed = before.stages.find(stage => stage.role === 'researcher');
+    assert.equal(failed?.status, 'retry');
+    assert.equal(failed.canRetry, true);
+    const resumed = await api(origin, 'investigation-retry-stage', token, {
+      caseId: partial.caseId, runId: partial.id, role: failed.role, attempt: failed.attempt,
+    });
+    assert.equal(resumed.id, partial.id);
+    state.roleCalls = [];
+  } else {
+    assert.equal(before.status, 'ready');
+  }
   for (let stage = 0; stage < partial.remaining.length + 1; stage++) {
     const work = listInvestigationWork(store, partial.env, clock(), partial.id)[0];
     if (!work) break;

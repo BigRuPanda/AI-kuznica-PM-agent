@@ -1,6 +1,6 @@
 import {archiveInquiry,archiveEvidence} from './archive-search.mjs';
 import { z } from 'zod/v4';
-import { providerCall } from './agent.mjs';
+import { modelTimeout, providerCall } from './agent.mjs';
 import { checkReleaseReferencePeriod, checkReleaseSourceVersions } from './release-chat-scope.mjs';
 import { observationWithin } from './metric-observations.mjs';
 import { operations, writes, workspaceOperation } from './workspace-operations.mjs';
@@ -392,13 +392,15 @@ export async function runAssistant(
     save(state);
     return result;
   };
-  const deadline = Date.now()+90000;
+  const anyModelBudget = modelTimeout(env, null);
+  const deadline = Date.now() + (anyModelBudget ?? 90_000);
+  const stopAtDeadline = () => stop('Время разбора истекло. Уже выполненные шаги сохранены.', undefined, 'partial');
   while (state.round < 6 || state.pending.length) {
     if (!state.pending.length) {
       const start = Date.now();
       let response;
       try {
-        if (start >= deadline) return stop('Время разбора истекло. Уже выполненные шаги сохранены.',undefined,'partial');
+        if (start >= deadline) return stopAtDeadline();
         const messages = promptStart > 3 ? [state.messages[0],...state.messages.slice(promptStart-2)] : state.messages;
         response = await providerCall(env, messages, modelTools, 'auto', send,
           {timeout:deadline-start,...(state.compactRetry ? { maxTokens:160 } : {})});
@@ -410,7 +412,8 @@ export async function runAssistant(
           state.providerRetried = true;
           (state.issues ??= {}).provider = 'Модель временно недоступна. Повторяю запрос.';
           save(state);
-          await new Promise((resolve) => setTimeout(resolve, 1200));
+          const delay = anyModelBudget === null ? 1200 : Math.min(1200, deadline - Date.now());
+          if (delay > 0) await new Promise((resolve) => setTimeout(resolve, delay));
           continue;
         }
         const range = state.anchorId ? readRange(db, user, state.anchorId) : null;
@@ -440,6 +443,7 @@ export async function runAssistant(
         response.usage?.output ?? null,
       );
       state.round++;
+      if (anyModelBudget !== null && Date.now() >= deadline) return stopAtDeadline();
       if (!response.tool_calls?.length) {
         const result = response.content?.trim() || 'Уточните, какой результат нужно получить.';
         const issues = Object.values(state.issues || {});

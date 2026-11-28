@@ -989,7 +989,7 @@ test('Softline workspace, upgrade and browser journeys', async t => {
       await visible(guest.getByRole('heading', {name:'Вход', exact:true}));
       const codeA = app.accounts.invite('team');
       const codeB = app.accounts.invite('team');
-      const codeInput = field(guest,'Код приглашения');
+      const codeInput = guest.getByRole('textbox', { name: 'Код приглашения', exact: true });
       await guest.goto(base + '/#join/' + codeA);
       await visible(guest.getByRole('heading', {name:'Создать аккаунт', exact:true}));
       assert.equal(await codeInput.inputValue(), codeA);
@@ -1597,6 +1597,14 @@ test('Softline workspace, upgrade and browser journeys', async t => {
     await submit(admin,'save-investigation-limit',()=>role(admin,'Сохранить лимит').click());
     await admin.reload();
     assert.equal(await limit.inputValue(),'3');
+    const automaticRetries = admin.getByRole('switch', {name:'Автоматически повторять ИИ-проверки'});
+    await visible(automaticRetries);
+    assert.equal(await automaticRetries.isChecked(), false);
+    await submit(admin,'save-investigation-auto-retry',()=>automaticRetries.click());
+    await admin.reload();
+    await visible(automaticRetries);
+    assert.equal(await automaticRetries.isChecked(), true);
+    await submit(admin,'save-investigation-auto-retry',()=>automaticRetries.click());
     const teamMode = field(admin,'Режим исследований по сигналам');
     assert.equal(await teamMode.inputValue(),'roles');
     await teamMode.selectOption('review');
@@ -1604,6 +1612,7 @@ test('Softline workspace, upgrade and browser journeys', async t => {
     await go(member,'settings');
     await visible(member.getByText('Ведущий и рецензент',{exact:true}));
     await visible(member.getByText('Максимум одновременных ИИ-проверок · 3',{exact:true}));
+    await visible(member.getByText('Автоматические повторы ИИ-проверок · выключены',{exact:true}));
     assert.equal(await role(member,'Сохранить лимит').count(),0);
     const memberRule = member.getByRole('region',{name:'Мониторинг продуктовых метрик'})
       .locator('details').filter({hasText:'CTR рекомендаций ЛК'});

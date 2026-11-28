@@ -54,7 +54,7 @@
   font-weight: 700;
   border-color: currentColor;
 }
-form .tracker-search-switch {
+.tracker-search-switch {
   display: inline-flex;
   align-items: center;
   justify-self: start;

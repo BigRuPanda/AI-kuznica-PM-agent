@@ -100,11 +100,20 @@ test('settings use the signed-in account and OAuth returns to personal connectio
   assert.equal(denied.status, 400);
   assert.match((await denied.json()).error, /администратора/);
   const save = await post('save-research-settings', { scope: 'personal', mode: 'review', ownerId: owner.user.id }, peer);
-  assert.deepEqual(await save.json(), { team: 'roles', personal: 'review', effective: 'review', maxConcurrentChecks:10 });
+  assert.deepEqual(await save.json(), { team: 'roles', personal: 'review', effective: 'review', maxConcurrentChecks:10, automaticRetries:false });
   assert.equal((await post('save-investigation-limit',{maxConcurrentChecks:3},peer)).status,400);
   assert.deepEqual(await (await post('save-investigation-limit',{maxConcurrentChecks:3},owner)).json(),{maxConcurrentChecks:3});
   const ownerSettings = await post('research-settings', { ownerId: peer.user.id }, owner);
-  assert.deepEqual(await ownerSettings.json(), { team: 'roles', personal: 'inherit', effective: 'roles', maxConcurrentChecks:3 });
+  assert.deepEqual(await ownerSettings.json(), { team: 'roles', personal: 'inherit', effective: 'roles', maxConcurrentChecks:3, automaticRetries:false });
+  const rejectedRetrySetting = await post('save-investigation-auto-retry', {automaticRetries:true}, peer);
+  assert.equal(rejectedRetrySetting.status, 400);
+  assert.match((await rejectedRetrySetting.json()).error, /администратора/);
+  assert.equal((await post('save-investigation-auto-retry', {automaticRetries:'true'}, owner)).status, 400);
+  assert.deepEqual(await (await post('save-investigation-auto-retry', {automaticRetries:true}, owner)).json(),
+    {automaticRetries:true});
+  assert.equal((await (await post('research-settings', {}, peer)).json()).automaticRetries, true);
+  assert.deepEqual(await (await post('save-investigation-auto-retry', {automaticRetries:false}, owner)).json(),
+    {automaticRetries:false});
 
   const config = { service: 'confluence', url: 'https://tenant.test', scope: 'TEAM', edition: 'cloud' };
   assert.equal((await post('integration-config', config, peer)).status, 400);

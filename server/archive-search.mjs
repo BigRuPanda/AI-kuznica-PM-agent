@@ -1,6 +1,6 @@
 import { normalizeObservation, observationWithin } from './metric-observations.mjs';
 import { explicitDates } from './day-comparison.mjs';
-import { apiConfigured, providerCall } from './agent.mjs';
+import { apiConfigured, modelTimeout, providerCall } from './agent.mjs';
 
 const indexes = new WeakMap();
 const stop = new Set('как какой какова какая какие каких какого сколько чем что чего где когда почему ли бы на по от до за для при или из было были был была есть эту эти этом этой его нее еще после перед можно наши нашей раз раза назови укажи покажи основании данным данных источник источники согласно именно'.split(' '));
@@ -321,7 +321,7 @@ export async function archiveAnswer(store, question, evidence, env, send, job) {
     {role:'user',content:JSON.stringify({question,records:evidence.map(x=>x.text)})}];
   const start=Date.now();
   try {
-    const reply=await providerCall(env,messages,[],'auto',send,{timeout:42000,maxTokens:220});
+    const reply=await providerCall(env,messages,[],'auto',send,{timeout:modelTimeout(env,42_000),maxTokens:220});
     store.db.prepare('INSERT INTO costs(job,model,elapsed,input,output) VALUES(?,?,?,?,?)')
       .run(job,env.LLM_MODEL || 'configured',Date.now()-start,reply.usage?.input??null,reply.usage?.output??null);
     const text=reply.content?.trim();

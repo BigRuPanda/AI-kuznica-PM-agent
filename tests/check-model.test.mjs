@@ -19,9 +19,16 @@ function anymodelFixture(toolResult='37') {
   return { call, requests, send };
 }
 
-test('the AnyModel check verifies the catalog, tool choices, and short JSON output', async () => {
+test('the AnyModel check verifies the catalog, tool choices, and short JSON output at current limits', async t => {
   const { call, requests, send } = anymodelFixture();
+  const timeouts = [];
+  const makeTimeout = AbortSignal.timeout;
+  t.mock.method(AbortSignal, 'timeout', ms => {
+    timeouts.push(ms);
+    return makeTimeout(ms);
+  });
   await checkModel(env, send);
+  assert.deepEqual(timeouts, Array(5).fill(600_000));
   const [catalog, ...completions] = requests;
   assert.equal(catalog.url, 'https://anymodel.org/v1/models');
   assert.equal(catalog.init.method, 'GET');
@@ -34,7 +41,7 @@ test('the AnyModel check verifies the catalog, tool choices, and short JSON outp
     { role: 'assistant', content: null, tool_calls: [call] },
     { role: 'tool', tool_call_id: 'check-1', content: '{"value":37}' },
   ]);
-  assert.equal(completions[3].body.max_tokens, 56);
+  assert.equal(completions[3].body.max_tokens, 65_536);
   assert.equal(completions[3].body.temperature, 0);
   assert.equal(completions[3].body.tools, undefined);
 });

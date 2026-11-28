@@ -39,6 +39,40 @@ function context(t) {
   };
   return Object.assign(ask,{store,thread});
 }
+
+test('a group chat continues through AnyModel when an old reply points at a private case', async t => {
+  const store = openStore(':memory:');
+  t.after(() => store.close());
+  initEvidence(store.db);
+  initWorkbench(store.db);
+  const owner = { id: 'private-owner', name: 'Владелец' };
+  const thread = createThread(store.db, owner, 'Обсуждение', true);
+  store.db.prepare('INSERT INTO cases VALUES(?,?,?,?,?)')
+    .run('private-case', 'Closed product', 'Личный разбор', 'Исследуем', JSON.stringify({ owner: owner.id }));
+  const previous = store.db.prepare("INSERT INTO chat_items(thread,author,role,body,created) VALUES(?,?,'assistant',?,?)");
+  previous.run(thread, 'Агент', JSON.stringify({ text: 'Обсудили доступные варианты.' }), 1);
+  previous.run(thread, 'Агент', JSON.stringify({ caseId: 'private-case', product: 'Closed product',
+    text: 'private-history-marker' }), 2);
+
+  const request = { thread, question: 'Продолжим разговор о дальнейшем плане.' };
+  assert.throws(() => enqueue(store, user, { ...request, caseId: 'private-case' }), /Разбор недоступен/iu);
+  const job = enqueue(store, user, request);
+  const sent = [];
+  await workJobs(store, { publicUser: () => user }, {
+    DATA_PROFILE: 'configured', LLM_BACKEND: 'anymodel', LLM_MODEL: 'qwen/qwen3.8-27b',
+    LLM_DATA_MODE: 'analysis', ANYMODEL_API_KEY: 'fixture-key',
+  }, async (_url, options) => {
+    sent.push(options.body);
+    return Response.json({ choices: [{ message: { role: 'assistant', content: 'Выберем следующий шаг.' } }] });
+  });
+  const reply = messages(store.db, user, thread).items.findLast(item => item.body.jobId === job).body;
+  assert.equal(reply.outcome, 'done', reply.text);
+  assert.equal(reply.text, 'Выберем следующий шаг.');
+  assert.equal(sent.length, 1);
+  assert.match(sent[0], /Обсудили доступные варианты/iu);
+  assert.doesNotMatch(sent[0], /private-history-marker|private-case|Closed product/u);
+});
+
 test('weekly comparisons and subsequent questions resolve the named products and the same week', async t => {
   const ask=context(t);
   const both=await ask('Сравни индекс заказов Астры и Касперского за неделю с 6 апреля 2026. Какова разница в пунктах?');

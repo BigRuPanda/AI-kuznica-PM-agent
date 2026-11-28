@@ -1,6 +1,7 @@
 import { setting, setSetting } from './evidence.mjs';
 
 const teamKey = 'research_mode/team';
+const autoRetryKey = 'investigation_auto_retry';
 const personalKey = ownerId => 'research_mode/user/' + ownerId;
 const teamModes = ['lead', 'review', 'roles'];
 
@@ -13,6 +14,17 @@ export function saveInvestigationLimit(teamDb, user, limit) {
   if (!Number.isSafeInteger(limit) || limit <= 0) throw Error('Введите целое положительное число.');
   setSetting(teamDb,'investigation_concurrency',limit);
   return limit;
+}
+
+export function readInvestigationAutoRetry(db) {
+  return setting(db, autoRetryKey, false) === true;
+}
+
+export function saveInvestigationAutoRetry(teamDb, user, enabled) {
+  if (user.space !== 'team' || user.role !== 'admin') throw Error('Требуются права администратора команды.');
+  if (typeof enabled !== 'boolean') throw Error('Включите или выключите автоматические повторы.');
+  setSetting(teamDb, autoRetryKey, enabled);
+  return enabled;
 }
 
 function readModes(db, ownerId) {

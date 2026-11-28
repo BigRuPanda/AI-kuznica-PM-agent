@@ -12,7 +12,7 @@ import './case-investigation.css';
 
 const runStatus = {
   queued: 'В очереди', running: 'Идут проверки', waiting: 'Исследование приостановлено',
-  retry: 'Ожидается повтор проверки', ready: 'Исследование готово', superseded: 'Архивная версия',
+  retry: 'Требуется ручной повтор', ready: 'Исследование готово', superseded: 'Архивная версия',
 };
 const roles: Record<string, string> = {
   calculation: 'Серверный расчёт', analyst: 'Аналитик', researcher: 'Исследователь',
@@ -25,6 +25,10 @@ const checkStatus: Record<string, string> = {
 
 function snapshotLink(calcId: string, findingId?: string) {
   return '#snapshot/' + encodeURIComponent(calcId) + (findingId ? '/' + encodeURIComponent(findingId) : '');
+}
+
+function runStatusLabel(run: InvestigationRun) {
+  return run.status === 'retry' && run.automaticRetries ? 'Ожидается повтор проверки' : runStatus[run.status];
 }
 
 export function useCaseInvestigation(caseId: string, initial?: InvestigationBundle) {
@@ -132,12 +136,14 @@ function Checks({ run }: { run: InvestigationRun }) {
   </details>;
 }
 
-function StageRetry({run,stage,refresh}: {run: InvestigationRun; stage: InvestigationStage; refresh: () => Promise<void>}) {
+type FailedStage = Pick<InvestigationStage, 'attempt' | 'reason'> & {role: InvestigationStage['role'] | 'preparation'};
+
+function StageRetry({run,stage,refresh}: {run: InvestigationRun; stage: FailedStage; refresh: () => Promise<void>}) {
   const [busy,setBusy] = useState(false);
   const [error,setError] = useState('');
   return <div className="investigation-stage-retry">
-    <strong>{roles[stage.role]} · попытка {stage.attempt}</strong>
-    <p>{stage.reason}</p>
+    <strong>{stage.role === 'preparation' ? 'Подготовка расчёта' : roles[stage.role]} · попытка {stage.attempt}</strong>
+    {stage.reason && <p>{stage.reason}</p>}
     <button type="button" disabled={busy} onClick={async () => {
       if (busy) return;
       setBusy(true); setError('');
@@ -169,10 +175,12 @@ function ThresholdObservation({ observation, calcId }: { observation: NonNullabl
 function RunSummary({ run, refresh, active = false }: { run: InvestigationRun; refresh?: () => Promise<void>; active?: boolean }) {
   if (run.status === 'waiting' && run.thresholdObservation && run.calcId)
     return <ThresholdObservation observation={run.thresholdObservation} calcId={run.calcId} />;
-  const failures = refresh ? (run.stages || []).filter(stage => stage.canRetry) : [];
+  const failures: FailedStage[] = refresh ? (run.stages || []).filter(stage => stage.canRetry) : [];
+  if (refresh && run.preparationRetry) failures.push({role:'preparation', ...run.preparationRetry});
+  const statusLabel = active && run.status === 'queued' ? 'Очередь' : runStatusLabel(run);
   return <>
     {run.status !== 'ready' && <p className="investigation-status" role={run.status === 'superseded' ? undefined : 'status'}>
-      <strong>{active && run.status === 'queued' ? 'Очередь' : runStatus[run.status]}</strong>
+      <strong>{statusLabel}</strong>
       {run.reason && !failures.some(stage => stage.reason === run.reason) && ' · ' + run.reason}
     </p>}
     {refresh && failures.map(stage => <StageRetry key={run.id + stage.role + stage.attempt} run={run} stage={stage} refresh={refresh} />)}
@@ -321,7 +329,7 @@ export function CaseInvestigation({ investigation, error, refresh, userId, canEx
               {run.publishedBy && ' · ' + run.publishedBy}</small>
             <strong>{run.question || 'Альтернативная версия'}</strong>
           </span>
-          {run.status !== 'ready' && <small>{runStatus[run.status]}</small>}
+          {run.status !== 'ready' && <small>{runStatusLabel(run)}</small>}
         </summary>
         <div className="investigation-version-body">
           <RunMeta run={run} />

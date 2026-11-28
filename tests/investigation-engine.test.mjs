@@ -122,6 +122,34 @@ test('an alternative inherits frozen periods and operational sources and records
 const call = (name,args) => ({id:'call',type:'function',function:{name,arguments:JSON.stringify(args)}});
 const response = calls => ({ok:true,json:async()=>({choices:[{message:{role:'assistant',tool_calls:calls}}],
   usage:{prompt_tokens:4,completion_tokens:2}})});
+
+test('each investigation role sends concise field limits with its initial model request', async t => {
+  const capture = {calcId:'test-calc',context:{findings:[{id:'observations',kind:'calculation',text:'Снимок'}]}};
+  const check = {question:'Почему?',result:'Расчёт',impact:'Вывод',findingIds:['observations']};
+  const decision = {summary:'Объяснение',action:'Проверить',plan:'Проверить процесс',
+    outcomes:['Продолжить проверку'],hypotheses:[{title:'Гипотеза',for:[],against:[],test:'Сверить'}]};
+  for (const [stage, submit] of [
+    ['analyst','submit_check'], ['researcher','submit_check'], ['lead','submit_decision'], ['reviewer','submit_review'],
+  ]) await t.test(stage, async () => {
+    const requests = [];
+    const send = async (_url, init) => {
+      requests.push(JSON.parse(init.body));
+      return requests.length === 1 ? response([call('read_findings',{ids:['observations']})])
+        : response([call(submit, submit === 'submit_check' ? check : {...check,decision})]);
+    };
+    await runInvestigationStage({env, stage, send, run:{question:'Почему?'}, capture});
+    assert.equal(requests.length, 2);
+    const {messages,tools} = requests[0];
+    assert.equal(messages[0].role, 'system');
+    assert.match(messages[0].content, /пиши кратко/iu);
+    const {properties} = tools.find(tool => tool.function.name === submit).function.parameters;
+    for (const [field, maxLength] of [['question',300], ['result',1200], ['impact',700]]) {
+      assert.equal(properties[field].maxLength, maxLength);
+      assert.ok(messages[0].content.includes(`${field} — не более ${maxLength} символов`));
+    }
+  });
+});
+
 test('lead corrects an invalid decision in the same attempt, using only evidence already returned', async () => {
   const findings = ['observations','control'].map(id => ({id,kind:'calculation',label:id,text:'Снимок'}));
   const capture = {context:{findings}, calcId:'test-calc', checks:[]};

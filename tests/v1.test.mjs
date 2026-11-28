@@ -39,8 +39,14 @@ test('stale ProxyAPI configuration reports migration before using the generic AP
   await assert.rejects(providerCall(env, [], [], 'auto', unexpected), /LLM_BACKEND=anymodel/);
 });
 
-test('AnyModel uses its own key and endpoint across tool calls', async () => {
+test('AnyModel uses its own key, endpoint and model limits across tool calls', async t => {
   assert.equal(apiConfigured(anymodel), true);
+  const timeouts = [];
+  const makeTimeout = AbortSignal.timeout;
+  t.mock.method(AbortSignal, 'timeout', ms => {
+    timeouts.push(ms);
+    return makeTimeout(ms);
+  });
   const messages = [{role:'user', content:'Проверь число.'}];
   const tool = {type:'function', function:{name:'check_value', parameters:{type:'object', properties:{}}}};
   const choice = {type:'function', function:{name:'check_value'}};
@@ -54,13 +60,15 @@ test('AnyModel uses its own key and endpoint across tool calls', async () => {
   };
   const first = await providerCall(anymodel, messages, [tool], choice, send);
   messages.push(first, {role:'tool', tool_call_id:first.tool_calls[0].id, content:'37'});
-  const final = await providerCall(anymodel, messages, [tool], 'auto', send);
+  const final = await providerCall(anymodel, messages, [tool], 'auto', send, {timeout:550_000,maxTokens:56});
   assert.equal(requests.length, 2);
+  assert.deepEqual(timeouts, [600_000, 550_000]);
   for (const {url, init, body} of requests) {
     assert.equal(url, 'https://anymodel.org/v1/chat/completions');
     assert.equal(init.headers.Authorization, 'Bearer fixture-anymodel-key');
     assert.equal(init.redirect, 'error');
     assert.equal(body.model, 'qwen/qwen3.8-27b');
+    assert.equal(body.max_tokens, 65_536);
     assert.deepEqual(body.tools, [tool]);
   }
   assert.deepEqual(requests.map(({body}) => body.tool_choice), [choice, 'auto']);

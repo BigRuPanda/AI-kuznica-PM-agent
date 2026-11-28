@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { openStore } from '../server/store.mjs';
-import { initEvidence, importDocs, cases } from '../server/evidence.mjs';
+import { initEvidence, importDocs, cases, setSetting } from '../server/evidence.mjs';
 import { initWorkbench } from '../server/workbench.mjs';
 import { access, grant } from '../server/chart-ranges.mjs';
 import { saveResearchSettings } from '../server/investigation-settings.mjs';
@@ -110,8 +110,10 @@ test('legacy retries resume once across restart with completed evidence intact',
   t.after(()=>{store.close(); rmSync(dir,{recursive:true,force:true,maxRetries:3});});
   for (let i=0;i<4;i++) add(store.db,'threshold-'+i);
   add(store.db,'partial');
+  add(store.db,'continue');
   syncInvestigations(store.db);
   const partial=readInvestigations(store.db,anna,'partial').current.id;
+  const continued=readInvestigations(store.db,anna,'continue').current.id;
   store.db.exec(`DROP TABLE case_investigation_role_state;
     ALTER TABLE case_investigations DROP COLUMN prepared;
     ALTER TABLE case_investigation_stages DROP COLUMN attempt;
@@ -121,20 +123,33 @@ test('legacy retries resume once across restart with completed evidence intact',
   const snapshot={calcId:'legacy',measurable:true,context:{version:1},checks:[]};
   store.db.prepare("UPDATE case_investigations SET capture=?,next=100,attempts=4,reason='Сбой этапа' WHERE id=?")
     .run(JSON.stringify(snapshot),partial);
+  store.db.prepare("UPDATE case_investigations SET capture=?,status='running',next=0,reason=NULL WHERE id=?")
+    .run(JSON.stringify(snapshot),continued);
   const insert=store.db.prepare('INSERT INTO case_investigation_stages(run_id,ordinal,role,output,elapsed,completed) VALUES(?,?,?,?,1,1)');
-  for(const [index,role] of ['analyst','researcher'].entries())
-    insert.run(partial,index,role,JSON.stringify({check:{role}}));
+  for (const id of [partial,continued])
+    for (const [index,role] of ['analyst','researcher'].entries())
+      insert.run(id,index,role,JSON.stringify({check:{role}}));
   store.close();
   store=open(path);
   initInvestigations(store.db);
   assert.equal(store.db.prepare("SELECT count(*) n FROM case_investigations WHERE case_id LIKE 'threshold-%' AND next=0").get().n,4);
   const starts=[];
-  await drain(store,fixture({now:()=>101,async execute({stage,run}) {
+  const work = fixture({now:()=>101,async execute({stage,run}) {
     starts.push([run.id,stage]);
     return {check:{role:stage},result:{stage}};
-  }}));
-  assert.deepEqual(starts.filter(([id])=>id===partial).map(([,role])=>role),['lead','reviewer']);
-  assert.equal(starts.length,18);
+  }});
+  await drain(store, work);
+  assert.deepEqual(starts, [[continued,'lead'], [continued,'reviewer']]);
+  const migrated = readInvestigations(store.db, anna, 'partial').current;
+  assert.equal(migrated.preparationRetry, undefined);
+  const failed = migrated.stages.find(stage => stage.canRetry);
+  assert.equal(failed.role, 'lead');
+  retryInvestigationStage(store.db, anna, {caseId:'partial', runId:partial, role:failed.role, attempt:failed.attempt});
+  await drain(store, work);
+  assert.deepEqual(starts.slice(2), [[partial,'lead'], [partial,'reviewer']]);
+  setSetting(store.db, 'investigation_auto_retry', true);
+  await drain(store, work);
+  assert.equal(starts.length,20);
   assert.equal(readInvestigations(store.db,anna,'partial').current.calcId,'legacy');
   store.close(); store=open(path);
   assert.equal(await fixture()(store),null);
@@ -159,7 +174,9 @@ test('manual retry races with timer and stale clicks',async t=>{
   assert.match(failed.reason,/вовремя/);
   const command={caseId:'case',runId:first.id,role:'researcher',attempt:failed.attempt};
   assert.throws(()=>retryInvestigationStage(db,dima,command));
-  now=failed.retryAt;
+  now += 600_000;
+  assert.equal(await work(store), null);
+  assert.equal(failed.retryAt, undefined);
   retryInvestigationStage(db,anna,command);
   retryInvestigationStage(db,anna,command);
   await Promise.all([work(store),work(store)]);
@@ -175,6 +192,7 @@ test('manual retry races with timer and stale clicks',async t=>{
 
 test('two failed roles retain separate reasons, deadlines and permissions', async t=>{
   const store=open(), {db}=store; t.after(()=>store.close());
+  setSetting(db, 'investigation_auto_retry', true);
   const errors=[
     [{status:401},/доступа/,300000], [{status:403},/доступа/,300000], [{status:404},/доступа/,300000],
     [{status:429},/частоту/,15000], [{status:503},/стороне провайдера/,15000], [{retryable:true},/связаться/,15000],
@@ -195,6 +213,70 @@ test('two failed roles retain separate reasons, deadlines and permissions', asyn
     db.prepare("UPDATE cases SET body=json_set(body,'$.signal.status','withdrawn') WHERE id=?").run(caseId);
     assert.throws(()=>retryInvestigationStage(db,dima,command));
   }
+});
+
+test('the automatic retry setting releases due work and stops it again', async t => {
+  const store = open(), {db} = store;
+  t.after(() => store.close());
+  add(db, 'case');
+  saveResearchSettings(db, {...anna, role:'admin'}, {scope:'team', mode:'lead'});
+  let now = 100, starts = 0;
+  const work = fixture({now: () => now, async execute() {
+    starts++;
+    throw Object.assign(Error('temporary'), {status:503});
+  }});
+  assert.equal((await work(store)).status, 'retry');
+  now += 600_000;
+  assert.equal(await work(store), null);
+  assert.equal(starts, 1);
+  setSetting(db, 'investigation_auto_retry', true);
+  assert.equal((await work(store)).status, 'retry');
+  assert.equal(starts, 2);
+  setSetting(db, 'investigation_auto_retry', false);
+  now += 600_000;
+  assert.equal(await work(store), null);
+  assert.equal(starts, 2);
+});
+
+test('failed preparation waits for a manual retry', async t => {
+  const store = open(), {db} = store;
+  t.after(() => store.close());
+  add(db, 'case');
+  let now = 100, captures = 0;
+  const work = fixture({now: () => now, capture() {
+    if (++captures === 1) throw Error('temporary');
+    return {calcId:null, period:{}, context:{version:1}, measurable:true, checks:[]};
+  }});
+  const first = await work(store);
+  assert.equal(first.status, 'retry');
+  now += 600_000;
+  assert.equal(await work(store), null);
+  const retry = readInvestigations(db, anna, 'case').current.preparationRetry;
+  assert.equal(retry.attempt, 1);
+  const command = {caseId:'case', runId:first.id, role:'preparation', attempt:retry.attempt};
+  retryInvestigationStage(db, anna, command);
+  retryInvestigationStage(db, anna, command);
+  await work(store);
+  retryInvestigationStage(db, anna, command);
+  assert.equal(captures, 2);
+});
+
+test('an automatic reclaim of an expired preparation invalidates its old retry button', async t => {
+  const store = open(), {db} = store;
+  t.after(() => store.close());
+  add(db, 'case');
+  syncInvestigations(db, 'case');
+  const run = readInvestigations(db, anna, 'case').current;
+  const now = Date.now();
+  db.prepare(`UPDATE case_investigations SET status='running',lease='expired',lease_until=?
+    WHERE id=?`).run(now - 1, run.id);
+  setSetting(db, 'investigation_auto_retry', true);
+  const work = fixture({now: () => now, capture() { throw Error('temporary'); }});
+  assert.equal((await work(store)).status, 'retry');
+  setSetting(db, 'investigation_auto_retry', false);
+  const command = {caseId:'case', runId:run.id, role:'preparation', attempt:1};
+  assert.equal(retryInvestigationStage(db, anna, command).preparationRetry.attempt, 2);
+  assert.equal(await work(store), null);
 });
 
 async function drain(store, work) {
@@ -230,6 +312,9 @@ test('role stages survive restart and chat deletion; an unfinished review retrie
   assert.equal((await work(store)).status, 'retry');
   assert.equal(await work(store), null);
   now += 600_000;
+  assert.equal(await work(store), null);
+  const review = readInvestigations(store.db, anna, 'case').current.stages.find(stage => stage.role === 'reviewer');
+  retryInvestigationStage(store.db, anna, {caseId:'case', runId:id, role:'reviewer', attempt:review.attempt});
   assert.equal((await work(store)).status, 'ready');
   const ready = requireActionableRun(store.db, dima, 'case', id);
   assert.equal(ready.calcId, draft.calcId);
@@ -294,11 +379,18 @@ test('a late response cannot commit after a replacement, withdrawal or lease tak
   const work = fixture({ now: () => now, leaseMs: 100 });
   const pending = blocked(store);
   await arrived;
-  assert.equal(await work(store), null);
-  now += 101;
-  assert.equal((await work(store)).checks.at(-1).role, 'lead');
-  finish();
-  await pending;
+  try {
+    assert.equal(await work(store), null);
+    now += 101;
+    assert.equal(await work(store), null);
+    const interrupted = readInvestigations(db, anna, 'case').current;
+    assert.equal(interrupted.stages[0].canRetry, true);
+    retryInvestigationStage(db, anna, {caseId:'case', runId:interrupted.id, role:'lead', attempt:1});
+    assert.equal((await work(store)).checks.at(-1).role, 'lead');
+  } finally {
+    finish();
+    await pending;
+  }
   const original = readInvestigations(db, anna, 'case').current;
   assert.equal(original.checks.at(-1).role, 'lead');
   db.exec("UPDATE cases SET body=json_set(body,'$.signal.revision',2)");
@@ -388,6 +480,7 @@ test('alternatives inherit a measurable parent and rejected credentials wait bef
   const store = open(), { db } = store;
   t.after(() => db.close());
   add(db, 'one');
+  setSetting(db, 'investigation_auto_retry', true);
   saveResearchSettings(db, { ...anna, role: 'admin' }, { scope: 'team', mode: 'lead' });
   syncInvestigations(db,'one');
   const original = readInvestigations(db, anna, 'one').current;

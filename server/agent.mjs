@@ -16,6 +16,12 @@ const system='Ты помощник продакта. Отвечай по-рус
   'Для вопросов о скорости оплаты или о новой метрике используй build_chart. Время от выставления до оплаты: start=invoice,end=payment,field=duration,stat=median. '+
   'Если данных не хватает, сообщи какие поля или период нужны. Сохраняй контекст уточнений. До/после — семь суток с каждой стороны. Видимый срез и версия заданы сервером.\n'+chatAnswerFormat;
 export const anymodelBaseUrl = 'https://anymodel.org/v1';
+export const anymodelTimeoutMs = 600_000;
+const qwenMaxCompletionTokens = 65_536;
+
+export function modelTimeout(env, fallback) {
+  return env.LLM_BACKEND === 'anymodel' ? anymodelTimeoutMs : fallback;
+}
 
 export function apiConfigured(env=process.env){
   if(localData(env))return false;
@@ -56,7 +62,8 @@ export async function providerCall(env,messages,tools,choice='auto',send=fetch,l
   const target=new URL(baseUrl.replace(/\/+$/,'')+'/chat/completions');
   if(target.protocol!=='https:'&&!(target.protocol==='http:'&&['localhost','127.0.0.1','[::1]'].includes(target.hostname)))throw Error('Для удалённого API модели требуется HTTPS.');
   let response;
-  const timeout = Math.max(1,Math.min(60000, limits.timeout ?? 60000));
+  const timeoutLimit = modelTimeout(env, 60_000);
+  const timeout = Math.max(1,Math.min(timeoutLimit, limits.timeout ?? timeoutLimit));
   const signal = AbortSignal.timeout(timeout);
   const timedOut = error => signal.aborted || error?.name === 'TimeoutError';
   const timeoutError = () => {
@@ -65,9 +72,10 @@ export async function providerCall(env,messages,tools,choice='auto',send=fetch,l
     return Object.assign(Error('Модель не успела ответить за ' + seconds + ' ' + unit + '.'), {timedOut:true});
   };
   const history = messages.map(({usage, googleParts, lengthLimited, ...message}) => message);
+  const maxTokens = anymodel && env.LLM_MODEL === 'qwen/qwen3.8-27b' ? qwenMaxCompletionTokens : limits.maxTokens;
   try{response=await send(target,{method:'POST',redirect:'error',signal,headers:{'Content-Type':'application/json',...(key?{Authorization:'Bearer '+key}:{})},
     body:JSON.stringify({model:env.LLM_MODEL,messages:history,...(tools.length?{tools,tool_choice:choice}:{}),
-      ...(limits.maxTokens?{max_tokens:limits.maxTokens}:{}),
+      ...(maxTokens?{max_tokens:maxTokens}:{}),
       ...(limits.responseFormat?{response_format:limits.responseFormat}:{}),
       ...(limits.temperature!==undefined?{temperature:limits.temperature}:{})})});}
   catch(error) {

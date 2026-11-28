@@ -2,14 +2,15 @@ import {readPublicPage} from './public-page.mjs';
 import {webQuestion,yandexSearch} from './web-search.mjs';
 import {noWeb} from './web-search.mjs';
 import { randomUUID } from 'node:crypto';
-import { apiConfigured } from './agent.mjs';
+import { apiConfigured, modelTimeout } from './agent.mjs';
 import { grant } from './chart-ranges.mjs';
 import { localData } from './data-profile.mjs';
 import { getCase, digest } from './evidence.mjs';
 import { captureInvestigation, runInvestigationStage, thresholdObservation } from './investigation-engine.mjs';
-import { effectiveResearchMode } from './investigation-settings.mjs';
+import { effectiveResearchMode, readInvestigationAutoRetry } from './investigation-settings.mjs';
 
-import { stageOrder, ensureStages, initStages, states, eligible, updateRunProgress, publicStages, failureReason } from './investigation-stages.mjs';
+import { stageOrder, ensureStages, initStages, states, eligible, updateRunProgress, publicStages, failureReason,
+  retryPending, retryReason } from './investigation-stages.mjs';
 const leaseDuration = 6 * 60_000;
 const providerWait = 5 * 60_000;
 const revisionOf = "COALESCE(json_extract(c.body,'$.signal.revision'), 0)";
@@ -88,11 +89,13 @@ export function syncInvestigations(db, caseId) {
       WHERE status<>'superseded'${runScope} AND NOT EXISTS (
         SELECT 1 FROM cases c WHERE c.id=r.case_id AND ${signalActive} AND r.revision=${revisionOf}
       )`).run(...args);
-    db.prepare(`UPDATE case_investigations AS r SET status='queued', lease=NULL, lease_until=0
+    db.prepare(`UPDATE case_investigations AS r
+      SET status='retry', reason='Проверка была прервана.', attempts=attempts+1, next=0, lease=NULL, lease_until=0
       WHERE lease IS NOT NULL${runScope} AND EXISTS (
         SELECT 1 FROM cases WHERE id=r.case_id AND state='Завершено'
       )`).run(...args);
-    db.prepare(`UPDATE case_investigation_role_state SET status='queued',lease=NULL,lease_until=0
+    db.prepare(`UPDATE case_investigation_role_state
+      SET status='retry',reason='Проверка была прервана.',next=0,lease=NULL,lease_until=0
       WHERE lease IS NOT NULL AND run_id IN (SELECT r.id FROM case_investigations r JOIN cases c ON c.id=r.case_id
         WHERE (r.status='superseded' OR c.state='Завершено')${runScope})`).run(...args);
   });
@@ -123,24 +126,38 @@ function completed(db, id) {
     WHERE run_id=? AND output IS NOT NULL ORDER BY ordinal`).all(id).map(({ output }) => parse(output));
 }
 
+function preparationAttempt(row) {
+  return Math.max(1, row.attempts + Number(row.status === 'running'));
+}
+
 function publicRun(db, row, prior = completed(db, row.id), user, signal) {
   const capture = parse(row.capture);
   const calculation = capture?.context?.calculation;
   const baseline = calculation?.baseline;
   const control = calculation?.metric === 'orders_index' ? calculation.findings?.[1]?.product : undefined;
   const mode = row.mode || effectiveResearchMode(db, row.owner);
+  const now = Date.now();
+  const automaticRetries = readInvestigationAutoRetry(db);
+  const stages = publicStages(db,row,mode,user,automaticRetries,now);
+  const failedStage = stages.find(stage => stage.status === 'retry');
+  const preparationFailed = !row.prepared && !failedStage && retryPending(row,now);
+  const status = row.status === 'running' && (preparationFailed || (row.prepared && failedStage && !stages.some(s => s.status === 'running')))
+    ? 'retry' : row.status;
+  const reason = failedStage?.reason || (row.prepared ? row.reason : retryReason(row,now));
+  const canRetryPreparation = preparationFailed && user && !row.wait_for && (!row.owner || row.owner === user.id);
   const observation = row.status === 'waiting' && row.wait_for === 'data' && !row.parent_id && capture?.calcId
     ? thresholdObservation(calculation,signal) : undefined;
   return {
     id: row.id, caseId: row.case_id, revision: row.revision, owner: row.owner,
-    mode, status: row.status, created: row.created,
-    ...(row.reason && { reason: row.reason }),
+    mode, status, automaticRetries, created: row.created,
+    ...(reason && { reason }),
+    ...(canRetryPreparation && {preparationRetry:{attempt:preparationAttempt(row),reason}}),
     ...(row.question && { question: row.question }),
     ...(row.parent_id && { parentId: row.parent_id }),
     published: row.published === 1,
     ...(row.published && row.published_by && { publishedBy: row.published_by }),
     ...(row.result && { result: parse(row.result) }),
-    stages: publicStages(db,row,mode,user),
+    stages,
     checks: [...(capture?.checks || []), ...prior.map((output) => output.check)],
     ...(capture?.calcId && { calcId: capture.calcId }),
     ...(capture?.period && { period: capture.period }),
@@ -218,13 +235,30 @@ export function retryInvestigationStage(db, user, {caseId,runId,role,attempt}) {
     if (!row || (row.owner && row.owner !== user.id)) throw Error('Исследование недоступно.');
     if (!active(c) || row.status === 'superseded' || row.revision !== (c.body.signal?.revision ?? 0))
       throw Error('Откройте текущую версию разбора.');
-    const stage = states(db,row.id).find(s => s.role === role);
-    if (!stage || !Number.isSafeInteger(attempt) || attempt < 1 || attempt > stage.attempt)
+    const preparation = role === 'preparation';
+    if (!Number.isSafeInteger(attempt) || attempt < 1) throw Error('Выберите неудавшуюся попытку.');
+    if (preparation && row.prepared) return publicRun(db,row,undefined,user);
+    const stage = preparation
+      ? {...row, attempt:preparationAttempt(row)}
+      : states(db,row.id).find(s => s.role === role);
+    if (!stage || attempt > stage.attempt)
       throw Error('Выберите неудавшуюся попытку.');
-    if (stage.status === 'retry' && stage.attempt === attempt && row.status !== 'ready' && !row.wait_for) {
-      db.prepare("UPDATE case_investigation_role_state SET status='queued',reason=NULL,next=0 WHERE run_id=? AND role=?")
-        .run(runId,role);
-      updateRunProgress(db,runId);
+    const now = Date.now();
+    if (retryPending(stage,now) && stage.lease_until<=now && row.lease_until<=now &&
+        stage.attempt === attempt && row.status !== 'ready' && !row.wait_for) {
+      if (preparation) {
+        db.prepare(`UPDATE case_investigations SET status='queued',reason=NULL,next=0,attempts=?,lease=NULL,lease_until=0
+          WHERE id=?`).run(attempt,runId);
+      } else {
+        db.prepare(`UPDATE case_investigation_role_state SET status='queued',reason=NULL,next=0,lease=NULL,lease_until=0
+          WHERE run_id=? AND role=?`).run(runId,role);
+        if (row.prepared) updateRunProgress(db,runId);
+        else {
+          // A migrated run can keep a failed role and still need preparation.
+          db.prepare(`UPDATE case_investigations SET status='queued',reason=NULL,next=0,lease=NULL,lease_until=0
+            WHERE id=?`).run(runId);
+        }
+      }
       wakeByDatabase.get(db)?.();
     }
     return publicRun(db,getRun(db,caseId,runId),undefined,user);
@@ -266,8 +300,9 @@ function modelWait(env) {
 export function listInvestigationWork(store, env, now, runId = null) {
   const {db} = store;
   const modelReason = modelWait(env);
+  const automaticRetries = readInvestigationAutoRetry(db);
   const {generation} = db.prepare('SELECT generation FROM case_investigation_sources WHERE id=1').get();
-  const rows = db.prepare(`SELECT r.id,r.case_id,r.prepared,r.wait_for,r.reason,r.source_generation,r.parent_id
+  const rows = db.prepare(`SELECT r.id,r.case_id,r.prepared,r.wait_for,r.reason,r.source_generation,r.parent_id,r.status,r.lease,r.lease_until
     FROM case_investigations r JOIN cases c ON c.id=r.case_id
     WHERE ${caseActive} AND r.revision=${revisionOf} AND r.status NOT IN ('ready','superseded')
       AND r.lease_until<=? AND r.next<=? ${runId ? 'AND r.id=?' : ''}
@@ -279,12 +314,13 @@ export function listInvestigationWork(store, env, now, runId = null) {
     if (r.wait_for === 'model' && r.reason === modelReason) continue;
     if (r.wait_for === 'parent' && !db.prepare("SELECT 1 FROM case_investigations WHERE id=? AND json_extract(capture,'$.measurable')=1").get(r.parent_id)) continue;
     if (!r.prepared || modelReason || r.wait_for) {
+      if (!r.prepared && !automaticRetries && retryPending(r,now)) continue;
       work.push({...item, kind:'prepare'});
       continue;
     }
     const siblings = states(db, r.id);
     for (const stage of siblings) {
-      if (eligible(stage, siblings, now)) work.push({...item, kind:'role',role:stage.role});
+      if (eligible(stage, siblings, now, automaticRetries)) work.push({...item, kind:'role',role:stage.role});
     }
   }
   return work;
@@ -360,14 +396,17 @@ function ownsPreparation(db, row, lease, now) {
   return current?.lease === lease && current.lease_until > now && currentRevision(db,row);
 }
 
-function prepareJob(db, row, env, options, start) {
-  const {capture:captureInputs = captureInvestigation, now = Date.now, leaseMs = leaseDuration} = options;
+function prepareJob(db, previous, env, options, start, leaseMs) {
+  const {capture:captureInputs = captureInvestigation, now = Date.now} = options;
+  // Count an expired preparation before reusing its lease slot.
+  const expired = !previous.prepared && previous.status === 'running' && retryPending(previous,start);
+  const row = {...previous, attempts:previous.attempts + Number(expired)};
   const modelReason = modelWait(env);
   const {generation} = db.prepare('SELECT generation FROM case_investigation_sources WHERE id=1').get();
   const mode = row.mode || effectiveResearchMode(db, row.owner);
   const c = getCase(db, row.case_id);
   const question = row.question || c.body.plan?.question || c.body.plan?.hypothesis || c.title;
-  db.prepare('UPDATE case_investigations SET mode=?, question=? WHERE id=?').run(mode, question, row.id);
+  db.prepare('UPDATE case_investigations SET mode=?, question=?, attempts=? WHERE id=?').run(mode, question, row.attempts, row.id);
   const saved = () => publicRun(db, getRun(db, row.case_id, row.id));
   const prior = completed(db, row.id);
   const run = {
@@ -395,7 +434,7 @@ function prepareJob(db, row, env, options, start) {
         return value;
       });
     } catch {
-      setRetry(db, row, now(), 'Не удалось подготовить расчёт. Проверка будет повторена.');
+      setRetry(db, row, now(), 'Не удалось подготовить расчёт.');
       return { saved: saved() };
     }
   }
@@ -429,7 +468,7 @@ async function finishPreparation(store, job, env, send, options) {
   } catch (error) {
     return store.tx(() => {
       if (!ownsPreparation(db,row,lease,now())) return null;
-      setRetry(db,row,now(),'Не удалось подготовить расчёт. Проверка будет повторена.');
+      setRetry(db,row,now(),'Не удалось подготовить расчёт.');
       return publicRun(db,getRun(db,row.case_id,row.id));
     });
   }
@@ -438,23 +477,26 @@ async function finishPreparation(store, job, env, send, options) {
 function claimRole(db,row,stage,start,leaseMs) {
   const state = states(db,row.id).find(s => s.role === stage);
   const lease = randomUUID();
+  const leaseUntil = start + leaseMs;
   db.prepare(`UPDATE case_investigation_role_state SET status='running',lease=?,lease_until=?,attempt=attempt+1,
-    next=0,reason=NULL WHERE run_id=? AND role=?`).run(lease,start+leaseMs,row.id,stage);
+    next=0,reason=NULL WHERE run_id=? AND role=?`).run(lease,leaseUntil,row.id,stage);
   updateRunProgress(db,row.id);
   const outputs = completed(db,row.id);
   const prior = ['lead','reviewer'].includes(stage) ? outputs : [];
   const capture = parse(row.capture);
   const run = publicRun(db,row,outputs);
-  return {row,stage,ordinal:state.ordinal,attempt:state.attempt+1,lease,start,prior,capture,run};
+  return {row,stage,ordinal:state.ordinal,attempt:state.attempt+1,lease,leaseUntil,start,prior,capture,run};
 }
 
 async function executeRole(store, job, env, send, options) {
-  const {row,stage,ordinal,attempt,lease,start,prior,capture,run} = job;
+  const {row,stage,ordinal,attempt,lease,leaseUntil,start,prior,capture,run} = job;
   const {now = Date.now, execute = runInvestigationStage} = options;
   const final = stage === stageOrder[row.mode].at(-1);
   let output, usage, failure, providerDenied = false;
   try {
-    const candidate = await execute({env,send,stage,run,capture,prior});
+    // Keep a little time to record a timeout while this worker still owns the lease.
+    const margin = Math.min(100, Math.max(1, Math.floor((leaseUntil - start) / 10)));
+    const candidate = await execute({env,send,stage,run,capture,prior,now,leaseDeadline:leaseUntil-margin});
     usage = candidate?.usage;
     if (!candidate?.check || (['lead','reviewer'].includes(stage) && !candidate.result))
       throw Object.assign(Error('Некорректный результат проверки.'), {invalidModelResponse:true});
@@ -490,8 +532,9 @@ export function tryStartInvestigation(store,work,env,send,options = {}) {
     if (!listInvestigationWork(store,env,start,work.runId).some(w => w.kind === work.kind && w.role === work.role)) return null;
     const row = getRun(store.db,work.caseId,work.runId);
     if (!row) return null;
-    return work.kind === 'prepare' ? prepareJob(store.db,row,env,options,start)
-      : claimRole(store.db,row,work.role,start,options.leaseMs ?? leaseDuration);
+    const leaseMs = options.leaseMs ?? modelTimeout(env, leaseDuration);
+    return work.kind === 'prepare' ? prepareJob(store.db,row,env,options,start,leaseMs)
+      : claimRole(store.db,row,work.role,start,leaseMs);
   });
   if (!job) return null;
   if (job.saved) return Promise.resolve(job.saved);
