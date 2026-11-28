@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { Icon } from './icons';
+import { useDiscussionDock } from './panel-size';
 import { post } from './team-data';
 import { PreviewCard, type TrackerPreview } from './tracking';
 import './release-decision.css';
@@ -225,75 +226,83 @@ export function ReleaseDecision({
   const [error, setError] = useState('');
   const [cut, setCut] = useState(criteria.through || '');
   const [thread, setThread] = useState('');
-  const [opening, setOpening] = useState(false);
-  const chatAnchor = useRef<HTMLDivElement>(null);
+  const [chatError, setChatError] = useState('');
+  const chatDock = useRef<HTMLDivElement>(null);
+  const request = useRef(0);
+  useDiscussionDock(chatDock, true);
+
   useEffect(() => {
-    let active = true;
-    post<Decision>('release_decision', criteria).then(result => {
-      if (active) setData(result);
-    }).catch(err => {
-      if (active) setError(err.message);
-    }).finally(() => {
-      if (active) setLoading(false);
-    });
-    return () => { active = false; };
+    const current = ++request.current;
+    async function load() {
+      let decision: Decision;
+      try {
+        decision = await post<Decision>('release_decision', criteria);
+      } catch (err) {
+        if (request.current === current) {
+          setError((err as Error).message);
+          setLoading(false);
+        }
+        return;
+      }
+      if (request.current !== current) return;
+      setData(decision);
+      setLoading(false);
+      if (!decision.release) return;
+
+      try {
+        const { id } = await post<{ id: string }>('release-thread', {
+          product: decision.product, releaseId: decision.release.id, decisionContext: decision.decisionContext,
+        });
+        if (request.current === current) setThread(id);
+      } catch (err) {
+        if (request.current === current) setChatError((err as Error).message);
+      }
+    }
+    void load();
+    return () => { request.current++; };
   }, [criteria]);
-  useEffect(() => {
-    if (thread) chatAnchor.current?.scrollIntoView({ block: 'start' });
-  }, [thread]);
+
   function select(next: typeof criteria) {
+    request.current++;
     setThread('');
+    setChatError('');
     setError('');
     setLoading(true);
     history.replaceState({ ...history.state, releaseDecision: next }, '');
     setCriteria(next);
   }
-  async function openChat(releaseId: string) {
-    if (thread) {
-      chatAnchor.current?.scrollIntoView({ block: 'start' });
-      return;
-    }
-    setOpening(true);
-    try {
-      const result = await post<{ id: string }>('release-thread', {
-        product: data?.product, releaseId, decisionContext: data?.decisionContext,
-      });
-      setThread(result.id);
-    } finally {
-      setOpening(false);
-    }
-  }
+
   const release = data?.release;
   const indexCaveat = data?.trend?.available && !data.measurementIssue ? data.recommendation.uncertainty : undefined;
+  const selectedProduct = criteria.product ?? data?.product;
+  const productReleases = data?.product === selectedProduct ? data?.releases : undefined;
+  const selectedRelease = productReleases?.find(row => row.id === (criteria.releaseId ?? release?.id));
   const filters = data && <form className="paper decision-filters" onSubmit={event => {
     event.preventDefault();
-    if (cut) select({ product: data.product, through: cut, releaseId: release && release.date <= cut ? release.id : undefined });
+    if (cut) select({ product: selectedProduct, through: cut,
+      releaseId: selectedRelease && selectedRelease.date <= cut ? selectedRelease.id : undefined });
   }}>
     <label>Семейство или раздел
-      <select value={criteria.product || data.product} disabled={opening} onChange={event =>
+      <select value={selectedProduct} onChange={event =>
         select({ product: event.target.value, through: criteria.through })}>
         {data.products.map(product => <option key={product} value={product}>{product === 'ЛК' ? 'Личный кабинет' : product}</option>)}
       </select>
     </label>
     <label>Релиз
-      <select value={criteria.releaseId || release?.id || ''} disabled={opening || loading || !data.releases.length} onChange={event =>
-        select({ product: data.product, through: criteria.through, releaseId: event.target.value })}>
+      <select value={criteria.releaseId || release?.id || ''} disabled={loading || !productReleases?.length} onChange={event =>
+        select({ product: selectedProduct, through: criteria.through, releaseId: event.target.value })}>
         {!data.releases.length && <option value="">Нет выпущенных функций</option>}
         {data.releases.map(row => <option key={row.id} value={row.id}>{row.id} · {date(row.date)}</option>)}
       </select>
     </label>
-    <label>Дата среза <input type="date" value={cut} disabled={opening} onChange={event => setCut(event.target.value)} /></label>
-    <button type="submit" disabled={!cut || opening}>Показать на дату</button>
-    {criteria.through && <button type="button" disabled={opening} onClick={() => {
+    <label>Дата среза <input type="date" value={cut} onChange={event => setCut(event.target.value)} /></label>
+    <button type="submit" disabled={!cut}>Показать на дату</button>
+    {criteria.through && <button type="button" onClick={() => {
       setCut('');
-      select({ product: data.product, releaseId: release?.id });
+      select({ product: selectedProduct, releaseId: selectedRelease?.id });
     }}>Вернуться к текущему срезу</button>}
   </form>;
-  return <div className="release-decision">
-    <nav className="decision-breadcrumbs" aria-label="Путь к разбору релиза">
-      <a className="crumb" href="#releases-list">← Журнал релизов</a>
-    </nav>
-    <div className="page-head"><h1>Разбор релиза</h1></div>
+  const details = <>
     {error ? <p role="alert">{error}</p> : loading ? <p role="status">Читаем источники…</p> : data && <>
       <section className="signal-panel decision-hero" aria-labelledby="decision-subject">
         <div className="decision-next">
@@ -304,12 +313,6 @@ export function ReleaseDecision({
             <strong>Следующий шаг</strong>
             <p>{data.recommendation.next}</p>
           </div>
-          {release && <div className="decision-actions">
-            <button type="button" className="primary" disabled={opening} onClick={() => action(() => openChat(release.id))}>
-              {opening ? 'Открываем чат…' : 'Открыть чат разбора'}
-            </button>
-            {data.caseId && !data.historical && <a href={'#case/' + data.caseId + '/effect'}>Настроить проверку эффекта <Icon name="arrow" /></a>}
-          </div>}
         </div>
         <div className="decision-context">
           <h3>{data.scope === 'account' ? 'Личный кабинет' : data.product}</h3>
@@ -366,13 +369,24 @@ export function ReleaseDecision({
           </>}
         </details></section>
       </div>}
-      {thread && release && <div className="decision-chat" ref={chatAnchor}>
-        <h2>Чат разбора · {release.id}</h2>
-        <div className="decision-chat-grid">
-          {!data.historical && <TrackerActions key={data.product + '/' + release.id} product={data.product} releaseId={release.id} action={action} />}
-          {renderChat(thread, data.caseId || undefined, release.id, data.product, data.decisionContext)}
-        </div>
-      </div>}
+      {release && !data.historical && <TrackerActions key={data.product + '/' + release.id}
+        product={data.product} releaseId={release.id} action={action} />}
     </>}
+  </>;
+  const chatStatus = error ? 'Чат разбора недоступен.'
+    : loading || release ? 'Загружаем чат разбора…' : 'На выбранную дату нет релиза для обсуждения.';
+
+  return <div className="release-decision">
+    <nav className="decision-breadcrumbs" aria-label="Путь к разбору релиза">
+      <a className="crumb" href="#releases-list">← Журнал релизов</a>
+    </nav>
+    <div className="page-head"><h1>Разбор релиза</h1></div>
+    <div className="decision-layout">
+      <div className="case-discussion decision-chat" ref={chatDock} role="complementary" aria-label="Чат разбора">
+        {thread && release && data ? renderChat(thread, data.caseId || undefined, release.id, data.product, data.decisionContext)
+          : <p className="paper" role={chatError ? 'alert' : 'status'}>{chatError || chatStatus}</p>}
+      </div>
+      <div className="decision-main">{details}</div>
+    </div>
   </div>;
 }

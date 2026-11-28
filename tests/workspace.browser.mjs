@@ -387,15 +387,48 @@ test('release decisions preserve the historical cutoff, cited cells and manual i
   await page.waitForURL('**/#release-decision/DEC-2');
   const releaseSelect = field(page.locator('.decision-filters'), 'Релиз');
   assert.equal(await releaseSelect.inputValue(), 'DEC-2');
+  const chatPanel = page.locator('.decision-chat');
+  const conversation = page.getByRole('region', { name: 'Переписка' });
+  await conversation.waitFor({ state: 'visible', timeout: 5000 });
+  assert.equal(await role(page, 'Открыть чат разбора').count(), 0);
   const evidenceCards = page.locator('.decision-evidence > section');
   await visible(evidenceCards.last());
-  for (const width of [1440, 980, 390]) {
+  const effectLink = page.locator('.decision-hero').getByRole('link', { name: 'Настроить проверку эффекта', exact: true });
+  assert.equal(await effectLink.count(), 0);
+  for (const width of [1440, 980, 821, 820, 390]) {
     await page.setViewportSize({ width, height: 900 });
     const heights = await evidenceCards.evaluateAll(cards => cards.map(card => card.getBoundingClientRect().height));
     assert.equal(heights.length, 3);
     assert.ok(Math.max(...heights) - Math.min(...heights) < 1, `Uneven evidence cards at ${width}px: ${heights.join(', ')}`);
+    const panel = await chatPanel.boundingBox();
+    if (width > 820) {
+      const releaseCard = await page.locator('.decision-hero').boundingBox();
+      assert.ok(panel.x >= releaseCard.x + releaseCard.width, `Expected chat to the right at ${width}px`);
+    } else {
+      const heading = await releaseHeading.boundingBox();
+      const filters = await page.locator('.decision-filters').boundingBox();
+      assert.ok(panel.y >= heading.y + heading.height && panel.y + panel.height <= filters.y,
+        `Expected chat between the title and filters at ${width}px`);
+    }
+    assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth),
+      `Unexpected horizontal scroll at ${width}px`);
   }
+  await page.setViewportSize({ width: 1440, height: 720 });
+  await page.evaluate(() => localStorage.setItem('pm-menu-layout', 'top'));
+  await page.reload();
+  await visible(conversation);
+  await page.evaluate(() => window.scrollTo(0, 220));
+  await page.waitForFunction(() => {
+    const menu = document.querySelector('.team-app[data-menu="top"] > .side');
+    const panel = document.querySelector('.decision-chat');
+    const input = panel?.querySelector('.chat-composer textarea');
+    return window.scrollY > 0 && menu && panel && input &&
+      Math.abs(panel.getBoundingClientRect().top - menu.getBoundingClientRect().bottom - 16) < 2 &&
+      input.getBoundingClientRect().bottom <= innerHeight;
+  }, undefined, { timeout: 5000 });
+  await page.evaluate(() => localStorage.removeItem('pm-menu-layout'));
   await page.setViewportSize({ width: 1440, height: 900 });
+  await page.reload();
   await visible(releaseHeading);
   await page.getByRole('link', { name: '← Журнал релизов' }).click();
   await visible(journalHeading);
@@ -446,28 +479,79 @@ test('release decisions preserve the historical cutoff, cited cells and manual i
   await visible(page.getByText('Kaspersky!A20', { exact: true }));
   await page.goBack();
   await visible(page.getByText('Исторический срез · 08.11.2026', { exact: true }));
-  await field(page, 'Семейство или раздел').selectOption('Astra');
+  const decisionEndpoint = '**/api/team/release_decision';
+  const resumeDecision = Promise.withResolvers();
+  const isPendingAstra = request => {
+    if (!request.url().endsWith('/api/team/release_decision')) return false;
+    const { product, through } = request.postDataJSON();
+    return product === 'Astra' && through === '2026-11-08';
+  };
+  const delayDecision = async route => {
+    if (isPendingAstra(route.request())) await resumeDecision.promise;
+    await route.continue();
+  };
+  await page.route(decisionEndpoint, delayDecision);
+  try {
+    const [pending] = await Promise.all([
+      page.waitForRequest(isPendingAstra, { timeout: 5000 }),
+      field(page, 'Семейство или раздел').selectOption('Astra'),
+    ]);
+    await field(page, 'Дата среза').fill('2026-11-09');
+    const [cutoff] = await submit(page, 'release_decision', () => role(page, 'Показать на дату').click());
+    resumeDecision.resolve();
+    const previous = await pending.response();
+    assert.ok(previous?.ok());
+    await previous.finished();
+    assert.deepEqual(cutoff.request().postDataJSON(), { product: 'Astra', through: '2026-11-09' });
+  } finally {
+    resumeDecision.resolve();
+    await page.unroute(decisionEndpoint, delayDecision);
+  }
   await visible(page.getByRole('heading', { name: 'Astra', exact: true }));
   await releaseSelect.selectOption('DEC-3');
   await visible(page.locator('.decision-hero').getByText('DEC-3 · 02.10.2026', { exact: true }));
   assert.equal(await releaseSelect.inputValue(), 'DEC-3');
-  await role(page, 'Открыть чат разбора').click();
-  await visible(page.getByText('История до создания связанного разбора', { exact: true }));
+  await visible(conversation.getByText('История до создания связанного разбора', { exact: true }));
 
   await releaseSelect.selectOption('MIX-1');
-  await role(page, 'Открыть чат разбора').click();
-  await visible(page.getByText('Частные выводы Astra', { exact: true }));
-  assert.equal(await page.getByText('Частные выводы Kaspersky', { exact: true }).count(), 0);
-  await field(page, 'Семейство или раздел').selectOption('Kaspersky');
-  await releaseSelect.selectOption('MIX-1');
-  await role(page, 'Открыть чат разбора').click();
-  await visible(page.getByText('Частные выводы Kaspersky', { exact: true }));
-  assert.equal(await page.getByText('Частные выводы Astra', { exact: true }).count(), 0);
+  const astraHistory = conversation.getByText('Частные выводы Astra', { exact: true });
+  const kasperskyHistory = conversation.getByText('Частные выводы Kaspersky', { exact: true });
+  await visible(astraHistory);
+  assert.equal(await kasperskyHistory.count(), 0);
+
+  const chatEndpoint = '**/api/team/release-thread';
+  const resumeAstra = Promise.withResolvers();
+  const isAstraMixedChat = request => request.url().endsWith('/api/team/release-thread') &&
+    request.postDataJSON()?.product === 'Astra' && request.postDataJSON()?.releaseId === 'MIX-1';
+  const delayAstra = async route => {
+    if (isAstraMixedChat(route.request())) await resumeAstra.promise;
+    await route.continue();
+  };
+  await page.route(chatEndpoint, delayAstra);
+  try {
+    await releaseSelect.selectOption('DEC-3');
+    await visible(conversation.getByText('История до создания связанного разбора', { exact: true }));
+    await Promise.all([
+      page.waitForRequest(isAstraMixedChat, { timeout: 5000 }),
+      releaseSelect.selectOption('MIX-1'),
+    ]);
+    await field(page, 'Семейство или раздел').selectOption('Kaspersky');
+    await releaseSelect.selectOption('MIX-1');
+    await visible(kasperskyHistory);
+    const astraReply = page.waitForResponse(response => isAstraMixedChat(response.request()), { timeout: 5000 });
+    resumeAstra.resolve();
+    await (await astraReply).finished();
+    await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+    assert.equal(await kasperskyHistory.isVisible(), true);
+    assert.equal(await astraHistory.count(), 0);
+  } finally {
+    resumeAstra.resolve();
+    await page.unroute(chatEndpoint, delayAstra);
+  }
 
   await page.goto(base + '/#release-detail/DEC-2');
   await page.waitForURL('**/#release-decision/DEC-2');
   await visible(releaseHeading);
-  await role(page, 'Открыть чат разбора').click();
   await visible(page.getByRole('heading', { name: 'Чат разбора · DEC-2' }));
   await role(page, 'Найти задачу и проверить дубли').click();
   await visible(page.getByRole('link', { name: /^DEC-T ·/ }));
@@ -489,7 +573,6 @@ test('release decisions preserve the historical cutoff, cited cells and manual i
   await page.getByRole('link', { name: /Клики!A2$/ }).click();
   await visible(page.getByText('Клики!A2', { exact: true }));
   await page.goBack();
-  await role(page, 'Открыть чат разбора').click();
   await visible(page.getByRole('heading', { name: 'Чат разбора · R-50' }));
   const thread = store.db.prepare("SELECT id FROM conversations WHERE title='ЛК · R-50'").get().id;
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
@@ -511,19 +594,16 @@ test('release decisions preserve the historical cutoff, cited cells and manual i
   await submit(page, 'ask', () => role(page, 'Отправить').click());
   assert.equal(JSON.parse(store.db.prepare('SELECT body FROM jobs WHERE thread=?').get(thread).body).decisionReleaseId, 'R-50');
   await workJobs(store, app.accounts, fixtureEnv, transport);
-  const conversation = page.getByRole('region', { name: 'Переписка' });
   await visible(conversation.getByText(/14 → 28/));
   await conversation.getByRole('link', { name: /Клики!A2$/ }).click();
   await visible(page.getByText('Клики!A2', { exact: true }));
   await page.goto(base + '/#overview');
   await page.goto(base + '/#release-decision/R-50');
-  await role(page, 'Открыть чат разбора').click();
-  await visible(page.getByText(question, { exact: true }));
+  await visible(conversation.getByText(question, { exact: true }));
   assert.deepEqual(store.db.prepare("SELECT id FROM conversations WHERE title='ЛК · R-50'").all().map(r => r.id), [thread]);
   await field(page, 'Дата среза').fill('2026-10-10');
   await role(page, 'Показать на дату').click();
   await visible(page.getByText('Исторический срез · 10.10.2026', { exact: true }));
-  await role(page, 'Открыть чат разбора').click();
   await page.locator('textarea').fill(question);
   await submit(page, 'ask', () => role(page, 'Отправить').click());
   const scopedJob = JSON.parse(store.db.prepare('SELECT body FROM jobs WHERE thread=? ORDER BY rowid DESC LIMIT 1').get(thread).body);
@@ -531,6 +611,18 @@ test('release decisions preserve the historical cutoff, cited cells and manual i
   assert.equal(scopedJob.releaseDecisionSnapshot.through, '2026-10-10');
   await workJobs(store, app.accounts, fixtureEnv, transport);
   await visible(conversation.getByText(/14\/14 и 6\/14/));
+
+  await field(page, 'Дата среза').fill('2026-09-01');
+  await role(page, 'Показать на дату').click();
+  await visible(chatPanel.getByRole('status').filter({ hasText: 'На выбранную дату нет релиза для обсуждения.' }));
+  assert.equal(await conversation.count(), 0);
+  await page.route(chatEndpoint, route => route.fulfill({ status: 500, json: { error: 'Не удалось загрузить чат' } }),
+    { times: 1 });
+  await page.goto(base + '/#release-decision/DEC-2');
+  await visible(chatPanel.getByRole('alert').filter({ hasText: 'Не удалось загрузить чат' }));
+  await visible(evidenceCards.last());
+  assert.equal(await conversation.count(), 0);
+
   assert.equal(store.db.prepare("SELECT count(*) AS n FROM local_issues WHERE key='DEC-ASTRA'").get().n, 0);
   assert.equal((await call('confirm', { id: astraDraft.id })).key, 'DEC-ASTRA');
   assert.equal(store.db.prepare("SELECT count(*) AS n FROM local_issues WHERE key='DEC-ASTRA'").get().n, 1);

@@ -276,8 +276,8 @@ test('release chat requires a linked case before manual confirmation with the or
   await quote.click();
   await page.getByText('Активные!L9', { exact: true }).waitFor();
   await page.goBack();
-  await page.getByRole('button', { name: 'Открыть чат разбора' }).click();
-  await page.getByRole('heading', { name: 'Чат разбора · R-09' }).waitFor();
+  const conversation = page.getByRole('region', { name: 'Переписка' });
+  await conversation.getByRole('heading', { name: 'Чат разбора · R-09', exact: true }).waitFor();
   await page.getByRole('button', { name: 'Найти задачу и проверить дубли' }).click();
   await page.getByRole('link', { name: /^T-08 · Недочеты/ }).waitFor();
   assert.equal(await page.getByRole('button', { name: 'Подготовить черновик задачи' }).count(), 0);
@@ -300,7 +300,9 @@ test('release chat requires a linked case before manual confirmation with the or
   assert.equal(db.prepare('SELECT state FROM draft_actions').get().state, 'done');
   assert.equal(db.prepare('SELECT count(*) n FROM local_issues WHERE key=?').get('T-08').n, 1);
   await page.reload();
-  await page.getByRole('link', { name: 'Настроить проверку эффекта' }).click();
+  await conversation.getByRole('heading', { name: 'Чат разбора · R-09', exact: true }).waitFor();
+  assert.equal(await page.getByRole('link', { name: 'Настроить проверку эффекта', exact: true }).count(), 0);
+  await page.goto(base + '/#case/' + caseId + '/effect');
   assert.equal(new URL(page.url()).hash, '#case/' + caseId + '/effect');
   await page.locator('.effect-panel[open]').waitFor();
   await page.goto(base + '/#release-decision');
@@ -311,8 +313,7 @@ test('release chat requires a linked case before manual confirmation with the or
   await page.getByText('Исторический срез · 05.05.2026', { exact: true }).waitFor();
   await page.getByText('В архиве нет датированного интервью для этого среза.').waitFor();
   assert.equal(await page.getByRole('combobox', { name: /^Релиз/ }).inputValue(), 'R-01');
-  await page.getByRole('button', { name: 'Открыть чат разбора' }).click();
-  await page.getByRole('heading', { name: 'Чат разбора · R-01' }).waitFor();
+  await conversation.getByRole('heading', { name: 'Чат разбора · R-01', exact: true }).waitFor();
   assert.equal(await page.getByRole('button', { name: 'Найти задачу и проверить дубли' }).count(), 0);
   assert.equal(await page.getByRole('link', { name: 'Настроить проверку эффекта' }).count(), 0);
   await page.setViewportSize({ width: 390, height: 844 });

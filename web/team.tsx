@@ -324,6 +324,7 @@ function Chat({
   id,
   userId,
   avatar,
+  title,
   caseId,
   threads,
   onThreadAction,
@@ -342,6 +343,7 @@ function Chat({
   id: string;
   userId: string;
   avatar: User['avatar'];
+  title?: string;
   caseId?: string;
   threads: Thread[];
   onThreadAction?: (thread: Thread, action: ChatAction) => void;
@@ -561,7 +563,7 @@ function Chat({
       <header className="conversation-heading">
         <span className="chat-avatar" aria-hidden="true"><Icon name={isGroup ? 'people' : 'agent'} /></span>
         <div className="conversation-title">
-          <h3>{caseId ? 'Обсудить разбор' : activeThread?.title || 'Чат'}</h3>
+          <h3>{title ?? (caseId ? 'Обсудить разбор' : activeThread?.title || 'Чат')}</h3>
           <small>{isGroup ? 'Командный чат' : 'Личный чат'}</small>
         </div>
         {activeThread && onThreadAction && (
@@ -2379,7 +2381,8 @@ function Workspace({ user, onLogout, onUpdate }: { user: User; onLogout: () => v
           <ReleaseAnalytics route={route} requestedId={id} user={user} />
         ) : route === 'release-decision' ? (
           <ReleaseDecision key={id} action={action} initialRelease={id || undefined} renderChat={(thread, caseId, releaseId, product, decisionContext) => (
-            <Chat key={thread} id={thread} caseId={caseId} decisionReleaseId={releaseId} decisionContext={decisionContext} product={product}
+            <Chat key={thread} id={thread} title={'Чат разбора · ' + releaseId} caseId={caseId}
+              decisionReleaseId={releaseId} decisionContext={decisionContext} product={product}
               userId={user.id} avatar={user.avatar} threads={home.threads} action={action} />
           )} />
         ) : route === 'case' ? (
