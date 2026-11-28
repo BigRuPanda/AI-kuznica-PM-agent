@@ -114,6 +114,7 @@ test('release decisions and saved calculations present the result before its pro
     assert.equal(await prices.getByRole('row').count(), 3);
     await page.getByText('16 недель и исходные строки').click();
     const weeks = page.getByRole('table').filter({ has: page.getByRole('columnheader', { name: 'Неделя' }) });
+    await weeks.waitFor();
     assert.deepEqual(await weeks.getByRole('columnheader').allTextContents(), ['Неделя', 'Значение', 'Источник']);
     assert.equal(await weeks.getByRole('link').getAttribute('href'), '#knowledge-source/archive1/' + encodeURIComponent(source.loc));
     await checkWidths();

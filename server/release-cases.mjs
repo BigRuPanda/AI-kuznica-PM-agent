@@ -25,26 +25,28 @@ function releaseScope(db, releaseId) {
 
   const products = db.prepare(`SELECT DISTINCT json_extract(body,'$.product_family') AS product
     FROM facts WHERE kind='sales' AND product IS NOT NULL ORDER BY product`).all().map(row => row.product);
-  const affected = String(row.data.affected_metrics || '').split(/[,;|\s]+/u).filter(Boolean);
+  const affected = String(row.data.affected_metrics || '').split(/[,;|]/u).map(id => id.trim()).filter(Boolean);
   const metrics = [...new Set(affected.map(id => legacyOrderMetric(id) ? 'orders_index' : id)
     .filter(id => id === 'orders_index' || measuredSignal(id)))];
-  if (affected.includes('lk_reco_click_visits') && affected.includes('lk_reco_viewed_visits') && !metrics.includes('lk_reco_ctr'))
+  const canInferMetric = metrics.length > 0 || affected.length === 0;
+  if (!metrics.includes('lk_reco_ctr') &&
+    affected.some(id => id === 'lk_reco_click_visits' || id === 'lk_reco_viewed_visits'))
     metrics.push('lk_reco_ctr');
   const options = matchedProducts(row, products)
     .map(product => ({ product, metrics: metrics.length || product === 'ЛК' ? metrics : ['orders_index'] }))
     .filter(option => option.metrics.length);
-  return { releaseWeek: releaseDay.toISOString().slice(0, 10), options };
+  return { releaseWeek: releaseDay.toISOString().slice(0, 10), options, canInferMetric };
 }
 
-function defaultSelection(options) {
-  return options.length === 1 && options[0].metrics.length === 1
+function defaultSelection({ options, canInferMetric }) {
+  return canInferMetric && options.length === 1 && options[0].metrics.length === 1
     ? { product: options[0].product, metric: options[0].metrics[0] }
     : null;
 }
 
 export function releaseInvestigationInput(db, releaseId) {
   const scope = releaseScope(db, releaseId);
-  const selection = scope && defaultSelection(scope.options);
+  const selection = scope && defaultSelection(scope);
   return selection && { releaseId, ...selection };
 }
 
@@ -55,7 +57,7 @@ export function ensureReleaseCase(db, { releaseId, product, metric }) {
   if (!scope) throw Error('Выберите выпущенный релиз из календаря.');
   const { releaseWeek, options } = scope;
   if (!product && !metric) {
-    const selection = defaultSelection(options);
+    const selection = defaultSelection(scope);
     if (!selection) return { caseId: null, options };
     ({ product, metric } = selection);
   }

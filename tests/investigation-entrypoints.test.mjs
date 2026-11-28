@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createTeamApp } from '../server/team-http.mjs';
 import { cases, importDocs } from '../server/evidence.mjs';
+import { openReleaseCase } from '../server/release-cases.mjs';
 import { listInvestigationWork, tryStartInvestigation } from '../server/case-investigations.mjs';
 import { openStore } from '../server/store.mjs';
 import { initEvidence } from '../server/evidence.mjs';
@@ -235,9 +236,62 @@ test('publishing a calendar release queues one investigation that waits for post
   assert.equal(run().wait_for, null);
   assert.ok(work().some(item => item.role === 'analyst'));
 
-  importCalendar({ kind: 'releases', loc: 'Релизы!A3', row: { release_id: 'R-LK', release_type: 'minor',
+  importCalendar({ kind: 'releases', loc: 'Релизы!A3', row: { release_id: 'R-LK-CTR', release_type: 'minor',
     status: 'выпущен', description: 'Карусель рекомендаций', release_date: '2026-10-19', affected_metrics: 'lk_reco_ctr' } });
-  const accountCase = cases(store.db).find(c => c.body.release === 'R-LK');
+  const accountCase = cases(store.db).find(c => c.body.release === 'R-LK-CTR');
   assert.equal(accountCase.product, 'ЛК');
   assert.equal(accountCase.body.plan.metric, 'lk_reco_ctr');
+});
+
+test('a release listing recommendation clicks lets the user choose CTR and waits for comparable ratios', async t => {
+  const store = openStore(':memory:', { seedDemo: false });
+  t.after(() => store.close());
+  initEvidence(store.db);
+  initWorkbench(store.db);
+  const releaseId = 'R-LK-CLICKS';
+  importDocs(store, [{ file: 'Календарь', facts: [{ kind: 'releases', loc: 'Релизы!A3', row: {
+    release_id: releaseId, release_type: 'minor',
+    status: 'выпущен', description: 'Карусель рекомендаций', release_date: '2026-10-19',
+    affected_metrics: 'lk_reco_click_visits' } }] }], { notify: false });
+  assert.equal(cases(store.db).some(c => c.body.release === releaseId), false);
+  assert.deepEqual(openReleaseCase(store, { releaseId }), {
+    caseId: null, options: [{ product: 'ЛК', metrics: ['lk_reco_ctr'] }],
+  });
+  const { caseId } = openReleaseCase(store, { releaseId, product: 'ЛК', metric: 'lk_reco_ctr' });
+  const read = () => store.db.prepare('SELECT id,wait_for,capture FROM case_investigations WHERE case_id=?').get(caseId);
+  const { id } = read();
+  const env = { LLM_BASE_URL: 'https://fixture.invalid', LLM_MODEL: 'fixture', LLM_DATA_MODE: 'analysis' };
+  const work = () => listInvestigationWork(store, env, Date.now(), id);
+  await tryStartInvestigation(store, work()[0], env);
+  assert.equal(read().wait_for, 'data');
+  const weeks = ['2026-09-21', '2026-09-28', '2026-10-05', '2026-10-12', '2026-10-19'];
+  importDocs(store, [{ file: 'CTR', facts: weeks.map((date, i) => ({ kind: 'metrics', loc: 'CTR!A' + (i + 2),
+    row: { metric_id: 'lk_reco_ctr', product: 'ЛК', segment: 'all', date, unit: 'ratio',
+      numerator: i === 4 ? 20 : 10, denominator: 100 } })) }], { notify: false });
+  await tryStartInvestigation(store, work()[0], env);
+  const result = read();
+  assert.equal(result.id, id);
+  assert.equal(result.wait_for, null);
+  const [finding] = JSON.parse(result.capture).context.calculation.findings;
+  assert.equal(finding.before, 10);
+  assert.equal(finding.after, 20);
+});
+
+test('a different affected KPI never starts an order-index investigation without an explicit choice', t => {
+  const store = openStore(':memory:', { seedDemo: false });
+  t.after(() => store.close());
+  initEvidence(store.db);
+  initWorkbench(store.db);
+  const releaseId = 'R-CART';
+  importDocs(store, [{ file: 'Календарь', facts: [
+    { kind: 'sales', loc: 'Продажи!A2', row: { product_family: 'Astra', week_start: '2026-10-05', orders_index: 100 } },
+    { kind: 'releases', loc: 'Релизы!A2', row: { release_id: releaseId, release_type: 'major',
+      release_date: '2026-10-12', status: 'выпущен', description: 'Корзина Astra', affected_metrics: 'cart' } },
+  ] }], { notify: false });
+  assert.equal(cases(store.db).find(c => c.body.release === releaseId), undefined);
+  assert.deepEqual(openReleaseCase(store, { releaseId }), {
+    caseId: null, options: [{ product: 'Astra', metrics: ['orders_index'] }],
+  });
+  const { caseId } = openReleaseCase(store, { releaseId, product: 'Astra', metric: 'orders_index' });
+  assert.equal(cases(store.db).find(c => c.body.release === releaseId)?.id, caseId);
 });

@@ -12,6 +12,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { createTeamApp } from '../server/team-http.mjs';
 import { digest, facts, importDocs } from '../server/evidence.mjs';
+import { openReleaseCase } from '../server/release-cases.mjs';
 import { saveMetricRule } from '../server/metric-rules.mjs';
 import { addUserMessage, enqueue, initWorkbench, openCaseThread, openReleaseThread, saveReleaseDecisionContext, workJobs } from '../server/workbench.mjs';
 import { workPresentations } from '../server/presentations.mjs';
@@ -283,11 +284,12 @@ test('release decisions preserve the historical cutoff, cited cells and manual i
     release('DEC-1', '2026-10-01', 'Изменение Kaspersky', 2),
     release('DEC-2', '2026-11-24', 'Поздний релиз Kaspersky', 3),
     release('DEC-3', '2026-10-02', 'Изменение Astra', 4, { related_task_ids: 'DEC-ASTRA' }),
-    release('R-50', '2026-10-04', 'Карусель рекомендаций ЛК', 5, { affected_metrics: 'lk_reco_ctr,lk_reco_click_visits', related_task_ids: 'T-9' }),
+    release('R-50', '2026-10-04', 'Карусель рекомендаций ЛК', 5, { affected_metrics: 'lk_reco_click_visits', related_task_ids: 'T-9' }),
     release('MIX-1', '2026-10-03', 'Изменения для Astra и Kaspersky', 6),
     release('OLD-1', '2026-10-01', 'Обновление Astra', 7),
     release('DEC-TECH', '2026-10-10', 'Обновление сбора событий для семейств Astra и Kaspersky', 8, { release_type: 'analytics' }),
     release('DEC K/1', '2026-10-01', 'Изменение поставки Astra', 9),
+    release('MIX-TASK', '2026-10-04', 'Выкладка Astra и Kaspersky', 11, { related_task_ids: 'DEC-T' }),
     { kind: 'interview', loc: 'Интервью!L9', text: 'Темы ответа: Kaspersky · сложность выбора\nФрагмент записи: Неясно, какую лицензию выбрать' },
     { kind: 'backlog', loc: 'Задачи!A8', row: { task_id: 'DEC-T', title: 'Kaspersky: проверить сбор событий',
       created_date: '2026-09-20', status: 'New', description_short: 'Проверить передачу событий', linked_metric_ids: 'cfg_add_to_cart_rate' } },
@@ -311,6 +313,7 @@ test('release decisions preserve the historical cutoff, cited cells and manual i
     'releases', 'OLD-1', 'old-calendar', imported[0].file, oldRelease.loc, JSON.stringify(oldRelease.row),
   );
   importDocs(store, imported, { notify: false });
+  const mixedTracker = openReleaseCase(store, { releaseId: 'MIX-TASK', product: 'Astra', metric: 'orders_index' });
   const legacy = digest(user.id + '/release/OLD-1');
   const legacyMixed = digest(user.id + '/release/MIX-1');
   store.db.exec('DROP TABLE release_threads; CREATE TABLE release_threads(thread TEXT PRIMARY KEY, release_id TEXT NOT NULL)');
@@ -472,8 +475,6 @@ test('release decisions preserve the historical cutoff, cited cells and manual i
   await journalLink.click();
   await releaseLink.click();
 
-  await field(page, 'Семейство или раздел').selectOption('Kaspersky');
-  await page.getByText('Интервью покупателей', { exact: true }).click();
   await page.getByText('Интервью покупателей', { exact: true }).click();
   await visible(page.getByText('«Неясно, какую лицензию выбрать»'));
   await page.getByRole('link', { name: /Интервью!L9/ }).click();
@@ -539,6 +540,26 @@ test('release decisions preserve the historical cutoff, cited cells and manual i
   await releaseSelect.selectOption('MIX-1');
   assert.equal(await openCase.getAttribute('href'), '#case/' + mixedCaseId);
 
+  store.db.prepare('INSERT INTO cases VALUES(?,?,?,?,?)').run('tracker-signal', 'Kaspersky',
+    'Сигнал по MIX-TASK', 'Исследуем', JSON.stringify({
+      signal: { rule: 'relative', status: 'confirmed', week: '2026-10-05', releaseId: 'MIX-TASK' },
+    }));
+  assert.equal(call('release_decision', { releaseId: 'MIX-TASK', product: 'Kaspersky' }).caseId, 'tracker-signal');
+  await releaseSelect.selectOption('MIX-TASK');
+  assert.equal(await openCase.getAttribute('href'), '#case/' + mixedTracker.caseId);
+  const [searchMixed] = await Promise.all([
+    page.waitForResponse(response => response.url().endsWith('/api/team/release-tracker')),
+    role(page, 'Найти задачу и проверить дубли').click(),
+  ]);
+  assert.equal(searchMixed.status(), 200);
+  assert.equal((await searchMixed.json()).caseId, null);
+  const [linkedTask] = await submit(page, 'release-tracker-case', () => role(page, 'Создать связанный разбор').click());
+  assert.equal(linkedTask.status(), 200);
+  const trackerCase = (await linkedTask.json()).caseId;
+  assert.notEqual(trackerCase, mixedTracker.caseId);
+  assert.equal(store.db.prepare('SELECT product FROM cases WHERE id=?').get(trackerCase).product, 'Kaspersky');
+  await visible(page.getByRole('button', { name: 'Подготовить комментарий' }).first());
+
   await page.goto(base + '/#release-detail/DEC-2');
   await page.waitForURL('**/#release-decision/DEC-2');
   await visible(releaseHeading);
@@ -564,6 +585,13 @@ test('release decisions preserve the historical cutoff, cited cells and manual i
   await page.goBack();
   await visible(releaseHeading);
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
+  await role(page, 'Создать разбор').click();
+  const accountSetup = page.getByRole('dialog', { name: 'Создать разбор релиза' });
+  assert.equal(await field(accountSetup, 'Метрика').inputValue(), 'lk_reco_ctr');
+  const [createdAccount] = await submit(page, 'ensure-release-case', () => role(accountSetup, 'Создать разбор').click());
+  const { caseId: accountCaseId } = await createdAccount.json();
+  await page.waitForURL('**/#case/' + accountCaseId);
+  await page.goto(base + '/#release-decision/R-50');
   const beforeAccountSearch = caseCount();
   await role(page, 'Найти задачу и проверить дубли').click();
   await visible(page.getByRole('link', { name: /^T-9 ·/ }));

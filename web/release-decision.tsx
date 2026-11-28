@@ -16,7 +16,6 @@ type Trend =
 type Decision = {
   scope?: 'account';
   accountEvidence?: { lines: string[]; sources: Citation[] };
-  caseId: string | null;
   releaseCaseId: string | null;
   releaseCaseProduct: string | null;
   product: string;
@@ -165,11 +164,15 @@ function TrackerActions({ product, releaseId, caseId, action }: {
   const [error, setError] = useState('');
   const payload = { product, releaseId, caseId: caseId ?? undefined };
   const hasExact = search?.items.some(item => item.exact);
-  async function run(op: 'search' | 'draft', key?: string) {
+  const canDraft = !hasExact || search?.items.some(item => item.exact && item.canComment);
+  async function run(op: 'search' | 'case' | 'draft', key?: string) {
     setPending(true);
     setError('');
     try {
-      if (op === 'draft' && search?.caseId) {
+      if (op === 'case' && search) {
+        const { caseId } = await post<{ caseId: string }>('release-tracker-case', { product, releaseId });
+        setSearch({ ...search, caseId });
+      } else if (op === 'draft' && search?.caseId) {
         setDraft(await post<TrackerPreview>('release-tracker-draft', { ...payload, caseId: search.caseId, key }));
       } else if (op === 'search') {
         setSearch(await post<TrackerSearch>('release-tracker', payload));
@@ -200,6 +203,9 @@ function TrackerActions({ product, releaseId, caseId, action }: {
           >Подготовить комментарий</button>}
         </li>)}
       </ul>
+      {!search.caseId && canDraft && <button
+        type="button" disabled={pending} onClick={() => void run('case')}
+      >Создать связанный разбор</button>}
       {search.caseId && !hasExact && <button
         type="button" disabled={pending} onClick={() => void run('draft')}
       >Подготовить черновик задачи</button>}
@@ -347,7 +353,7 @@ export function ReleaseDecision({
       </div>}
       {release && !data.historical && <TrackerActions key={data.product + '/' + release.id}
         product={data.product} releaseId={release.id}
-        caseId={data.releaseCaseProduct === data.product ? data.releaseCaseId : data.caseId} action={action} />}
+        caseId={data.releaseCaseProduct === data.product ? data.releaseCaseId : null} action={action} />}
     </>}
   </>;
   return <div className="release-decision">
