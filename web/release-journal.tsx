@@ -65,23 +65,23 @@ export function ReleaseJournal({ calendar, initialFilter, admin, archiveOnly, on
   return <section className="release-journal">
     <header className="page-head">
       <h1>Релизы</h1>
-      {journal && (canImport || canCreate) && <details className="release-management" ref={menu}>
-        <summary>Управление</summary>
-        <div className="release-management-actions">
-          {canCreate && <button type="button" onClick={() => openForm('release')}>Добавить релиз</button>}
-          {canImport && <button type="button" onClick={() => openForm('import')}>Импорт CSV</button>}
-        </div>
-      </details>}
     </header>
-    <div className="toolbar">
-      <label>
-        Источник
-        <select value={filter} onChange={event => setFilter(event.target.value as Filter)}>
-          {filters.map(([key, label]) => <option key={key} value={key}>{label}</option>)}
-        </select>
-      </label>
-    </div>
     <div className="paper release-table-card">
+      <div className="toolbar release-journal-toolbar">
+        <label>
+          Источник
+          <select value={filter} onChange={event => setFilter(event.target.value as Filter)}>
+            {filters.map(([key, label]) => <option key={key} value={key}>{label}</option>)}
+          </select>
+        </label>
+        {journal && (canImport || canCreate) && <details className="release-management" ref={menu}>
+          <summary>Управление</summary>
+          <div className="release-management-actions">
+            {canCreate && <button type="button" onClick={() => openForm('release')}>Добавить релиз</button>}
+            {canImport && <button type="button" onClick={() => openForm('import')}>Импорт CSV</button>}
+          </div>
+        </details>}
+      </div>
       {error && filter !== 'calendar' && <div className="release-list-status">
         <p role="alert" className="error">Не удалось загрузить релизы с метриками. {error}</p>
         <button type="button" onClick={() => refresh(n => n + 1)}>Повторить</button>
@@ -113,7 +113,9 @@ export function ReleaseJournal({ calendar, initialFilter, admin, archiveOnly, on
             <tr role="row" className="release-row">
               <th role="rowheader" scope="row" className="release-name">
                 {row.title !== row.id && <small className="release-id">{row.id}</small>}
-                {href ? <a href={href}>{row.title}<Icon name="arrow" /></a> : <span>{row.title}</span>}
+                {href ? <a className="release-entry-link" href={href}>
+                  <span>{row.title}</span><span className="release-open-icon"><Icon name="arrow" /></span>
+                </a> : <span>{row.title}</span>}
               </th>
               <td role="cell" className="release-date">{row.date ? <time dateTime={row.date}>{displayDate(row.date)}</time> : 'Не указана'}</td>
               <td role="cell" className="release-source">{sourceNames[row.source]}</td>

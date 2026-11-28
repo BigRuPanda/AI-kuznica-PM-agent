@@ -47,6 +47,17 @@ test('the release journal sorts both sources and keeps their routes distinct', a
   assert.equal(await rows.nth(0).getByRole('link').getAttribute('href'), '#release-decision/R-001');
   assert.equal(await rows.nth(2).getByRole('link').getAttribute('href'), '#release/R-001');
   assert.equal(await rows.last().getByRole('link').count(), 0);
+  await page.mouse.move(0, 0);
+  await assertOutlined(source);
+  await assertOutlined(rows.first().getByRole('link', { name: calendarTitle, exact: true }).locator('.release-open-icon'));
+  await assertOutlined(rows.first().getByRole('button', { name: 'Запланировать разбор R-001' }));
+  await assertOutlined(rows.first().getByRole('button', { name: 'Связанные задачи и разборы R-001' }));
+  const management = page.getByText('Управление', { exact: true });
+  await assertOutlined(management);
+  await management.click();
+  await assertOutlined(page.getByRole('button', { name: 'Добавить релиз', exact: true }));
+  await assertOutlined(page.getByRole('button', { name: 'Импорт CSV', exact: true }));
+  await management.click();
   await source.selectOption('calendar');
   assert.equal(await rows.count(), 3);
   await page.setViewportSize({ width: 390, height: 844 });
@@ -188,6 +199,18 @@ test('finishing a case has its own row below archive observation at every width'
   await finish.click();
   await page.getByRole('dialog', { name: 'Завершить разбор?' }).waitFor();
 });
+
+async function assertOutlined(control) {
+  await control.waitFor({ state: 'visible' });
+  const frame = await control.evaluate(element => {
+    const style = getComputedStyle(element);
+    return { color: style.borderTopColor, width: parseFloat(style.borderTopWidth), style: style.borderTopStyle };
+  });
+  assert.ok(
+    frame.width >= 1 && frame.style === 'solid' && frame.color !== 'transparent' && frame.color !== 'rgba(0, 0, 0, 0)',
+    `Expected visible border on ${control}: ${JSON.stringify(frame)}`,
+  );
+}
 
 async function openWorkspace(t) {
   const directory = await mkdtemp(join(tmpdir(), 'release-layout-'));

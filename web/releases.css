@@ -1,22 +1,50 @@
+.release-journal {
+  container: release-journal / inline-size;
+  --release-control-border: color-mix(in srgb, var(--control-border) 78%, var(--fg));
+}
+.release-journal :is(button:not(.primary), summary) {
+  border: 1px solid var(--release-control-border);
+  background-color: var(--surface-subtle);
+}
+.release-journal :is(button:not(.primary), summary):not(:disabled):is(:hover, :focus-visible) {
+  border-color: var(--fg-muted);
+  background-color: var(--surface-hover);
+}
+.release-journal :is(button[aria-expanded='true'], details[open] > summary) {
+  border-color: var(--accent-text);
+  background-color: var(--accent-soft);
+}
+.release-journal button.text-action { color: var(--fg); }
+.release-journal select { border-color: var(--release-control-border); }
+.release-journal :is(summary, select):focus-visible { outline: 2px solid var(--focus); outline-offset: 3px; }
+.release-journal summary {
+  max-inline-size: 100%;
+  min-block-size: 38px;
+  padding: 7px 11px;
+  padding-inline-start: 29px;
+  border-radius: var(--button-radius);
+  color: var(--fg);
+  font-size: .92rem;
+  font-weight: 600;
+  line-height: 1.5;
+}
+.release-journal summary::before { inset-inline-start: 11px; }
+.release-related-row a[href] {
+  text-decoration: underline;
+  text-underline-offset: .17em;
+}
+
 .release-journal, .release-workspace {
   min-width: 0;
 }
 
-.release-journal { container: release-journal / inline-size; }
-
-.release-management { position: relative; margin-inline-start: auto; }
-.release-management summary {
-  padding: 8px 12px 8px 28px;
-  border: 1px solid var(--control-border);
-  border-radius: var(--button-radius);
-  background: var(--surface);
-  color: var(--fg);
-  font-size: .875rem;
-  font-weight: 550;
-  cursor: pointer;
+.release-journal-toolbar.toolbar {
+  margin: 0;
+  padding: 12px 16px;
+  border-block-end: 1px solid var(--border);
 }
-.release-management summary::before { inset-inline-start: 12px; }
-.release-management summary:hover { background: var(--surface-hover); }
+.release-journal-toolbar select { min-block-size: 38px; }
+.release-management { position: relative; margin-inline-start: auto; }
 .release-management-actions {
   position: absolute;
   z-index: 2;
@@ -60,6 +88,7 @@
 .release-actions-col { width: 12rem; }
 .release-journal-table > thead th {
   padding: 11px 16px;
+  background: var(--surface-subtle);
   white-space: nowrap;
 }
 .release-journal-table > tbody > tr > :is(th, td) { padding: 12px 16px; }
@@ -76,26 +105,32 @@
   font-weight: 520;
   line-height: 1.35;
 }
-.release-name a {
+.release-entry-link {
   display: flex;
   align-items: flex-start;
-  gap: 6px;
+  gap: 10px;
   color: inherit;
   font-weight: 560;
   text-underline-offset: .17em;
 }
-.release-name a .ui-icon {
+.release-open-icon {
+  display: inline-grid;
+  place-items: center;
   flex: none;
-  width: 13px;
-  height: 13px;
-  margin-block-start: .33em;
-  color: var(--fg-muted);
+  inline-size: 30px;
+  block-size: 30px;
+  border: 1px solid var(--release-control-border);
+  border-radius: var(--button-radius);
+  background: var(--surface-subtle);
+  color: var(--fg);
 }
-.release-row > .release-name a:is(:hover, :focus-visible) {
+.release-open-icon .ui-icon { width: 16px; height: 16px; }
+.release-row .release-entry-link:is(:hover, :focus-visible) {
   color: var(--accent-text);
   background: transparent;
   text-decoration: underline;
 }
+.release-entry-link:is(:hover, :focus-visible) .release-open-icon { background: var(--accent-soft); }
 .release-row > :is(.release-date, .release-source) {
   color: var(--fg-muted);
   font-size: .875rem;
@@ -107,23 +142,18 @@
   display: flex;
   flex-direction: column;
   align-items: flex-start;
-  gap: 4px;
+  gap: 8px;
 }
 .release-row-actions .text-action {
   justify-content: flex-start;
   gap: 7px;
   max-width: 100%;
-  min-height: 30px;
-  padding: 4px 7px;
-  color: var(--fg-muted);
+  min-block-size: 36px;
+  padding: 5px 8px;
   font-size: .83rem;
   line-height: 1.35;
   text-align: start;
   white-space: nowrap;
-}
-.release-row-actions .text-action[aria-expanded='true'] {
-  background: var(--surface-subtle);
-  color: var(--fg);
 }
 .release-row-actions .text-action .ui-icon {
   flex: none;
@@ -202,6 +232,11 @@
   .release-table thead th { font-size: .76rem; }
 }
 
+@container release-journal (min-width: 66rem) {
+  .release-actions-col { width: 18.5rem; }
+  .release-row-actions { flex-flow: row wrap; }
+}
+
 @container release-journal (max-width: 39rem) {
   .release-journal-table, .release-journal-table > tbody { display: block; }
   .release-journal-table > colgroup { display: none; }
@@ -228,10 +263,6 @@
   .release-journal-table > tbody > .release-row > .release-actions { padding: 0; }
   .release-row > .release-actions:empty { display: none; }
   .release-row > .release-source { border-inline-start: 1px solid var(--border); padding-inline-start: 12px; }
-  .release-row-actions {
-    flex-flow: row wrap;
-    gap: 6px 8px;
-    margin-inline-start: -7px;
-  }
-  .release-row-actions .text-action { min-height: 36px; white-space: normal; }
+  .release-row-actions { flex-flow: row wrap; }
+  .release-row-actions .text-action { min-block-size: 38px; white-space: normal; }
 }
