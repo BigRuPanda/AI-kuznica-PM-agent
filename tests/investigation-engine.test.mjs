@@ -323,7 +323,6 @@ test('Qwen lead and reviewer assemble validated parts from inspected evidence', 
     if(decisionStage){
       assert.equal(out.result.hypotheses[0].sourceRefs.for[0].findingId,'f1');
       assert.deepEqual(requests.slice(3).map(r=>r.tools.map(t=>t.function.name)),[['submit_assessment'],['submit_plan']]);
-      assert.deepEqual(requests.slice(3).map(r=>r.max_tokens),[8192,4096]);
       const assessment=requests[3].tools[0].function.parameters.properties.hypotheses.items.properties;
       assert.deepEqual(assessment.for.items.properties.id.enum,['f1']);
       assert.deepEqual(assessment.against.items.properties.id.enum,['f1']);
@@ -338,6 +337,7 @@ test('Qwen lead and reviewer assemble validated parts from inspected evidence', 
       assert.ok(facts.result.length < prior[0].check.result.length);
       assert.equal(JSON.stringify(requests).includes('raw-source-link'),false);
     }
+    assert.deepEqual(requests.map(r=>r.max_tokens),names.map(()=>65_536));
     assert.equal(out.usage.calls,names.length);
   });
 });

@@ -20,10 +20,6 @@ export const anymodelTimeoutMs = 600_000;
 const qwenMaxCompletionTokens = 65_536;
 export const isAnyModelQwen = env => env.LLM_BACKEND === 'anymodel' && env.LLM_MODEL === 'qwen/qwen3.8-27b';
 
-export function legacyOutputLimit(env, limit) {
-  return isAnyModelQwen(env) ? undefined : limit;
-}
-
 export function modelTimeout(env, fallback) {
   return env.LLM_BACKEND === 'anymodel' ? anymodelTimeoutMs : fallback;
 }
@@ -102,9 +98,7 @@ async function callProvider(env,messages,tools,choice,send,limits){
     return Object.assign(Error('Модель не успела ответить за ' + seconds + ' ' + unit + '.'), {timedOut:true});
   };
   const history = messages.map(({usage, googleParts, lengthLimited, finishReason, refusal, ...message}) => message);
-  const maxTokens = isAnyModelQwen(env)
-    ? Math.min(limits.maxTokens ?? qwenMaxCompletionTokens, qwenMaxCompletionTokens)
-    : limits.maxTokens;
+  const maxTokens = isAnyModelQwen(env) ? qwenMaxCompletionTokens : limits.maxTokens;
   try{signal.throwIfAborted();response=await send(target,{method:'POST',redirect:'error',signal,headers:{'Content-Type':'application/json',...(key?{Authorization:'Bearer '+key}:{})},
     body:JSON.stringify({model:env.LLM_MODEL,messages:history,...(tools.length?{tools,tool_choice:choice}:{}),
       ...(maxTokens?{max_tokens:maxTokens}:{}),

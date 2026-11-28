@@ -1,4 +1,4 @@
-import { apiConfigured, modelTimeout,legacyOutputLimit, providerCall } from './agent.mjs';
+import { apiConfigured, modelTimeout, providerCall } from './agent.mjs';
 import {completeModelText} from './model-response.mjs';
 import { fmt, productFamily } from './evidence.mjs';
 
@@ -42,7 +42,7 @@ export async function briefConversation(store, job, question, activeCase, env, s
     const reply = await providerCall(env,[
       {role:'system',content:'Ответь по-русски двумя короткими предложениями. Для вопроса о методе объясни простыми словами, как он работает и какой вывод позволяет сделать. Не утверждай, что гипотеза уже подтверждена. Название продукта дано только для контекста. При неоднозначном вопросе попроси уточнить. Если не знаешь имени или должности, не угадывай. Не добавляй даты и статистику.'},
       {role:'user',content:JSON.stringify({question:q,product:context})},
-    ],[],'auto',send,{timeout:modelTimeout(env,32_000),maxTokens:legacyOutputLimit(env,retry?56:90),temperature:0,step:'brief-chat'});
+    ],[],'auto',send,{timeout:modelTimeout(env,32_000),maxTokens:retry?56:90,temperature:0,step:'brief-chat'});
     store.db.prepare('INSERT INTO costs(job,model,elapsed,input,output) VALUES(?,?,?,?,?)')
       .run(job,env.LLM_MODEL || 'configured',Date.now()-started,reply.usage?.input??null,reply.usage?.output??null);
     const text = completeModelText(reply);

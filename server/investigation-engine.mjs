@@ -582,9 +582,9 @@ export async function runInvestigationStage({env = process.env, send = fetch, st
     ...(qwen ? ['После чтения при необходимости найди дополнительные источники инструментом search_findings в пределах своей роли. Заверши проверку одним кратким submit_check.'] : []),
     ...(producesDecision && !split ? ['Если прочитана подходящая открытая задача, укажи её исходный ключ issueSourceKey и подбери issueQuery по названию или теме. В остальных случаях пропусти оба необязательных поля.'] : []),
   ].join('\n')},{role:'user',content:JSON.stringify({...context,catalog})}];
-  const request = async (history, available, choice, maxTokens) => {
+  const request = async (history, available, choice) => {
     const reply = await providerCall(env,history,available,choice,send,{
-      timeout:remainingTime(),maxTokens,signal,step:stage+'.'+(available.length===1 ? available[0].function.name : 'read'),
+      timeout:remainingTime(),signal,step:stage+'.'+(available.length===1 ? available[0].function.name : 'read'),
     });
     usage.calls++;
     usage.input += reply.usage?.input || 0;
@@ -608,13 +608,13 @@ export async function runInvestigationStage({env = process.env, send = fetch, st
       actionPlan.extend({issueSourceKey:z.enum(issueKeys).optional(),issueQuery:decision.shape.issueQuery}) : actionPlan;
     const parts = [
       ['submit_assessment', 'Сформулировать проверяемый вывод и гипотезы.',assessment],
-      ['submit_plan', 'Предложить одно действие и план его проверки.',planSchema,4096],
+      ['submit_plan', 'Предложить одно действие и план его проверки.',planSchema],
       ...(requiresVerification ? [['submit_verification','Составить парную проверку действия и регистрации события.',
         verification.extend({findingId:z.enum(findings.filter(f=>f.measurementGap).map(f=>f.id))})]] : []),
     ];
     const assembled = {};
     let corrected = false;
-    for (const [name,description,schema,maxTokens=8192] of parts) {
+    for (const [name,description,schema] of parts) {
       const history = [{role:'system',content:[
         'Ты '+(stage==='reviewer'?'рецензент':'ведущий')+' продуктового разбора. Пиши по-русски.',
         'Отправь один '+name+' по схеме. Пиши по одному короткому предложению на поле. Достаточно одной обоснованной гипотезы.',
@@ -633,7 +633,7 @@ export async function runInvestigationStage({env = process.env, send = fetch, st
       })}];
       const only = [modelTool(name,description,schema)];
       for (;;) {
-        const reply = await request(history,only,{type:'function',function:{name}},maxTokens);
+        const reply = await request(history,only,{type:'function',function:{name}});
         try {
           const call = reply.tool_calls?.length === 1 && reply.tool_calls[0];
           if (call?.function?.name !== name) throw invalidModelResponse('Модель не отправила нужную часть вывода.');

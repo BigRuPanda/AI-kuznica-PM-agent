@@ -1,6 +1,6 @@
 import {archiveInquiry,archiveEvidence} from './archive-search.mjs';
 import { z } from 'zod/v4';
-import { legacyOutputLimit, modelTimeout, providerCall } from './agent.mjs';
+import { modelTimeout, providerCall } from './agent.mjs';
 import { normalizeModelReply } from './model-response.mjs';
 import { chatWriteCase, chatWriteRequests } from './chat-write-intent.mjs';
 import { withAiNotice } from './tracker-clients.mjs';
@@ -497,7 +497,7 @@ export async function runAssistant(
           return !compact || singleIssue || readTools.has(tool.function.name);
         });
         response = await providerCall(env, messages, available, 'auto', send,
-          {timeout:deadline-start,maxTokens:compact ? legacyOutputLimit(env,160) : undefined,step:'workspace-chat.'+(state.round+1)});
+          {timeout:deadline-start,maxTokens:compact ? 160 : undefined,step:'workspace-chat.'+(state.round+1)});
         if (state.issues) delete state.issues.provider;
       } catch (e) {
         state.round++;

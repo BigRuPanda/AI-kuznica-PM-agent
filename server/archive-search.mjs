@@ -1,6 +1,6 @@
 import { normalizeObservation, observationWithin } from './metric-observations.mjs';
 import { explicitDates } from './day-comparison.mjs';
-import { apiConfigured, modelTimeout,legacyOutputLimit, providerCall } from './agent.mjs';
+import { apiConfigured, modelTimeout, providerCall } from './agent.mjs';
 import {completeModelText} from './model-response.mjs';
 
 const indexes = new WeakMap();
@@ -322,7 +322,7 @@ export async function archiveAnswer(store, question, evidence, env, send, job) {
     {role:'user',content:JSON.stringify({question,records:evidence.map(x=>x.text)})}];
   const start=Date.now();
   try {
-    const reply=await providerCall(env,messages,[],'auto',send,{timeout:modelTimeout(env,42_000),maxTokens:legacyOutputLimit(env,220),step:'archive-chat'});
+    const reply=await providerCall(env,messages,[],'auto',send,{timeout:modelTimeout(env,42_000),maxTokens:220,step:'archive-chat'});
     store.db.prepare('INSERT INTO costs(job,model,elapsed,input,output) VALUES(?,?,?,?,?)')
       .run(job,env.LLM_MODEL || 'configured',Date.now()-start,reply.usage?.input??null,reply.usage?.output??null);
     const text = completeModelText(reply);

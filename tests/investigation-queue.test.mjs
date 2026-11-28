@@ -558,9 +558,11 @@ test('Qwen failure in verification keeps the frozen snapshot for retry',async t=
       eventMissing:'Проверить запись.',behaviorFailed:'Проверить действие.',bothPassed:'Расширить выборку.'},
   };
   let complete=false;
+  const verificationLimits=[];
   const send=async(_url,init)=>{
     const request=JSON.parse(init.body);
     const name=request.tool_choice?.function?.name || 'submit_check';
+    if(name==='submit_verification') verificationLimits.push(request.max_tokens);
     if(name==='submit_verification'&&!complete)
       return Response.json({choices:[{finish_reason:'length',message:{content:null}}]});
     return Response.json({choices:[{message:{tool_calls:[{id:name,type:'function',function:{name,arguments:JSON.stringify(inputs[name]||inputs.submit_check)}}]}}]});
@@ -581,4 +583,5 @@ test('Qwen failure in verification keeps the frozen snapshot for retry',async t=
   assert.equal(ready.status,'ready');
   assert.equal(ready.calcId,failed.calcId);
   assert.match(ready.result.action,/запись добавления/u);
+  assert.deepEqual(verificationLimits,[65_536,65_536]);
 });
