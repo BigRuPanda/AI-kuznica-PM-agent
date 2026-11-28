@@ -65,6 +65,7 @@ import './tracking.css';
 import './chat.css';
 
 type Action = (fn: () => Promise<void>) => void;
+type CaseStatusWrite = { pending: boolean; revision: number };
 type ThreadTitle = Pick<Thread, 'id' | 'title'>;
 
 function currentRoute() {
@@ -1232,6 +1233,8 @@ function Investigation({
   avatar,
   action,
   refresh,
+  statusWrite,
+  saveCaseStatus,
 }: {
   id: string;
   selected?: string;
@@ -1240,6 +1243,8 @@ function Investigation({
   avatar: User['avatar'];
   action: Action;
   refresh: () => Promise<void>;
+  statusWrite?: CaseStatusWrite;
+  saveCaseStatus: (caseId: string, state: ManualCaseState) => Promise<void>;
 }) {
   const prefix = 'pm-view/' + home.user.id + '/' + id;
   const [viewState, setViewState] = useState(() => ({
@@ -1251,6 +1256,8 @@ function Investigation({
   const currentView = useRef(viewState);
   const requestVersion = useRef(0);
   const active = useRef(false);
+  const savingStatus = statusWrite?.pending ?? false;
+  const statusRevision = statusWrite?.revision ?? 0;
   const { period, preferences, inputsVersion } = viewState;
   const { cards = initialCards, pinned = [], full = false, control: peer = '' } = preferences || {};
   const [d, set] = useState<Detail | null>(null),
@@ -1263,7 +1270,6 @@ function Investigation({
     [err, fail] = useState(''),
     [confirmation, confirm] = useState<'reset' | 'finish'>(),
     [updating, setUpdating] = useState(false),
-    [savingStatus, setSavingStatus] = useState(false),
     [preparingSignalIssue, setPreparingSignalIssue] = useState(false),
     [draftToFocus, setDraftToFocus] = useState('');
   const [presentationAction, setPresentationAction] = useState<HTMLSpanElement | null>(null);
@@ -1336,7 +1342,7 @@ function Investigation({
   }, []);
   useEffect(() => {
     void load().catch(() => {});
-  }, [load, inputsVersion]);
+  }, [load, inputsVersion, statusRevision]);
   useEffect(() => {
     let valid = true;
     post<{ id: string }>('case-thread', { caseId: id })
@@ -1455,18 +1461,9 @@ function Investigation({
   const planAccepted = d.drafts.some(draft => draft.state === 'done' &&
     readyRuns.some(run => run?.status === 'ready' && run.id === draft.investigationId));
   const scheduleEffect = !completed && !needsReconfirmation && planAccepted;
-  async function saveStatus(state: ManualCaseState) {
-    if (savingStatus || c.state === state) return;
-    setSavingStatus(true);
-    try {
-      const result = await post<{ ok: true; state: ManualCaseState }>('decide', { caseId: id, state });
-      set(previous => previous && { ...previous, case: { ...previous.case, state: result.state } });
-      await Promise.all([load(), refresh()]);
-    } finally {
-      setSavingStatus(false);
-    }
-  }
-
+  const effectActionHint = releaseLinked
+    ? (showEffect ? 'Открыть результаты проверки эффекта.' : 'Открыть форму назначения проверки эффекта.')
+    : undefined;
   const measurementEditor = (run: InvestigationRun) => {
     if (!signal || !agreementMetric || withdrawn || completed || c.body.watch || watchNext ||
       run.revision !== (signal.revision ?? 0) || (specified && !agreement)) return undefined;
@@ -1523,7 +1520,7 @@ function Investigation({
         triggerTitle={releaseLinked ? 'Выбрать даты расчёта для этого разбора.' : undefined} />
     </div>
     {!researchAvailable && !completed && <button className="primary arrow-action" onClick={openNext}
-      title={releaseLinked && watchNext ? 'Открыть результаты проверки эффекта.' : undefined}>
+      title={watchNext ? effectActionHint : undefined}>
       {watchNext ? 'Проверить эффект' : 'К задаче'}
       <Icon name="arrow" />
     </button>}
@@ -1543,9 +1540,9 @@ function Investigation({
         {signal && !withdrawn && !research.investigation?.current?.period && <p>
           {[signal.releaseId, signalPeriod(signal), changeLabel(signal.change, signal.changeUnit)].filter(Boolean).join(' · ')}
         </p>}
-        <CaseStatusMenu state={c.state} busy={savingStatus} releaseLinked={releaseLinked} onSelect={state => {
+        <CaseStatusMenu state={c.state} busy={savingStatus || updating} releaseLinked={releaseLinked} onSelect={state => {
           if (state === 'Завершено') confirm('finish');
-          else action(() => saveStatus(state));
+          else action(() => saveCaseStatus(id, state));
         }} />
         {signal?.metric && signal.status === 'provisional' && <span className="state">Предварительный сигнал</span>}
         {withdrawn && <p role="status">Сигнал отозван после пересчёта данных. Разбор и сохранённые выводы доступны для проверки.</p>}
@@ -1583,7 +1580,8 @@ function Investigation({
             canDraft={!!(redmine.local || redmine.connected)} onDraft={draftId => action(() => onDraft(draftId))}
             measurement={measurementEditor}
             next={!withdrawn && (showEffect || scheduleEffect) ? {
-              label: showEffect ? 'Посмотреть результат проверки эффекта' : 'Назначить проверку эффекта', open: openNext,
+              label: showEffect ? 'Посмотреть результат проверки эффекта' : 'Назначить проверку эффекта',
+              title: effectActionHint, open: openNext,
             } : undefined} />}
           {tid && (
             <button className="mobile-toggle" aria-expanded={mobileChat} onClick={() => moveView(() => chatMode(!mobileChat))}>
@@ -1708,7 +1706,7 @@ function Investigation({
               </li>)}</ul>
             </details>}
             <footer className="effect-finish">
-              <button type="button" onClick={() => confirm('finish')} disabled={completed || savingStatus}>
+              <button type="button" onClick={() => confirm('finish')} disabled={completed || savingStatus || updating}>
                 Завершить разбор
               </button>
             </footer>
@@ -1825,7 +1823,7 @@ function Investigation({
                     updatePreferences({ cards: initialCards, pinned: [], full: false, control: '', sourceQuery: '' });
                     return;
                   }
-                  action(() => saveStatus('Завершено'));
+                  action(() => saveCaseStatus(id, 'Завершено'));
                 })}>{confirmation === 'reset' ? 'Сбросить' : 'Завершить'}</button>
               </footer>
             </div>
@@ -2278,6 +2276,8 @@ function Workspace({ user, onLogout, onUpdate }: { user: User; onLogout: () => v
     [caseType, setCaseType] = useState<CaseType>('all'),
     [newCaseRelease, showCaseForm] = useState<string | null>(null),
     [menu, setMenu] = useState(readMenuLayout);
+  const [caseStatusWrites, setCaseStatusWrites] = useState(() => new Map<string, CaseStatusWrite>());
+  const pendingCaseStatusWrites = useRef(new Set<string>());
   const sidebar = useSidebarWidth();
   const bridgePages = Boolean(home?.bridgeEnabled);
   const route = home && !bridgePages && ['knowledge', 'demo-page'].includes(requestedRoute) ? 'cases' : requestedRoute;
@@ -2293,6 +2293,20 @@ function Workspace({ user, onLogout, onUpdate }: { user: User; onLogout: () => v
     setHome(next);
     onLoad?.(next);
   }, []);
+  async function saveCaseStatus(caseId: string, state: ManualCaseState) {
+    if (pendingCaseStatusWrites.current.has(caseId)) return;
+    pendingCaseStatusWrites.current.add(caseId);
+    let revision = caseStatusWrites.get(caseId)?.revision ?? 0;
+    setCaseStatusWrites(current => new Map(current).set(caseId, { pending: true, revision }));
+    try {
+      await post('decide', { caseId, state });
+      revision++;
+      await refresh();
+    } finally {
+      pendingCaseStatusWrites.current.delete(caseId);
+      setCaseStatusWrites(current => new Map(current).set(caseId, { pending: false, revision }));
+    }
+  }
   function updateThreads(update: (threads: Thread[]) => Thread[]) {
     homeVersion.current++;
     setHome((current) => current && ({
@@ -2399,7 +2413,8 @@ function Workspace({ user, onLogout, onUpdate }: { user: User; onLogout: () => v
           <ReleaseDecision key={id} action={action} initialRelease={id || undefined} />
         ) : route === 'case' ? (
           <Investigation key={home.user.id + '/' + id} id={id} selected={selected} documentation={documentation}
-            home={home} avatar={user.avatar} action={action} refresh={refresh} />
+            home={home} avatar={user.avatar} action={action} refresh={refresh}
+            statusWrite={caseStatusWrites.get(id)} saveCaseStatus={saveCaseStatus} />
         ) : route === 'range' ? (
           <RangeResult id={id} />
         ) : route === 'snapshot' ? (

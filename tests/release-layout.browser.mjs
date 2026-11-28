@@ -373,6 +373,33 @@ test('manual case status handles save failures and keeps the observation plan', 
   assert.deepEqual(getCase(store.db, observationId).body.watch, savedWatch);
 });
 
+test('pending case status survives leaving and reopening the card', async t => {
+  const { page, origin, caseId } = await openWorkspace(t);
+  const { trigger, item, requests } = statusControls(page);
+  const releaseSave = Promise.withResolvers();
+  await page.route('**/api/team/decide', async route => {
+    await releaseSave.promise;
+    await route.continue();
+  }, { times: 1 });
+  await page.goto(origin + '/#case/' + caseId);
+  const initial = trigger('Исследуем');
+  await initial.click();
+  try {
+    await Promise.all([
+      page.waitForRequest(request => request.url().endsWith('/api/team/decide')),
+      item('Нужно решение').click(),
+    ]);
+    await page.goto(origin + '/#cases');
+    await page.locator('a[href="#case/' + caseId + '"]').click();
+    await initial.waitFor();
+    assert.equal(await initial.isDisabled(), true);
+    assert.deepEqual(requests, ['Нужно решение']);
+  } finally {
+    releaseSave.resolve();
+  }
+  await trigger('Нужно решение').waitFor();
+});
+
 function statusControls(page) {
   const menu = page.getByRole('menu', { name: 'Изменить статус', exact: true });
   const requests = [];

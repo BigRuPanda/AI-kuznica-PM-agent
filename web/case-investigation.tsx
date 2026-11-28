@@ -257,7 +257,7 @@ function PublishVersion({ run, refresh }: { run: InvestigationRun; refresh: () =
   </>;
 }
 
-type CurrentStep = { label: string; open: () => void };
+type CurrentStep = { label: string; title?: string; open: () => void };
 
 export function CaseInvestigation({ investigation, error, refresh, userId, canExplore, canPublish, canDraft, onDraft, next, measurement }: {
   investigation: InvestigationBundle; error: string; refresh: () => Promise<void>; userId: string;
@@ -297,7 +297,7 @@ export function CaseInvestigation({ investigation, error, refresh, userId, canEx
         </div>}
       </> : canExplore && <p role="status">Исследование ещё не началось.</p>}
       {(next || (current && canExplore)) && <div className="investigation-actions">
-        {next && <button className="primary arrow-action" onClick={next.open}>{next.label}<Icon name="arrow" /></button>}
+        {next && <button className="primary arrow-action" title={next.title} onClick={next.open}>{next.label}<Icon name="arrow" /></button>}
         {current && canExplore && <button className="text-action" onClick={() => setPrompt(current)}>Проверить другую версию</button>}
         {current && publishable(current) && <PublishVersion key={current.id} run={current} refresh={refresh} />}
       </div>}

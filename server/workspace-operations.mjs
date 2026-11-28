@@ -961,6 +961,13 @@ export function workspaceOperation(
       throw Error('Используется согласованный критерий проверки. Передайте дату выкладки.');
     if (precommitted && b.metric)
       throw Error('Для этого разбора используется план проверки, заданный до выкладки. Передайте только дату.');
+    const reuse = () => {
+      if (c.state !== 'Наблюдаем эффект' && !c.body.watchReviewed && !previous.reviewed) {
+        c.state = 'Наблюдаем эффект';
+        updateCase(db, c);
+      }
+      return { caseId: c.id, ...effect(db, c) };
+    };
     const save = (watch) => {
       if (previous) {
         const prior = analysisView(db, { caseId: c.id });
@@ -981,12 +988,12 @@ export function workspaceOperation(
       const plan = proposedObservation(db, c, b, env);
       if (!plan.taskId && !plan.deployed) throw Error('Выберите задачу или укажите подтверждённую выкладку.');
       if (previousKind === 'archive-observation' && plan.request === previous.request)
-        return { caseId: c.id, ...effect(db, c) };
+        return reuse();
       return save(plan);
     }
     if (typeof b.deployed !== 'string') throw Error('Укажите дату выкладки.');
     if (!b.measurement && !b.percent && previousKind === 'measurement' && previous.deployed === b.deployed)
-      return { caseId: c.id, ...effect(db, c) };
+      return reuse();
     if (precommitted && b.measurement)
       throw Error('Для этого разбора используется план проверки, заданный до выкладки. Передайте только дату.');
     const automatic = measuredSignal(signal?.metric) ? {
@@ -1011,7 +1018,7 @@ export function workspaceOperation(
       const normalized = measurementSpec(spec, c.product);
       const request = digest(JSON.stringify([normalized, b.deployed]));
       if (previousKind === 'measurement' && previous.request === request)
-        return { caseId: c.id, ...effect(db, c) };
+        return reuse();
       return save({ ...createMeasurementWatch(db, normalized, b.deployed), request });
     }
     if (!legacyOrderMetric(c.body.plan?.metric))
