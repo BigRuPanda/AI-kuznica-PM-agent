@@ -2210,7 +2210,7 @@ test('Softline workspace, upgrade and browser journeys', async t => {
     await member.goto(base+'/?legacy=1#release/R-001');
     await visible(member.locator('.report-head h1'));
     await member.goto(base+'/#releases-list');
-    await member.getByRole('table', { name: 'Журнал релизов' }).waitFor();
+    await member.getByRole('list', { name: 'Журнал релизов' }).waitFor();
     assert.equal(await member.getByText('Управление', { exact: true }).count(),0);
     assert.equal(await role(member,'Импорт CSV').count(),0);
   });

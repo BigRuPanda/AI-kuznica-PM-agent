@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useRef, useState, type ReactNode } from 'react';
+import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { DataForm } from './forms';
 import { Icon } from './icons';
 import type { Release } from './team-data';
@@ -13,7 +13,7 @@ const filters = [
 type Filter = typeof filters[number][0];
 type Source = Exclude<Filter, 'all'>;
 type Form = 'release' | 'import';
-type Row = { id: string; title: string; date: string } & (
+type Entry = { id: string; title: string; date: string } & (
   { source: 'calendar'; release: Release } | { source: 'metrics' }
 );
 const sourceNames: Record<Source, string> = { calendar: 'Календарь', metrics: 'CSV' };
@@ -43,15 +43,14 @@ export function ReleaseJournal({ calendar, initialFilter, admin, archiveOnly, on
       .catch(error => { if (current) setError(error.message); });
     return () => { current = false; };
   }, [generation]);
-  const rows: Row[] = [
-    ...calendar.map((item): Row => ({ id: item.release_id, title: item.description || item.release_id,
+  const entries: Entry[] = [
+    ...calendar.map((item): Entry => ({ id: item.release_id, title: item.description || item.release_id,
       date: calendarDate(item.release_date), source: 'calendar', release: item })),
-    ...(journal?.releases ?? []).map((item): Row => ({ id: item.id, title: item.title,
+    ...(journal?.releases ?? []).map((item): Entry => ({ id: item.id, title: item.title,
       date: isoDate.format(item.launch), source: 'metrics' })),
   ];
-  const visible = rows.filter(row => filter === 'all' || row.source === filter)
+  const visible = entries.filter(entry => filter === 'all' || entry.source === filter)
     .sort((a, b) => b.date.localeCompare(a.date) || a.title.localeCompare(b.title, 'ru') || a.id.localeCompare(b.id));
-  const showActions = visible.some(row => row.source === 'calendar');
   const loading = !journal && !error && filter !== 'calendar';
   const canImport = admin && !archiveOnly;
   const canCreate = admin && Boolean(journal?.datasets.length);
@@ -63,10 +62,8 @@ export function ReleaseJournal({ calendar, initialFilter, admin, archiveOnly, on
     setForm(kind);
   }
   return <section className="release-journal">
-    <header className="page-head">
+    <header className="page-head release-journal-head">
       <h1>Релизы</h1>
-    </header>
-    <div className="paper release-table-card">
       <div className="toolbar release-journal-toolbar">
         <label>
           Источник
@@ -82,66 +79,54 @@ export function ReleaseJournal({ calendar, initialFilter, admin, archiveOnly, on
           </div>
         </details>}
       </div>
-      {error && filter !== 'calendar' && <div className="release-list-status">
-        <p role="alert" className="error">Не удалось загрузить релизы с метриками. {error}</p>
-        <button type="button" onClick={() => refresh(n => n + 1)}>Повторить</button>
-      </div>}
-      {loading && <p role="status" className="release-list-note">Загружаем релизы с метриками…</p>}
-      {visible.length > 0 ? <table role="table" className="release-table release-journal-table" aria-label="Журнал релизов">
-        <colgroup>
-          <col /><col className="release-date-col" /><col className="release-source-col" />
-          {showActions && <col className="release-actions-col" />}
-        </colgroup>
-        <thead role="rowgroup"><tr role="row">
-          <th role="columnheader" scope="col">Релиз</th>
-          <th role="columnheader" scope="col">Дата выпуска</th>
-          <th role="columnheader" scope="col">Источник</th>
-          {showActions && <th role="columnheader" scope="col">Действия</th>}
-        </tr></thead>
-        <tbody role="rowgroup">{visible.map(row => {
-          const release = row.source === 'calendar' ? row.release : undefined;
-          const href = release ? release.decisionAvailable && releaseAssessmentHref(row.id) : metricReleaseHref(row.id);
-          const linkedTasks = release && releaseTasks(release);
-          const linkedCases = release && renderCases(row.id);
-          const hasTasks = Boolean(linkedTasks?.detailed.length || linkedTasks?.otherIds.length);
-          const detailsLabel = hasTasks
-            ? linkedCases ? 'Задачи и разборы' : 'Задачи'
-            : linkedCases ? 'Разборы' : '';
-          const expanded = Boolean(detailsLabel && expandedRelease === row.id);
-          const detailsId = 'release-links-' + encodeURIComponent(row.id);
-          return <Fragment key={row.source + '/' + row.id}>
-            <tr role="row" className="release-row">
-              <th role="rowheader" scope="row" className="release-name">
-                {row.title !== row.id && <small className="release-id">{row.id}</small>}
-                {href ? <a className="release-entry-link" href={href}>
-                  <span>{row.title}</span><span className="release-open-icon"><Icon name="arrow" /></span>
-                </a> : <span>{row.title}</span>}
-              </th>
-              <td role="cell" className="release-date">{row.date ? <time dateTime={row.date}>{displayDate(row.date)}</time> : 'Не указана'}</td>
-              <td role="cell" className="release-source">{sourceNames[row.source]}</td>
-              {showActions && <td role="cell" className="release-actions">
-                {release && <div className="release-row-actions">
-                  <button type="button" className="text-action" aria-label={'Запланировать разбор ' + row.id}
-                    onClick={() => onPlan(row.id)}>Запланировать разбор</button>
-                  {detailsLabel && <button type="button" className="text-action" aria-expanded={expanded}
-                    aria-controls={expanded ? detailsId : undefined}
-                    aria-label={'Связанные ' + detailsLabel.toLowerCase() + ' ' + row.id}
-                    onClick={() => setExpandedRelease(expanded ? null : row.id)}>{detailsLabel}<Icon name="down" /></button>}
-                </div>}
-              </td>}
-            </tr>
-            {expanded && linkedTasks && <tr role="row" className="release-related-row">
-              <td role="cell" colSpan={showActions ? 4 : 3} id={detailsId}>
-                {hasTasks && <RelatedTasks {...linkedTasks} />}
-                {linkedCases && <section><h3>Связанные разборы</h3>{linkedCases}</section>}
-              </td>
-            </tr>}
-          </Fragment>;
-        })}</tbody>
-      </table> : !loading && (!error || filter === 'calendar') && <p role="status" className="release-list-note">
-        {filter === 'metrics' ? 'Релизов с метриками пока нет.' : 'Релизов пока нет.'}
-      </p>}
-    </div>
+    </header>
+    {error && filter !== 'calendar' && <div className="paper release-list-status">
+      <p role="alert" className="error">Не удалось загрузить релизы с метриками. {error}</p>
+      <button type="button" onClick={() => refresh(n => n + 1)}>Повторить</button>
+    </div>}
+    {loading && <p role="status" className="paper release-list-note">Загружаем релизы с метриками…</p>}
+    {visible.length > 0 ? <ol role="list" className="release-journal-list" aria-label="Журнал релизов">
+      {visible.map(entry => {
+        const release = entry.source === 'calendar' ? entry.release : undefined;
+        const href = release ? release.decisionAvailable && releaseAssessmentHref(entry.id) : metricReleaseHref(entry.id);
+        const linkedTasks = release && releaseTasks(release);
+        const linkedCases = release && renderCases(entry.id);
+        const hasTasks = Boolean(linkedTasks?.detailed.length || linkedTasks?.otherIds.length);
+        const detailsLabel = hasTasks
+          ? linkedCases ? 'Задачи и разборы' : 'Задачи'
+          : linkedCases ? 'Разборы' : '';
+        const expanded = Boolean(detailsLabel && expandedRelease === entry.id);
+        const detailsId = 'release-links-' + encodeURIComponent(entry.id);
+        return <li key={entry.source + '/' + entry.id} className="release-journal-card" data-source={entry.source}>
+          <div className="release-card-meta">
+            {entry.date
+              ? <time className="release-date" dateTime={entry.date}>{displayDate(entry.date)}</time>
+              : <span>Дата не указана</span>}
+            <span className="release-source">{sourceNames[entry.source]}</span>
+            {entry.title !== entry.id && <small className="release-id">{entry.id}</small>}
+          </div>
+          <h2 className="release-card-title">
+            {href ? <a className="release-entry-link" href={href}>
+              <span>{entry.title}</span><span className="release-open-icon"><Icon name="arrow" /></span>
+            </a> : entry.title}
+          </h2>
+          {release && <div className="release-card-actions">
+            {detailsLabel && <button type="button" aria-expanded={expanded}
+              aria-controls={expanded ? detailsId : undefined}
+              aria-label={'Связанные ' + detailsLabel.toLowerCase() + ' ' + entry.id}
+              onClick={() => setExpandedRelease(expanded ? null : entry.id)}>{detailsLabel}<Icon name="down" /></button>}
+            <button type="button" className="release-plan" aria-label={'Запланировать разбор ' + entry.id}
+              onClick={() => onPlan(entry.id)}>Запланировать разбор</button>
+          </div>}
+          {expanded && linkedTasks && <div className="release-card-related" id={detailsId}>
+            {hasTasks && <RelatedTasks {...linkedTasks} />}
+            {linkedCases && <section><h3>Связанные разборы</h3>{linkedCases}</section>}
+          </div>}
+        </li>;
+      })}
+    </ol> : !loading && (!error || filter === 'calendar') && <p role="status" className="paper release-list-note">
+      {filter === 'metrics' ? 'Релизов с метриками пока нет.' : 'Релизов пока нет.'}
+    </p>}
     {journal && form && <DataForm kind={form} journal={journal} close={() => setForm(null)}
       onDone={id => {
         setForm(null);

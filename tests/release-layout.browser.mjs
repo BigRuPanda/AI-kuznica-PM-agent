@@ -9,7 +9,7 @@ import { createTeamApp } from '../server/team-http.mjs';
 import { importDocs } from '../server/evidence.mjs';
 import { fixtureEnv, seedWorkspace } from './workspace-fixture.mjs';
 
-test('the release journal sorts both sources and keeps their routes distinct', async t => {
+test('release cards sort both sources and keep their routes and actions distinct', async t => {
   const { app, page, origin } = await openWorkspace(t);
   const store = app.space('team');
   const calendarTitle = 'Календарная запись R-001 для Kaspersky';
@@ -34,24 +34,27 @@ test('the release journal sorts both sources and keeps their routes distinct', a
     status: 503, json: { error: 'Журнал временно недоступен' },
   }), { times: 1 });
   await page.goto(origin + '/#releases-list');
-  const table = page.getByRole('table', { name: 'Журнал релизов' });
+  const journal = page.getByRole('list', { name: 'Журнал релизов' });
   const source = page.getByRole('combobox', { name: 'Источник', exact: true });
-  await table.waitFor();
+  await journal.waitFor();
   assert.equal(await source.inputValue(), 'all');
-  await table.getByRole('link', { name: calendarTitle, exact: true }).waitFor();
+  await journal.getByRole('link', { name: calendarTitle, exact: true }).waitFor();
   await page.getByRole('button', { name: 'Повторить', exact: true }).click();
-  await table.getByRole('link', { name: 'Кнопка «Скачать счёт»' }).waitFor();
-  const rows = table.locator(':scope > tbody > tr.release-row');
-  assert.deepEqual(await rows.locator('th small').allTextContents(), ['R-001', 'R-002', 'R-001', 'DEMO-R', 'R-NODATE']);
-  await rows.last().getByRole('cell', { name: 'Не указана' }).waitFor();
-  assert.equal(await rows.nth(0).getByRole('link').getAttribute('href'), '#release-decision/R-001');
-  assert.equal(await rows.nth(2).getByRole('link').getAttribute('href'), '#release/R-001');
-  assert.equal(await rows.last().getByRole('link').count(), 0);
+  await journal.getByRole('link', { name: 'Кнопка «Скачать счёт»' }).waitFor();
+  const cards = journal.locator(':scope > li');
+  assert.deepEqual(await cards.locator('.release-id').allTextContents(), ['R-001', 'R-002', 'R-001', 'DEMO-R', 'R-NODATE']);
+  assert.equal(await journal.getByRole('table').count(), 0);
+  await cards.last().getByText('Дата не указана', { exact: true }).waitFor();
+  assert.equal(await cards.first().locator('time').getAttribute('datetime'), '2026-11-08');
+  assert.equal(await cards.nth(0).getByRole('link').getAttribute('href'), '#release-decision/R-001');
+  assert.equal(await cards.nth(2).getByRole('link').getAttribute('href'), '#release/R-001');
+  assert.equal(await cards.last().getByRole('link').count(), 0);
   await page.mouse.move(0, 0);
   await assertOutlined(source);
-  await assertOutlined(rows.first().getByRole('link', { name: calendarTitle, exact: true }).locator('.release-open-icon'));
-  await assertOutlined(rows.first().getByRole('button', { name: 'Запланировать разбор R-001' }));
-  await assertOutlined(rows.first().getByRole('button', { name: 'Связанные задачи и разборы R-001' }));
+  await assertOutlined(cards.first());
+  await assertOutlined(cards.first().getByRole('link', { name: calendarTitle, exact: true }).locator('.release-open-icon'));
+  await assertOutlined(cards.first().getByRole('button', { name: 'Запланировать разбор R-001' }));
+  await assertOutlined(cards.first().getByRole('button', { name: 'Связанные задачи и разборы R-001' }));
   const management = page.getByText('Управление', { exact: true });
   await assertOutlined(management);
   await management.click();
@@ -59,36 +62,56 @@ test('the release journal sorts both sources and keeps their routes distinct', a
   await assertOutlined(page.getByRole('button', { name: 'Импорт CSV', exact: true }));
   await management.click();
   await source.selectOption('calendar');
-  assert.equal(await rows.count(), 3);
+  assert.equal(await cards.count(), 3);
   await page.setViewportSize({ width: 390, height: 844 });
-  const fit = await rows.first().evaluate(row => {
-    const title = row.querySelector('th').getBoundingClientRect();
-    const date = row.querySelector('time').getBoundingClientRect();
-    const actions = row.querySelector('button').getBoundingClientRect();
+  const fit = await cards.first().evaluate(card => {
+    const bounds = card.getBoundingClientRect();
+    const title = card.querySelector('h2').getBoundingClientRect();
+    const date = card.querySelector('time').getBoundingClientRect();
+    const action = card.querySelector('.release-plan').getBoundingClientRect();
+    const related = card.querySelector('button[aria-expanded]').getBoundingClientRect();
     return {
-      fullWidth: title.width >= row.getBoundingClientRect().width - 40,
-      dateBelowTitle: date.top >= title.bottom,
-      actionsBelowDate: actions.top >= date.bottom,
+      dateAboveTitle: date.bottom <= title.top,
+      dateOnLeft: Math.abs(date.left - title.left) <= 1,
+      actionsBelowTitle: action.top >= title.bottom,
+      actionAtRightEdge: Math.abs(action.right - title.right) <= 1,
+      equalButtons: Math.abs(action.width - related.width) <= 1 && Math.abs(action.height - related.height) <= 1,
+      separateCards: card.nextElementSibling.getBoundingClientRect().top - bounds.bottom >= 8,
       horizontalScroll: document.documentElement.scrollWidth > innerWidth,
     };
   });
-  assert.deepEqual(fit, { fullWidth: true, dateBelowTitle: true, actionsBelowDate: true, horizontalScroll: false });
-  assert.equal(await table.getByRole('columnheader', { name: 'Дата выпуска', exact: true }).count(), 1);
-  await rows.first().getByRole('button', { name: 'Связанные задачи и разборы R-001' }).press('Enter');
-  const tasks = page.getByRole('table', { name: 'Связанные задачи' });
+  assert.deepEqual(fit, {
+    dateAboveTitle: true, dateOnLeft: true, actionsBelowTitle: true, actionAtRightEdge: true, equalButtons: true,
+    separateCards: true, horizontalScroll: false,
+  });
+  await cards.first().getByRole('button', { name: 'Связанные задачи и разборы R-001' }).press('Enter');
+  const tasks = cards.first().getByRole('table', { name: 'Связанные задачи' });
   await tasks.getByRole('cell', { name: 'Обновить документацию' }).waitFor();
   await tasks.getByRole('cell', { name: 'Проверить публикацию' }).waitFor();
-  await page.getByRole('listitem').filter({ hasText: 'DOC-3' }).waitFor();
-  await page.getByRole('link', { name: /Проверка календарного релиза/ }).waitFor();
+  await cards.first().getByRole('listitem').filter({ hasText: 'DOC-3' }).waitFor();
+  await cards.first().getByRole('link', { name: /Проверка календарного релиза/ }).waitFor();
   await page.setViewportSize({ width: 1440, height: 900 });
-  await rows.first().getByRole('link', { name: calendarTitle, exact: true }).click();
+  const alignment = await journal.evaluate(list => {
+    const primary = list.querySelector('.release-plan').getBoundingClientRect();
+    const edges = [...list.querySelectorAll('.release-plan')].map(button => button.getBoundingClientRect().right);
+    const actions = [...list.querySelectorAll('.release-card-actions button')].map(button => button.getBoundingClientRect());
+    const arrow = list.querySelector('.release-open-icon').getBoundingClientRect();
+    const middle = rect => rect.top + rect.height / 2;
+    return {
+      actionsInOneColumn: edges.every(edge => Math.abs(edge - primary.right) <= 1),
+      arrowOnActionLine: Math.abs(middle(arrow) - middle(primary)) <= 1,
+      equalButtons: actions.every(action => Math.abs(action.width - primary.width) <= 1 && Math.abs(action.height - arrow.height) <= 1),
+    };
+  });
+  assert.deepEqual(alignment, { actionsInOneColumn: true, arrowOnActionLine: true, equalButtons: true });
+  await cards.first().getByRole('link', { name: calendarTitle, exact: true }).click();
   await page.getByRole('heading', { name: 'Разбор релиза', exact: true }).waitFor();
   await page.waitForURL('**/#release-decision/R-001');
   await page.goto(origin + '/#releases');
   assert.equal(await source.inputValue(), 'metrics');
-  await table.getByRole('link', { name: 'Кнопка «Скачать счёт»' }).waitFor();
-  assert.equal(await rows.count(), 2);
-  await rows.first().getByRole('link').click();
+  await journal.getByRole('link', { name: 'Кнопка «Скачать счёт»' }).waitFor();
+  assert.equal(await cards.count(), 2);
+  await cards.first().getByRole('link').click();
   await page.getByRole('columnheader', { name: 'После выпуска' }).waitFor();
 });
 

@@ -1,50 +1,51 @@
 .release-journal {
   container: release-journal / inline-size;
-  --release-control-border: color-mix(in srgb, var(--control-border) 78%, var(--fg));
+  --release-control-border: color-mix(in srgb, var(--control-border) 72%, var(--fg));
+  --release-control-size: 3rem;
+  --release-actions-width: 24rem;
 }
-.release-journal :is(button:not(.primary), summary) {
-  border: 1px solid var(--release-control-border);
+.release-journal :is(.release-journal-toolbar, .release-card-actions, .release-list-status) :is(button, summary) {
+  min-block-size: var(--release-control-size);
+  border-color: var(--release-control-border);
   background-color: var(--surface-subtle);
 }
-.release-journal :is(button:not(.primary), summary):not(:disabled):is(:hover, :focus-visible) {
+.release-journal :is(.release-journal-toolbar, .release-card-actions, .release-list-status) :is(button, summary):is(:hover, :focus-visible) {
   border-color: var(--fg-muted);
   background-color: var(--surface-hover);
 }
-.release-journal :is(button[aria-expanded='true'], details[open] > summary) {
+.release-journal :is(.release-card-actions button[aria-expanded='true'], .release-management[open] > summary) {
   border-color: var(--accent-text);
   background-color: var(--accent-soft);
 }
-.release-journal button.text-action { color: var(--fg); }
-.release-journal select { border-color: var(--release-control-border); }
-.release-journal :is(summary, select):focus-visible { outline: 2px solid var(--focus); outline-offset: 3px; }
-.release-journal summary {
-  max-inline-size: 100%;
-  min-block-size: 38px;
-  padding: 7px 11px;
-  padding-inline-start: 29px;
-  border-radius: var(--button-radius);
-  color: var(--fg);
-  font-size: .92rem;
-  font-weight: 600;
-  line-height: 1.5;
-}
-.release-journal summary::before { inset-inline-start: 11px; }
-.release-related-row a[href] {
-  text-decoration: underline;
-  text-underline-offset: .17em;
-}
 
-.release-journal, .release-workspace {
-  min-width: 0;
-}
+.release-journal, .release-workspace { min-width: 0; }
 
+.page-head.release-journal-head { flex-wrap: wrap; gap: 12px 16px; }
 .release-journal-toolbar.toolbar {
   margin: 0;
-  padding: 12px 16px;
-  border-block-end: 1px solid var(--border);
+  margin-inline-start: auto;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px 14px;
 }
-.release-journal-toolbar select { min-block-size: 38px; }
-.release-management { position: relative; margin-inline-start: auto; }
+.release-journal-toolbar label { gap: 8px; color: var(--fg); font-weight: 550; }
+.release-journal-toolbar select {
+  inline-size: 8rem;
+  min-block-size: var(--release-control-size);
+  border-color: var(--release-control-border);
+}
+.release-management { position: relative; }
+.release-management > summary {
+  display: flex;
+  align-items: center;
+  padding: 9px 12px 9px 30px;
+  border: 1px solid var(--release-control-border);
+  border-radius: var(--button-radius);
+  color: var(--fg);
+  font-size: .9rem;
+  font-weight: 600;
+}
+.release-management > summary::before { inset-inline-start: 12px; }
 .release-management-actions {
   position: absolute;
   z-index: 2;
@@ -61,7 +62,6 @@
 }
 .release-management-actions button { text-align: start; }
 
-.paper.release-table-card { padding: 0; }
 .release-table {
   width: 100%;
   border-collapse: collapse;
@@ -83,94 +83,131 @@
 }
 .release-table tbody tr + tr > * { border-block-start: 1px solid var(--border); }
 .release-table small { display: block; }
-.release-date-col { width: 7.5rem; }
-.release-source-col { width: 6.4rem; }
-.release-actions-col { width: 12rem; }
-.release-journal-table > thead th {
-  padding: 11px 16px;
-  background: var(--surface-subtle);
-  white-space: nowrap;
+
+.release-journal-list {
+  display: grid;
+  gap: 12px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
 }
-.release-journal-table > tbody > tr > :is(th, td) { padding: 12px 16px; }
-.release-row > .release-name {
-  color: var(--fg);
-  font-size: .975rem;
-  font-weight: 490;
-  line-height: 1.53;
+.release-journal-card {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  align-items: center;
+  gap: 8px 18px;
+  min-inline-size: 0;
+  padding: 14px clamp(14px, 2cqi, 22px);
+  border: 1px solid color-mix(in srgb, var(--border) 85%, var(--fg));
+  border-inline-start-width: 3px;
+  border-radius: var(--radius);
+  background: var(--surface);
+  box-shadow: 0 2px 6px #0000000c;
 }
-.release-id {
-  margin-block-end: 3px;
+.release-journal-card:has(.release-entry-link) { border-inline-start-color: var(--accent-text); }
+.release-card-meta {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 10px;
   color: var(--fg-muted);
-  font-size: .76rem;
-  font-weight: 520;
-  line-height: 1.35;
+  font-size: .82rem;
+  line-height: 1.4;
+  font-variant-numeric: tabular-nums;
+}
+.release-card-meta .release-date { color: var(--fg); font-weight: 700; }
+.release-card-meta .release-source {
+  padding: 2px 7px;
+  border-radius: 6px;
+  background: var(--surface-subtle);
+  font-weight: 600;
+}
+.release-journal-card[data-source='metrics'] .release-source {
+  background: var(--accent-soft);
+  color: var(--accent-text);
+}
+.release-card-meta .release-id { font-size: inherit; }
+.release-card-title {
+  min-inline-size: 0;
+  margin: 0;
+  color: var(--fg);
+  font-size: clamp(1.03rem, 1.6cqi, 1.125rem);
+  font-weight: 640;
+  line-height: 1.45;
+  letter-spacing: -.012em;
+  overflow-wrap: anywhere;
 }
 .release-entry-link {
   display: flex;
-  align-items: flex-start;
-  gap: 10px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
   color: inherit;
-  font-weight: 560;
   text-underline-offset: .17em;
 }
+.release-entry-link > span:first-child { min-inline-size: 0; }
 .release-open-icon {
   display: inline-grid;
   place-items: center;
   flex: none;
-  inline-size: 30px;
-  block-size: 30px;
-  border: 1px solid var(--release-control-border);
+  inline-size: var(--release-control-size);
+  block-size: var(--release-control-size);
+  border: 1px solid var(--accent);
   border-radius: var(--button-radius);
-  background: var(--surface-subtle);
-  color: var(--fg);
+  background: var(--accent);
+  color: var(--on-accent);
 }
-.release-open-icon .ui-icon { width: 16px; height: 16px; }
-.release-row .release-entry-link:is(:hover, :focus-visible) {
+.release-journal .release-entry-link:is(:hover, :focus-visible) {
   color: var(--accent-text);
   background: transparent;
   text-decoration: underline;
 }
-.release-entry-link:is(:hover, :focus-visible) .release-open-icon { background: var(--accent-soft); }
-.release-row > :is(.release-date, .release-source) {
-  color: var(--fg-muted);
-  font-size: .875rem;
-  line-height: 1.45;
-}
-.release-date time, .release-source { white-space: nowrap; }
-.release-journal-table > tbody > .release-row > .release-actions { padding: 10px 9px; }
-.release-row-actions {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
+.release-entry-link:is(:hover, :focus-visible) .release-open-icon { background: var(--accent-hover); }
+.release-card-actions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  justify-self: end;
+  inline-size: min(100%, var(--release-actions-width));
   gap: 8px;
 }
-.release-row-actions .text-action {
-  justify-content: flex-start;
+.release-card-actions button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   gap: 7px;
-  max-width: 100%;
-  min-block-size: 36px;
-  padding: 5px 8px;
-  font-size: .83rem;
-  line-height: 1.35;
-  text-align: start;
-  white-space: nowrap;
+  min-inline-size: 0;
+  block-size: var(--release-control-size);
+  padding: .25rem .55rem;
+  font-size: .85rem;
+  line-height: 1.25;
+  text-align: center;
 }
-.release-row-actions .text-action .ui-icon {
-  flex: none;
-  width: 14px;
-  height: 14px;
+.release-journal .release-card-actions .release-plan {
+  grid-column: -2 / -1;
+  border-color: var(--accent-text);
+  background: var(--accent-soft);
+  color: var(--accent-text);
 }
-.release-row-actions [aria-expanded='true'] .ui-icon { transform: rotate(180deg); }
-.release-related-row { background: var(--surface-subtle); }
-.release-related-row section + section { margin-block-start: 16px; }
-.release-related-row h3 { margin: 0 0 8px; }
-.release-related-row .release-table th:first-child { width: 18%; }
-.release-related-row .release-table th:last-child { width: 23%; }
-.release-list-note, .release-list-status {
-  margin: 0;
-  padding: 14px clamp(12px, 2vw, 20px);
-  color: var(--fg-muted);
+.release-journal .release-card-actions .release-plan:is(:hover, :focus-visible) {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: var(--on-accent);
 }
+.release-card-actions .ui-icon { flex: none; width: 14px; height: 14px; }
+.release-card-actions [aria-expanded='true'] .ui-icon { transform: rotate(180deg); }
+.release-card-related {
+  grid-column: 1 / -1;
+  min-inline-size: 0;
+  padding-block-start: 12px;
+  border-block-start: 1px solid var(--border);
+}
+.release-card-related a[href] { text-decoration: underline; text-underline-offset: .17em; }
+.release-card-related section + section { margin-block-start: 16px; }
+.release-card-related h3 { margin: 0 0 8px; }
+.release-card-related .release-table th:first-child { width: 18%; }
+.release-card-related .release-table th:last-child { width: 23%; }
+.release-list-note, .release-list-status { padding: 14px; color: var(--fg-muted); }
 .release-list-status { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 12px; }
 .release-list-status p { margin: 0; }
 
@@ -232,37 +269,13 @@
   .release-table thead th { font-size: .76rem; }
 }
 
-@container release-journal (min-width: 66rem) {
-  .release-actions-col { width: 18.5rem; }
-  .release-row-actions { flex-flow: row wrap; }
+@container release-journal (min-width: 48rem) {
+  .release-journal-card:has(.release-card-actions) {
+    grid-template-columns: minmax(0, 1fr) var(--release-actions-width);
+  }
+  .release-card-actions .release-plan { white-space: nowrap; }
 }
 
-@container release-journal (max-width: 39rem) {
-  .release-journal-table, .release-journal-table > tbody { display: block; }
-  .release-journal-table > colgroup { display: none; }
-  .release-journal-table > thead {
-    position: absolute;
-    inline-size: 1px;
-    block-size: 1px;
-    overflow: hidden;
-    clip-path: inset(50%);
-    white-space: nowrap;
-  }
-  .release-journal-table > tbody > tr {
-    display: grid;
-    grid-template-columns: max-content minmax(0, 1fr);
-    gap: 7px 12px;
-    padding: 14px 16px;
-  }
-  .release-journal-table > tbody > tr + tr { border-block-start: 1px solid var(--border); }
-  .release-journal-table > tbody > tr > :is(th, td) {
-    padding: 0;
-    border-block-start: 0;
-  }
-  .release-row > .release-name, .release-row > .release-actions, .release-related-row > td { grid-column: 1 / -1; }
-  .release-journal-table > tbody > .release-row > .release-actions { padding: 0; }
-  .release-row > .release-actions:empty { display: none; }
-  .release-row > .release-source { border-inline-start: 1px solid var(--border); padding-inline-start: 12px; }
-  .release-row-actions { flex-flow: row wrap; }
-  .release-row-actions .text-action { min-block-size: 38px; white-space: normal; }
+@container release-journal (max-width: 20rem) {
+  .release-card-actions { grid-template-columns: minmax(0, 1fr); }
 }
