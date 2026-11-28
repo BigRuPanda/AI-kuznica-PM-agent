@@ -46,6 +46,7 @@ export function CasePeriodFilter({ period, onApply, boundaryRef, triggerTitle }:
 
   return <>
     <button ref={trigger} type="button" className="case-period-trigger" data-active={active} title={triggerTitle}
+      data-ui-hint="Меняет даты, которые попадают в расчёт."
       popoverTarget={id} aria-controls={id} aria-expanded={open} aria-haspopup="dialog"
       onClick={event => {
         event.preventDefault();

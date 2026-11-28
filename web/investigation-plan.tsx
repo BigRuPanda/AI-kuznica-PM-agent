@@ -46,7 +46,11 @@ function PlanEditor({ caseId, runId, plan, outcomes, issueQuery, issueSourceKey,
   }
 
   return <details className="investigation-plan">
-    <summary className="primary">Посмотреть план проверки</summary>
+    <summary className="primary" data-ui-hint={canDraft
+      ? 'Здесь можно уточнить шаги и выбрать задачу.'
+      : 'Откроет шаги проверки и ожидаемые результаты.'}>
+      Посмотреть план проверки
+    </summary>
     {measurement}
     {canDraft ? <>
       <form id={formId} aria-busy={busy} onSubmit={e => {

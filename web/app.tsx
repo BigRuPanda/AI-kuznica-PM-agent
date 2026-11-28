@@ -46,7 +46,7 @@ function ReleaseReport({ id, user }: { id: string; user: User }) {
   }, []);
   const release = journal?.releases.find(release => release.id === id);
   return <>
-    <a className="crumb" href="#releases-list">← Журнал релизов</a>
+    <a className="crumb" href="#releases-list" data-ui-hint="Вернёт к списку релизов из календаря и CSV.">← Журнал релизов</a>
     {error ? <p role="alert">{error}</p> : !journal ? <p role="status">Загрузка релиза…</p> : release ?
       <ReleasePanels release={release} mode={journal.mode} user={user}/> :
       <p role="alert">Релиз не найден.</p>}
@@ -237,7 +237,7 @@ function ReleasePanels({ release, mode, user }: { release: Release; mode: string
         {report && target ? <>
           <div className="filters release-report-filters">
             <div className="release-help-label">
-              <label>Дата среза<select value={report.context.day} onChange={event => {
+              <label>Дата среза<select data-ui-hint="Ограничивает расчёт событиями по выбранную дату." value={report.context.day} onChange={event => {
                 setDay(Number(event.target.value));
                 remember(id + '/day', event.target.value);
               }}>
@@ -246,7 +246,7 @@ function ReleasePanels({ release, mode, user }: { release: Release; mode: string
               </select></label>
               <ReleaseHelp text={releaseCutHelp} />
             </div>
-            <label>Сегмент<select value={segment} onChange={event => {
+            <label>Сегмент<select data-ui-hint="Выбирает группу клиентов для расчёта." value={segment} onChange={event => {
               setSegment(event.target.value as Segment);
               remember(id + '/seg', event.target.value);
             }}>

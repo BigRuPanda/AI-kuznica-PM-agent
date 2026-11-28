@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Dialog } from './dialog';
+import { HelpMarker } from './ui-hints';
 import { Icon } from './icons';
 import { InvestigationPlan } from './investigation-plan';
 import { researchModes } from './investigation-settings';
@@ -120,7 +121,7 @@ function Checks({ run }: { run: InvestigationRun }) {
   const pending = run.status === 'superseded' ? [] : (run.stages || []).filter(s => s.status !== 'done');
   if (!run.checks.length && !hypotheses.length && !pending.length) return null;
   return <details className="investigation-checks">
-    <summary>Как проверяли</summary>
+    <summary data-ui-hint="Откроет шаги проверки и подтверждающие расчёты.">Как проверяли</summary>
     {mode && <p className="muted">Режим · {mode}</p>}
     {pending.map(s => <p key={s.role}><strong>{roles[s.role]}</strong> · {s.reason || (s.status === 'waiting' ? 'Ожидает запуска' : checkStatus[s.status])}</p>)}
     {run.checks.map((check, index) => <Check key={check.role + '/' + index} check={check} />)}
@@ -232,7 +233,7 @@ function AlternativeQuestion({ run, close, created }: {
       </label>
       <p className="muted">До публикации исследование доступно вам.</p>
       {error && <p role="alert">{error}</p>}
-      <button className="primary" disabled={busy || !question.trim()}>Начать проверку</button>
+      <button className="primary" disabled={busy || !question.trim()} data-ui-hint="Запустит отдельное личное исследование.">Начать проверку</button>
     </form>
   </Dialog>;
 }
@@ -405,7 +406,10 @@ export function InvestigationSnapshot({ calculation, selected, embedded }: {
     {!embedded && <a className="crumb" href={calculation.caseId ? '#case/' + encodeURIComponent(calculation.caseId) : '#cases'}>
       {calculation.caseId ? '← К разбору' : '← Разборы'}
     </a>}
-    {embedded ? <h2>{calculation.title}</h2> : <h1>{calculation.title}</h1>}
+    <div className="ui-hint-heading">
+      {embedded ? <h2>{calculation.title}</h2> : <h1>{calculation.title}</h1>}
+      <HelpMarker label="О сохранённом расчёте" hint="Здесь сохранено, по каким данным получен результат." />
+    </div>
     <p className="muted">{[calculation.period, calculation.unit].filter(Boolean).join(' · ')}</p>
     {calculation.summary && <p className="investigation-text">{calculation.summary}</p>}
     {calculation.findings.map(finding => <CalculationFinding key={finding.id} finding={finding} unit={calculation.unit}

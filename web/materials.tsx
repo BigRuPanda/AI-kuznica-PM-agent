@@ -1,6 +1,7 @@
 import { createContext, useCallback, useContext, useEffect, useRef, useState, type ReactNode } from 'react';
 import { Answer } from './answer';
 import { Dialog } from './dialog';
+import { HelpMarker } from './ui-hints';
 import {
   RangeChart,
   rangeLabel,
@@ -280,7 +281,10 @@ export function MaterialDetail({ id }: { id: string }) {
   const p = m.plot;
   return (
     <article className="material-detail">
-      <h2>{m.title}</h2>
+      <div className="ui-hint-heading">
+        <h2>{m.title}</h2>
+        <HelpMarker label="О материале" hint="Сохранённый материал из чата или разбора." />
+      </div>
       {m.summary && <Answer text={m.summary} openMaterial={c.open} />}
       {p && (
         <>

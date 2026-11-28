@@ -70,7 +70,8 @@ export function ReleaseJournal({ calendar, initialFilter, admin, archiveOnly, on
         <div className="release-help-label">
           <label>
             Источник
-            <select value={filter} onChange={event => setFilter(event.target.value as Filter)}>
+            <select data-ui-hint="Фильтрует релизы из календаря и из загруженных событий CSV."
+              value={filter} onChange={event => setFilter(event.target.value as Filter)}>
               {filters.map(([key, label]) => <option key={key} value={key}>{label}</option>)}
             </select>
           </label>
@@ -127,7 +128,8 @@ export function ReleaseJournal({ calendar, initialFilter, admin, archiveOnly, on
             {release.decisionAvailable || release.releaseCaseId
               ? <ReleaseCaseLink releaseId={entry.id} caseId={release.releaseCaseId} className="release-plan" />
               : <button type="button" className="release-plan" aria-label={'Запланировать разбор ' + entry.id}
-                 title="Открыть форму разбора с выбранным релизом."
+                title="Открыть форму разбора с выбранным релизом."
+                data-ui-hint="Откроет форму разбора для этого релиза."
                 onClick={() => onPlan(entry.id)}>Запланировать разбор</button>}
           </div>}
           {expanded && linkedTasks && <div className="release-card-related" id={detailsId}>

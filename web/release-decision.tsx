@@ -367,7 +367,7 @@ export function ReleaseDecision({
   </>;
   return <div className="release-decision">
     <nav className="decision-breadcrumbs" aria-label="Путь к данным релиза">
-      <a className="crumb" href="#releases-list">← Журнал релизов</a>
+      <a className="crumb" href="#releases-list" data-ui-hint="Вернёт к списку релизов из календаря и CSV.">← Журнал релизов</a>
     </nav>
     <div className="page-head"><h1>Данные релиза</h1></div>
     <div className="decision-main">{details}</div>

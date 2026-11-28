@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { post, num } from './team-data';
 import { RangeChart, rangeLabel } from './range-chart';
+import { HelpMarker } from './ui-hints';
 import type { Point, WindowRange, GraphSelection } from './range-chart';
 type Value = {
   key: string;
@@ -55,7 +56,10 @@ export function RangeResult({ id }: { id: string }) {
   return (
     <section className="paper range-result">
       <a href="#cases">← Разборы</a>
-      <h1>{r.title}</h1>
+      <div className="ui-hint-heading">
+        <h1>{r.title}</h1>
+        <HelpMarker label="О расчёте по выделению" hint="Показывает расчёт и покрытие по выбранным периодам." />
+      </div>
       <p>
         {r.product} · срез {r.asOf} · версия {r.version?.slice(0, 10)}
       </p>
