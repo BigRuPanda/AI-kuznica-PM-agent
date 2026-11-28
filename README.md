@@ -152,14 +152,16 @@ sudo docker compose exec -T app node scripts/check-model.mjs
 ### Telegram
 
 1. Создайте бота через BotFather и укажите `TELEGRAM_BOT_TOKEN` в `.env`. Для групп добавьте бота и перечислите разрешённые ID в `TELEGRAM_CHAT_IDS`. Для канала уведомлений можно использовать `TELEGRAM_CHANNEL_ID`. [Создание бота](https://core.telegram.org/bots/tutorial#obtain-your-bot-token)
-2. Проверьте токен командой `pnpm ops check-telegram`. На публичном стенде задайте HTTPS-адрес в `APP_BASE_URL`, сгенерируйте `TELEGRAM_WEBHOOK_SECRET` и выполните `pnpm ops register-webhook`.
+2. Проверьте токен командой `pnpm ops check-telegram`. На публичном стенде задайте HTTPS-адрес в `APP_BASE_URL`, сгенерируйте `TELEGRAM_WEBHOOK_SECRET` командой `openssl rand -hex 32` и выполните `pnpm ops register-webhook`.
 3. Для личных уведомлений откройте **Мои настройки → Мои уведомления → Привязать Telegram**, перейдите к боту и нажмите **Старт**. В разрешённой группе задайте вопрос командой `/ask` или ответом на сообщение бота.
+
+Для локальной привязки через опрос используйте отдельного бота с пустым `TELEGRAM_WEBHOOK_SECRET` и задайте `TELEGRAM_BIND_POLLING=true`. Затем перезапустите приложение.
 
 ### Почта и фоновые уведомления
 
 1. Укажите `SMTP_HOST`, `SMTP_PORT`, `SMTP_FROM` и `SMTP_TO` для тестового письма. Для SMTP с авторизацией задайте `SMTP_USER` и `SMTP_PASSWORD`. Обычно порт 587 использует `SMTP_TLS=starttls`, порт 465 — `SMTP_TLS=implicit`.
 2. Проверьте подключение командой `pnpm ops check-smtp`. Команда `pnpm ops test-smtp` отправит письмо на `SMTP_TO`. Для личной доставки участник подтверждает адрес в **Мои настройки → Мои уведомления**.
-3. Когда каналы и получатели проверены, установите `NOTIFICATIONS_ENABLED=true`. Выберите `NOTIFICATION_CHANNELS=smtp`, `telegram` или `telegram,smtp`. Состояние отправок видно в **Настройки команды → Доставка уведомлений**.
+3. Когда каналы и получатели проверены, установите `NOTIFICATIONS_ENABLED=true`. В `NOTIFICATION_CHANNELS` укажите `smtp`, `telegram` или `telegram,smtp`. Состояние отправок видно в **Настройки команды → Доставка уведомлений**.
 
 ### MCP
 
