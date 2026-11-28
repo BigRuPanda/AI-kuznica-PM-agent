@@ -12,22 +12,22 @@ import { teamTools } from '../server/team-mcp.mjs';
 // The fixture has no input paths, sessions, user accounts or application database.
 // Only this fixed synthetic dataset can be submitted by the live check.
 export async function checkSyntheticCtr(live = false, transport = fetch) {
-  const model = 'qwen/qwen3.7-flash';
+  const model = 'qwen/qwen3.8-27b';
   const env = {
     DATA_PROFILE: live ? 'configured' : 'local',
     LLM_DATA_MODE: 'analysis',
     LLM_MODEL: model,
-    LLM_BACKEND: 'proxyapi',
-    PROXYAPI_API_KEY: live ? liveModelEnv.PROXYAPI_API_KEY : '',
+    LLM_BACKEND: 'anymodel',
+    ANYMODEL_API_KEY: live ? liveModelEnv.ANYMODEL_API_KEY : '',
   };
-  if (live && !env.PROXYAPI_API_KEY) throw Error('Для синтетической проверки задайте PROXYAPI_API_KEY.');
+  if (live && !env.ANYMODEL_API_KEY) throw Error('Для синтетической проверки задайте ANYMODEL_API_KEY.');
   const store = openStore(':memory:');
   const api = new McpServer({name:'synthetic-ctr', version:'1'});
   const client = new Client({name:'synthetic-ctr-reviewer', version:'1'});
   const usage = [], answers = [];
   async function send(url, options) {
     assert.ok(live, 'Локальная проверка попыталась вызвать внешнюю модель');
-    assert.equal(String(url), 'https://api.proxyapi.ru/v1/chat/completions');
+    assert.equal(String(url), 'https://anymodel.org/v1/chat/completions');
     assert.equal(JSON.parse(options.body).model, model);
     return transport(url, options);
   }

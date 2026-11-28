@@ -14,16 +14,16 @@ async function setKey() {
   prompt.on('SIGINT', () => cancel.abort());
   let key;
   try {
-    process.stdout.write('Ключ ProxyAPI для проекта (ввод скрыт). Вставьте токен и нажмите Enter: ');
+    process.stdout.write('Ключ AnyModel для проекта (ввод скрыт). Вставьте токен и нажмите Enter: ');
     key = (await prompt.question('', { signal: cancel.signal })).trim();
   } finally {
     prompt.close();
     process.stdout.write('\n');
   }
-  if (!/^[A-Za-z0-9._~+/-]+=*$/.test(key)) throw Error('Введите действительный токен ProxyAPI.');
+  if (!/^[A-Za-z0-9._~+/-]+=*$/.test(key)) throw Error('Введите действительный токен AnyModel.');
   const original = await readFile(file, 'utf8');
-  const line = /^([ \t]*(?:export[ \t]+)?PROXYAPI_API_KEY[ \t]*=)[^\r\n]*/gm;
-  const entry = 'PROXYAPI_API_KEY=' + key;
+  const line = /^([ \t]*(?:export[ \t]+)?ANYMODEL_API_KEY[ \t]*=)[^\r\n]*/gm;
+  const entry = 'ANYMODEL_API_KEY=' + key;
   const eol = original.includes('\r\n') ? '\r\n' : '\n';
   const content = original.match(line)
     ? original.replace(line, () => entry)

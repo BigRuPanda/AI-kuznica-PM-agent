@@ -10,7 +10,7 @@
     "mcp": "node server/mcp.mjs",
     "agent:eval": "node scripts/eval-agent.mjs",
     "model:check": "node scripts/check-model.mjs",
-    "model:key": "node scripts/set-proxyapi-key.mjs",
+    "model:key": "node scripts/set-anymodel-key.mjs",
     "test": "node --test \"tests/*.test.mjs\"",
     "pilot:prepare": "node pilot/prepare.mjs",
     "pilot:start": "node pilot/start.mjs",

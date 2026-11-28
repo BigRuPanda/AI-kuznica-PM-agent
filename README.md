@@ -89,24 +89,27 @@ sudo docker compose exec -T app rm /tmp/hackathon.zip
 
 ## Подключение модели
 
-Стартовый профиль `DATA_PROFILE=local` выполняет расчёты на сервере и отключает вызовы модели. Для Qwen3.8 27B через ProxyAPI укажите в `.env` следующие настройки. [Карточка модели](https://proxyapi.ru/models/qwen/qwen3.8-27b)
+Стартовый профиль `DATA_PROFILE=local` выполняет расчёты на сервере и отключает вызовы модели. Для Qwen3.8 27B через AnyModel укажите в `.env` следующие настройки. [Карточка модели](https://anymodel.org/ru/models/qwen3-8-27b)
 
 ```dotenv
 DATA_PROFILE=configured
-LLM_BACKEND=proxyapi
+LLM_BACKEND=anymodel
 LLM_MODEL=qwen/qwen3.8-27b
+LLM_DATA_MODE=analysis
 ```
 
-Локально выполните `pnpm model:key` для скрытого ввода токена и `pnpm model:check` для проверки вызова инструмента. На VPS сохраните токен в `PROXYAPI_API_KEY` в серверном `.env` и выполните команды ниже.
+Локально выполните `pnpm model:key` для скрытого ввода токена. Команда `pnpm model:check` проверит каталог моделей, работу с инструментами и короткий ответ в JSON. Для сквозной проверки используйте `node scripts/check-synthetic-ctr.mjs --live` на тестовых данных. [Сценарий приёмки](submission/pilot.md)
+
+При переходе с ProxyAPI замените значения `LLM_BACKEND` и `LLM_MODEL` в активном `.env` и удалите `PROXYAPI_API_KEY` после успешной приёмки. Сохраните предыдущую ревизию, её `.env` и копию SQLite для отката. На VPS запишите токен в `ANYMODEL_API_KEY` в серверном `.env` и выполните команды ниже.
 
 ```sh
-sudo docker compose up -d
+sudo docker compose up -d --build app
 sudo docker compose exec -T app node scripts/check-model.mjs
 ```
 
 | Провайдер | Дополнительные параметры |
 | --- | --- |
-| `proxyapi` | `PROXYAPI_API_KEY` и идентификатор модели из каталога ProxyAPI |
+| `anymodel` | `ANYMODEL_API_KEY`. Адрес API — `https://anymodel.org/v1`. |
 | `api` | `LLM_BASE_URL` совместимого API и его `LLM_API_KEY` |
 | `gemini`, `vertex-express` | `LLM_API_KEY` |
 | `vertex` | `GOOGLE_CLOUD_PROJECT`, `GOOGLE_CLOUD_LOCATION` и Google Application Default Credentials. При использовании файла укажите `GOOGLE_APPLICATION_CREDENTIALS` по пути, доступному приложению. |
