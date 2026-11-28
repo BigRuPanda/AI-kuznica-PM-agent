@@ -14,7 +14,7 @@ import { workspaceOperation } from '../server/workspace-operations.mjs';
 import { grant, readSnapshot } from '../server/chart-ranges.mjs';
 
 test('generic report publication cannot share the entire calculation of a private investigation', t => {
-  const store = openStore(':memory:', {seedDemo:false});
+  const store = openStore(':memory:');
   t.after(() => store.close());
   initEvidence(store.db);
   initWorkbench(store.db);
@@ -199,7 +199,7 @@ test('participants explicitly choose a scope and share one durable investigation
 });
 
 test('publishing a calendar release queues one investigation that waits for post-release data', async t => {
-  const store = openStore(':memory:', { seedDemo: false });
+  const store = openStore(':memory:');
   t.after(() => store.close());
   initEvidence(store.db);
   initWorkbench(store.db);
@@ -244,7 +244,7 @@ test('publishing a calendar release queues one investigation that waits for post
 });
 
 test('a release listing recommendation clicks lets the user choose CTR and waits for comparable ratios', async t => {
-  const store = openStore(':memory:', { seedDemo: false });
+  const store = openStore(':memory:');
   t.after(() => store.close());
   initEvidence(store.db);
   initWorkbench(store.db);
@@ -278,7 +278,7 @@ test('a release listing recommendation clicks lets the user choose CTR and waits
 });
 
 test('a different affected KPI never starts an order-index investigation without an explicit choice', t => {
-  const store = openStore(':memory:', { seedDemo: false });
+  const store = openStore(':memory:');
   t.after(() => store.close());
   initEvidence(store.db);
   initWorkbench(store.db);

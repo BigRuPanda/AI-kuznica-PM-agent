@@ -1,10 +1,5 @@
 (() => {
   const root = document.getElementById('release-dashboard');
-  const data = globalThis.releaseDemo;
-  const { DAY, metrics, snapshot } = globalThis.releaseMetrics;
-  const ids = Object.keys(data).sort((a,b) => data[b].launch-data[a].launch);
-  const segments = {all:'Все клиенты', new:'Новые клиенты', returning:'Постоянные клиенты'};
-  const storageKey = 'softline-release-preview-v1';
   const slot = name => root.querySelector('[data-slot="'+name+'"]');
   const find = selector => root.querySelector(selector);
   const themeButton = find('[data-theme-toggle]');
@@ -21,6 +16,15 @@
     applyTheme();
   };
   applyTheme();
+  const data = globalThis.releaseDemo ?? {};
+  const ids = Object.keys(data).sort((a,b) => data[b].launch-data[a].launch);
+  if (!ids.length) return;
+  slot('empty').hidden = true;
+  slot('navigation').hidden = false;
+
+  const { DAY, metrics, snapshot } = globalThis.releaseMetrics;
+  const segments = {all:'Все клиенты', new:'Новые клиенты', returning:'Постоянные клиенты'};
+  const storageKey = 'softline-release-preview-v1';
   const layout = find('.layout');
   const composer = find('.chat-composer');
   const input = composer.querySelector('input');
@@ -49,11 +53,14 @@
   const width = {left:Number(saved.leftWidth)||240, right:Number(saved.rightWidth)||365};
   let pane = 'main', current;
   const dateFmt = new Intl.DateTimeFormat('ru-RU',{day:'numeric',month:'short',timeZone:'Europe/Moscow'});
+  const launchFmt = new Intl.DateTimeFormat('ru-RU',{dateStyle:'long',timeZone:'Europe/Moscow'});
+  const timeFmt = new Intl.DateTimeFormat('ru-RU',{hour:'2-digit',minute:'2-digit',timeZone:'Europe/Moscow'});
   const fmt = new Intl.NumberFormat('ru-RU',{maximumFractionDigits:1});
   const rubles = new Intl.NumberFormat('ru-RU',{maximumFractionDigits:0});
   const date = (d,key=id) => dateFmt.format(data[key].launch+d*DAY).replace(/\.$/u,'');
+  const launchTime = () => timeFmt.format(data[id].launch) + ' МСК';
   const view = () => views[id];
-  const target = () => id==='R-001'?0:1;
+  const target = () => data[id].target;
   function save() {
     try {localStorage.setItem(storageKey,JSON.stringify({id,views,...panels,leftWidth:width.left,rightWidth:width.right}));} catch {}
   }
@@ -142,13 +149,11 @@
   dateFilter.onchange=()=>{view().day=Number(dateFilter.value);render();save();};
   segmentFilter.onchange=()=>{view().segment=segmentFilter.value;render();save();};
 
-  function caption(i,report,day,segment) {
+  function caption(i,report,day) {
     const a=report.before[i], b=report.after[i];
     if(day===0)return 'Наблюдение началось. События после запуска будут появляться по мере накопления.';
     if(b.value===null)return b.pending?'Окно оплаты ещё открыто. Ждём семь суток для каждого наблюдения.':
       (i===4?'В этом срезе ещё нет подписок с наступившим сроком продления.':'В выбранном срезе пока нет наблюдений для расчёта.');
-    if(day===14&&segment==='all'&&i===0&&id==='R-001')return 'У новых клиентов осталось 5%, у постоянных — 20%. Доля новых клиентов выросла с 40% до 60%.';
-    if(day===14&&segment==='all'&&i===1&&id==='R-002')return 'Рост виден в обеих группах клиентов. Чтобы оценить вклад кнопки, нужно сравнение с контрольной группой.';
     if(a.value===null)return 'Данных до запуска пока недостаточно для сравнения.';
     const delta=b.value-a.value;
     const diff=metrics[i][1]==='%'?fmt.format(Math.abs(delta))+' п. п.':number(Math.abs(delta),i);
@@ -158,27 +163,15 @@
     return result;
   }
   function headline(report, brief=false) {
-    const {day,segment}=view(),i=target(),a=report.before[i],b=report.after[i];
-    if(day<14)return caption(i,report,day,segment)+' Первый полный разбор — '+date(14)+'.';
+    const {day}=view(),i=target(),a=report.before[i],b=report.after[i];
+    if(day<14)return caption(i,report,day)+' Первый полный разбор — '+date(14)+'.';
     if(brief&&a.value!==null&&b.value!==null){
       const subject=i===0?'Конверсия':metrics[i][0];
       if(a.value===b.value)return subject+' сохранилась на уровне '+number(b.value,i)+'.';
       const change=b.value>a.value?' выросла с ':' снизилась с ';
       return subject+change+number(a.value,i)+' до '+number(b.value,i)+'.';
     }
-    return metrics[i][0]+' — '+number(b.value,i)+' после запуска и '+number(a.value,i)+' до него. '+caption(i,report,day,segment);
-  }
-  function initialReason(i) {
-    if(view().day<14||i!==target())return '';
-    return id==='R-001'?'Первый полный разбор, все клиенты. Снижение с 14% до 11% связано с изменением состава аудитории.':
-      'Первый полный разбор, все клиенты. За семь суток оплачено 110 из 200 счетов после запуска и 80 из 200 до.';
-  }
-  function interval(i) {
-    if(view().day<14)return null;
-    if(id==='R-001'&&i===0&&view().segment==='all')return {seg:'all',text:'Все клиенты. Снижение конверсии на 3 п. п. при 1 000 компаниях в каждом периоде.'};
-    if(id==='R-002'&&[0,1].includes(i)&&view().segment!=='returning')return {seg:'new',text:
-      'Новые клиенты. '+(i===1?'Оплачено 55 из 100 счетов против 40 из 100 до запуска.':'Оплатили заказ 55 из 100 компаний против 40 из 100 до запуска.')};
-    return null;
+    return metrics[i][0]+' — '+number(b.value,i)+' после запуска и '+number(a.value,i)+' до него. '+caption(i,report,day);
   }
 
   const precise = new Intl.NumberFormat('ru-RU',{maximumFractionDigits:2});
@@ -288,7 +281,7 @@
         const delta=row.value-prior.value;
         field('Все · к предыдущим суткам',(delta>0?'+':'')+precise.format(delta)+(metrics[i][1]==='%'?' п. п.':' ₽'));
       }
-      tip.replaceChildren(make('strong',date(day)+' → '+date(day+1)+' · 10:00 МСК'),make('small',phase+' · '+segments[view().segment]));
+      tip.replaceChildren(make('strong',date(day)+' → '+date(day+1)+' · '+launchTime()),make('small',phase+' · '+segments[view().segment]));
       if(report.hasVersion)tip.append(versionTable(report,i,'daily',index));
       else tip.append(make('b',val));
       tip.append(keyValues);
@@ -396,9 +389,11 @@
     detail.open=true;detail.querySelector('summary').focus();
   }
   function chart(i) {
-    const reason=initialReason(i), mark=interval(i), card=make('section',undefined,'card'+(reason?' important':''));
+    const {day,segment} = view(), a=current.before[i], b=current.after[i];
+    const mark=day===14 && i===target() && a.value!==null && b.value!==null;
+    const card=make('section',undefined,'card'+(mark?' important':''));
     card.dataset.metric=i;
-    const head=make('header',undefined,'metric-head'), a=current.before[i], b=current.after[i];
+    const head=make('header',undefined,'metric-head');
     const periods=make('div',undefined,'period-pair');
     for(const [label,result] of [['До запуска',a],['После запуска',b]]) {
       const cell=make('div',undefined,'period-cell');
@@ -412,14 +407,11 @@
     const band=drawChart(card,i,current,mark);
     if((i===0||i===1)&&current.daily.some(rows=>rows[i].pending))
       card.append(make('p','Серый фон — ещё не завершилось семидневное окно оплаты.','meta'));
-    card.append(make('p',caption(i,current,view().day,view().segment),'caption'));
-    if(mark){
-      const button=make('button','Участок · '+date(0)+' – '+date(7)+' · '+segments[mark.seg],'mark-open');
-      const info=make('p',mark.text,'proof');info.hidden=true;
-      button.setAttribute('aria-expanded','false');
-      button.onclick=()=>{info.hidden=!info.hidden;button.setAttribute('aria-expanded',String(!info.hidden));};
-      band.onclick=button.onclick;card.append(button,info);
-      if(view().segment!==mark.seg){const change=make('button','Открыть этот срез','mark-open');info.append(document.createElement('br'),change);change.onclick=()=>{view().segment=mark.seg;render();save();showMetric(i);};}
+    card.append(make('p',caption(i,current,day),'caption'));
+    if(band){
+      const button=make('button','Участок · '+date(0)+' – '+date(7)+' · '+segments[segment],'mark-open');
+      band.onclick=button.onclick=()=>showMetric(i);
+      card.append(button);
     }
     const details=make('details');details.append(make('summary','Показать расчёт'));
     details.append(make('p',metrics[i][2]+'. До запуска — '+metricText(a,i)+'. После — '+metricText(b,i)+'.','proof'));
@@ -433,7 +425,6 @@
         if(u.d+u.pending)details.append(make('p','Без версии · '+(u.d+u.pending)+' '+rowUnits[i]+'. Включены в «Все».','proof'));
       }
     }
-    if(reason)details.append(make('p',reason,'proof'));
     const daily=make('details');daily.append(make('summary','Значения по дням'));
     current.days.forEach((d,j)=>{const row=current.daily[j][i];daily.append(make('p',date(d)+' · '+number(row.value,i)+' · '+metricText(row,i),'proof'));});
     details.append(daily);card.append(details);return card;
@@ -472,7 +463,7 @@
     if(/продлен|продлён/i.test(q))i=4;else if(/средн|чек/i.test(q))i=3;
     else if(/сумм|деньг|денег/i.test(q))i=2;else if(/сч[её]т/i.test(q))i=1;else if(/конверс/i.test(q))i=0;
     const supported=/релиз|форм|кнопк|измен|клиент|сегмент|новы|постоян|почему|оплат|денег|откат|средн|чек|сумм|сч[её]т|конверс|продл/i.test(q);
-    const answer=supported?metrics[i][0]+'. '+number(report.before[i].value,i)+' → '+number(report.after[i].value,i)+'. '+caption(i,report,view().day,s):
+    const answer=supported?metrics[i][0]+'. '+number(report.before[i].value,i)+' → '+number(report.after[i].value,i)+'. '+caption(i,report,view().day):
       'В этом макете можно спросить про любую из пяти метрик или про новых и постоянных клиентов.';
     chats[id].push({day:view().day,segment:s,q,answer,metric:supported?i:null});
     drafts[id]='';
@@ -491,11 +482,11 @@
       if(selected)link.setAttribute('aria-current','page');
       else link.removeAttribute('aria-current');
     }
-    slot('identity').textContent=id+' · Запуск '+date(0)+' 2026 · '+(v.day===14?'Разбор готов':v.day===0?'Наблюдение началось':'Предварительные данные');
+    slot('identity').textContent=id+' · Запуск '+launchFmt.format(release.launch)+' · '+(v.day===14?'Разбор готов':v.day===0?'Наблюдение началось':'Предварительные данные');
     slot('title').textContent=release.title;slot('lead').textContent=headline(current,true);
     dateFilter.replaceChildren(...Array.from({length:15},(_,d)=>new Option(date(d),d)));
     dateFilter.value=v.day;segmentFilter.value=v.segment;
-    slot('period').textContent='До запуска '+date(-7)+' → '+date(0)+' · После '+date(0)+' → '+date(7)+'. Границы в 10:00 МСК. Графики — до '+date(v.day)+'.';
+    slot('period').textContent='До запуска '+date(-7)+' → '+date(0)+' · После '+date(0)+' → '+date(7)+'. Границы в '+launchTime()+'. Графики — до '+date(v.day)+'.';
     slot('charts').replaceChildren(...metrics.map((_,i)=>chart(i)));
     displayChat();sizePanels();
   }

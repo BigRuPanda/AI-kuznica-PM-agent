@@ -434,7 +434,7 @@ async function smtpQueue(t, outcomes) {
     SMTP_TLS:'plain', SMTP_FROM:'sender@example.invalid', SMTP_TO:'recipient@example.invalid',
     PYTHON_BIN:process.env.PYTHON_BIN,
   };
-  const store = openStore(':memory:', { seedDemo:false });
+  const store = openStore(':memory:');
   t.after(() => store.close());
   initEvidence(store.db);
   initWorkbench(store.db);

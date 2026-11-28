@@ -11,6 +11,8 @@ import { chromium } from 'playwright';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { createTeamApp } from '../server/team-http.mjs';
+import { openStore } from '../server/store.mjs';
+import { pack } from '../server/import.mjs';
 import { digest, facts, importDocs } from '../server/evidence.mjs';
 import { openReleaseCase } from '../server/release-cases.mjs';
 import { saveMetricRule } from '../server/metric-rules.mjs';
@@ -19,6 +21,7 @@ import { workPresentations } from '../server/presentations.mjs';
 import { workspaceOperation } from '../server/workspace-operations.mjs';
 import { readMaterial, saveMaterial } from '../server/materials.mjs';
 import { seedWorkspace, fixtureEnv } from './workspace-fixture.mjs';
+import { checkoutReleaseTitle, invoiceReleaseTitle, releaseMetricsCsv, seedReleaseMetrics } from './release-metrics-fixture.mjs';
 import { saveClosure } from '../server/redmine-bridge.mjs';
 
 const role = (p, name) => p.getByRole('button', { name, exact: true });
@@ -35,7 +38,7 @@ const launchBrowser = () => {
     process.env.PM_BROWSER_PATH || (existsSync(edge) ? edge : undefined)});
 };
 
-test('standalone demo preserves release selection, filters, themes and discussion', async t => {
+test('standalone prototype starts empty and preserves release selection, filters, themes and discussion', async t => {
   const server = spawn(process.execPath,[fileURLToPath(new URL('../prototype/serve.mjs',import.meta.url))],{
     env:{...process.env,PORT:'0'}, stdio:['ignore','pipe','inherit'], windowsHide:true
   });
@@ -47,7 +50,27 @@ test('standalone demo preserves release selection, filters, themes and discussio
   ]);
   const browser = await launchBrowser();
   t.after(() => browser.close());
+  const empty = await browser.newPage({locale:'ru-RU'});
+  const emptyErrors = [];
+  empty.on('pageerror', error => emptyErrors.push(error.message));
+  try {
+    await empty.goto(url.href);
+    await empty.getByRole('heading', {name:'Нет данных о релизах', exact:true}).waitFor({timeout:5000});
+    assert.equal(await empty.getByRole('button', {name:'Обсуждение', exact:true}).count(),0);
+    assert.equal((await empty.request.get(new URL('/data.js',url).href)).status(),404);
+    assert.deepEqual(emptyErrors,[]);
+  } finally { await empty.close(); }
   const demo = await browser.newPage({locale:'ru-RU', colorScheme:'dark', viewport:{width:390,height:844}});
+  const store = openStore(':memory:');
+  try {
+    seedReleaseMetrics(store);
+    const data = Object.fromEntries(store.releases().map(release => {
+      const {title, launch, target} = release;
+      const orders = pack(store.version(release.dataset).events, release, Infinity);
+      return [release.id, {title, launch, target, orders}];
+    }));
+    await demo.addInitScript(releases => { globalThis.releaseDemo = releases; }, data);
+  } finally { store.close(); }
   demo.setDefaultTimeout(5000);
   let teamApiRequests = 0;
   const failedAssets = [];
@@ -64,11 +87,13 @@ test('standalone demo preserves release selection, filters, themes and discussio
   const fitScreen = () => demo.evaluate(() => document.documentElement.scrollWidth === innerWidth &&
     [...document.querySelectorAll('.dashboard,.sidebar,.thread')].every(panel=>panel.scrollWidth===panel.clientWidth));
   await visible(title);
-  await visible(demo.getByText('Демонстрационные данные',{exact:true}));
   assert.equal(await demo.locator('html').getAttribute('data-theme'),'light');
-  const releaseTwoTitle = await title.textContent();
+  assert.equal(await title.textContent(),invoiceReleaseTitle);
   assert.match(await demo.locator('[data-slot=identity]').textContent(), /^R-002/);
   assert.ok(await fitScreen());
+  const target = demo.locator('[data-metric="1"]');
+  await target.getByRole('button',{name:/^Участок · /u}).press('Enter');
+  assert.equal(await target.locator('details').first().evaluate(detail=>detail.open),true);
   await date.selectOption('7');
   await segment.selectOption('returning');
   await role(demo,'Тёмная тема').press('Space');
@@ -89,14 +114,14 @@ test('standalone demo preserves release selection, filters, themes and discussio
   await demo.waitForURL('**/#R-001');
   await demo.locator('.release-link[href="#R-001"][aria-current="page"]').waitFor({state:'attached'});
   assert.match(demo.url(), /#R-001$/);
-  assert.notEqual(await title.textContent(),releaseTwoTitle);
+  assert.equal(await title.textContent(),checkoutReleaseTitle);
   assert.equal(await date.inputValue(),'14');
   assert.equal(await segment.inputValue(),'all');
   await demo.goBack();
   assert.equal(demo.url(),url.href);
   await demo.locator('.release-link[href="#R-002"][aria-current="page"]').waitFor({state:'attached'});
   await visible(title);
-  assert.equal(await title.textContent(),releaseTwoTitle);
+  assert.equal(await title.textContent(),invoiceReleaseTitle);
   assert.equal(await date.inputValue(),'7');
   assert.equal(await segment.inputValue(),'returning');
   await discussion.press('Space');
@@ -112,7 +137,7 @@ test('standalone demo preserves release selection, filters, themes and discussio
 
   const rootUrl = new URL('/',url).href;
   await demo.goto(rootUrl);
-  assert.equal(await title.textContent(),releaseTwoTitle);
+  assert.equal(await title.textContent(),invoiceReleaseTitle);
   await releases.press('Space');
   await demo.getByRole('link',{name:/R-001/}).press('Enter');
   await demo.locator('.release-link[href="#R-001"][aria-current="page"]').waitFor({state:'attached'});
@@ -123,7 +148,7 @@ test('standalone demo preserves release selection, filters, themes and discussio
   await demo.goBack();
   assert.equal(demo.url(),rootUrl);
   await demo.locator('.release-link[href="#R-002"][aria-current="page"]').waitFor({state:'attached'});
-  assert.equal(await title.textContent(),releaseTwoTitle);
+  assert.equal(await title.textContent(),invoiceReleaseTitle);
   assert.equal(await date.inputValue(),'7');
   assert.equal(await segment.inputValue(),'returning');
   await demo.goForward();
@@ -2135,6 +2160,8 @@ test('Softline workspace, upgrade and browser journeys', async t => {
     await visible(member.getByRole('dialog').locator('.range-plot svg'));
   });
 
+  const releaseStore = app.space('team');
+  if (!releaseStore.releases().some(release => release.id === 'R-001')) seedReleaseMetrics(releaseStore);
   await journey('CSV import, release, saved calculation and dashboard in the same shell', async () => {
     await admin.goto(base+'/?legacy=1#releases');
     await visible(admin.locator('#workspace-sidebar'));
@@ -2143,7 +2170,7 @@ test('Softline workspace, upgrade and browser journeys', async t => {
     let dlg=admin.getByRole('dialog');
     await field(dlg,'Название набора').fill('События для приёмки');
     await field(dlg,'CSV с событиями').setInputFiles({
-      name:'events.csv',mimeType:'text/csv',buffer:await readFile(new URL('../demo/events.csv',import.meta.url))
+      name:'events.csv',mimeType:'text/csv',buffer:Buffer.from(releaseMetricsCsv)
     });
     await field(dlg,'Данные полны по дату и время, МСК').fill('2026-11-23T10:00');
     await role(dlg,'Импортировать').click();
@@ -2337,6 +2364,7 @@ test('Softline workspace, upgrade and browser journeys', async t => {
     await go(judge,'overview');
     await judge.getByRole('link',{name:'Открыть разбор'}).first().click();
     await redmineSummary(judge).click();
+    assert.equal(await field(judge,'Заголовок').inputValue(),'');
     await field(judge,'Заголовок').fill('Задача из пространства жюри');
     await submit(judge,'draft',()=>role(judge,'Подготовить черновик задачи').click());
     const draft = judge.locator('.tracker-preview').filter({hasText:'Задача из пространства жюри'});

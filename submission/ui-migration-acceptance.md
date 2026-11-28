@@ -61,5 +61,5 @@
 
 1. Установить зависимости командой `pnpm install --frozen-lockfile` и выполнить `pnpm build`.
 2. Подготовить три комплекта через `scripts/ui-migration-fixtures.mjs`, как описано в T17 плана. Задать абсолютный путь к результату в `PM_MIGRATION_FIXTURES`.
-3. Выполнить `node --test --test-concurrency=1 demo/versions.test.mjs "tests/*.test.mjs"` и `node --test --test-concurrency=1 "tests/*.browser.mjs"`. На Windows при необходимости задать `PYTHON_BIN` и `PM_BROWSER_PATH`.
+3. Выполнить `node --test --test-concurrency=1 "tests/*.test.mjs"` и `node --test --test-concurrency=1 "tests/*.browser.mjs"`. На Windows при необходимости задать `PYTHON_BIN` и `PM_BROWSER_PATH`.
 4. Выполнить `python integrations/signal-bridge/verify.py -v`; прогнать обе [проверки пилота](pilot.md) на изолированном стенде. Для исходного ZIP задать `SIGNAL_RELEASE_ARCHIVE` и `SIGNAL_RELEASE_BROWSER=1`.

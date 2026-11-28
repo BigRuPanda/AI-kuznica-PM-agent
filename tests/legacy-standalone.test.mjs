@@ -15,11 +15,11 @@ const tableCounts = db => Object.fromEntries(['releases', 'datasets', 'versions'
   [table, db.prepare('SELECT count(*) AS count FROM ' + table).get().count],
 ));
 
-for (const [name, sha, expected] of [
-  ['archived', archiveSha, { releases: 0, datasets: 0, versions: 0 }],
-  ['standard', '', { releases: 2, datasets: 1, versions: 1 }],
+for (const [name, sha] of [
+  ['archived', archiveSha],
+  ['standard', ''],
 ]) {
-  test('standalone HTTP opens ' + name + ' installations with the expected releases', { timeout: 15000 }, async t => {
+  test('standalone HTTP opens ' + name + ' installations with an empty release journal', { timeout: 15000 }, async t => {
     const directory = await mkdtemp(join(tmpdir(), 'pm-legacy-http-'));
     const file = join(directory, 'case.sqlite');
     const child = spawn(process.execPath, [entrypoint], {
@@ -49,27 +49,34 @@ for (const [name, sha, expected] of [
     await listen;
     const db = new DatabaseSync(file, { readOnly: true });
     try {
-      assert.deepEqual(tableCounts(db), expected);
+      assert.deepEqual(tableCounts(db), { releases: 0, datasets: 0, versions: 0 });
     } finally {
       db.close();
     }
   });
 }
 
-test('an explicit SQLite seed policy takes precedence over the installation default', () => {
-  const original = process.env.SOURCE_ARCHIVE_SHA256;
+test('opening the release store preserves imported data', async t => {
+  const directory = await mkdtemp(join(tmpdir(), 'pm-release-import-'));
+  t.after(() => rm(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }));
+  const file = join(directory, 'releases.sqlite');
+  const first = openStore(file);
+  const title = 'Импортированный релиз';
   try {
-    for (const [sha, seedDemo, expected] of [[archiveSha, true, 2], ['', false, 0]]) {
-      process.env.SOURCE_ARCHIVE_SHA256 = sha;
-      const store = openStore(':memory:', { seedDemo });
-      try {
-        assert.equal(store.releases().length, expected);
-      } finally {
-        store.close();
-      }
-    }
+    const { dataset } = first.importCSV({ name: 'События заказа', csv: [
+      'company_id,order_id,customer_segment,purchase_type,event_at,event_type',
+      'C1,O1,new,purchase,2026-10-05T07:00:00Z,checkout_started',
+    ].join('\n') });
+    first.create({ title, dataset, activatedAt: '2026-10-05T07:00:00Z',
+      description: 'Изменение оформления', audience: 'Новые клиенты', question: 'Как меняется оформление?' });
   } finally {
-    if (original === undefined) delete process.env.SOURCE_ARCHIVE_SHA256;
-    else process.env.SOURCE_ARCHIVE_SHA256 = original;
+    first.close();
+  }
+  const reopened = openStore(file);
+  try {
+    assert.deepEqual(reopened.releases().map(release => release.title), [title]);
+    assert.deepEqual(tableCounts(reopened.db), { releases: 1, datasets: 1, versions: 1 });
+  } finally {
+    reopened.close();
   }
 });

@@ -25,11 +25,11 @@
   border-bottom: 1px solid var(--border);
 }
 .demo-brand { color: var(--accent-text); font-size: 1.1rem; font-weight: 750; }
-.demo-label { margin-left: auto; color: var(--fg-muted); font-size: 12px; }
 #release-dashboard .theme-switch {
   display: inline-flex;
   align-items: center;
   gap: 7px;
+  margin-left: auto;
   min-height: 36px;
   padding: 6px 11px;
   border: 1px solid var(--control-border);
@@ -116,8 +116,7 @@
 }
 @media (max-width: 570px) {
   .demo-header { display: grid; grid-template-columns: 1fr auto; row-gap: 2px; }
-  .demo-header .theme-switch { grid-area: 1 / 2 / span 2 / 3; }
-  .demo-label { grid-area: 2 / 1; margin: 0; }
+  .demo-header .theme-switch { grid-area: 1 / 2; }
   #release-dashboard .top { grid-column: 1 / -1; margin-top: 7px; }
   #release-dashboard .layout { height: max(470px, calc(100dvh - 165px)); }
 }

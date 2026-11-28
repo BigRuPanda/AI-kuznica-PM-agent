@@ -413,7 +413,7 @@ function IssueForm({
             Заголовок
             <input
               name="title"
-              defaultValue={task?.title || 'Проверить путь покупки · ' + product}
+              defaultValue={task?.title}
               required
               maxLength={240}
             />

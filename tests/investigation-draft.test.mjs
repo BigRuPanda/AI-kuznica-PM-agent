@@ -61,8 +61,11 @@ test('the edited plan and interpretations form one private, revision-bound previ
 
 test('only an actual tracker search result can receive a plan comment', async t => {
   const {store, draft, confirm} = scenario(t);
-  const key = 'DEMO-START', url = '#demo-issue/DEMO-START';
-  const selection = {key, url, query:'путь покупки'};
+  const empty = await workspaceOperation(store, user, 'issue_search', {query:''});
+  assert.deepEqual(empty.items, []);
+  const preview = await draft();
+  const {key, url} = await confirm(preview);
+  const selection = {key, url, query:preview.title};
   await assert.rejects(draft({selection:{...selection, key:'T-08'}}), /поиск|выбер/i);
   await assert.rejects(draft({selection:{...selection, query:'доставка'}}), /поиск|выбер/i);
   await assert.rejects(draft({selection:{...selection, url:'https://other.test/issues/8'}}), /поиск|выбер/i);

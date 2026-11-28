@@ -1,13 +1,12 @@
 import {DatabaseSync} from 'node:sqlite';
-import {mkdirSync,readFileSync} from 'node:fs';
-import {dirname,join} from 'node:path';
+import {mkdirSync} from 'node:fs';
+import {dirname} from 'node:path';
 import {createHash,randomUUID} from 'node:crypto';
-import {parse} from 'csv-parse/sync';
-import {databasePath,root} from './config.mjs';
+import {databasePath} from './config.mjs';
 import {DAY,instant,parseEvents,kinds} from './import.mjs';
 export const hash=value=>createHash('sha256').update(value).digest('hex');
 export function name(value,max=180){if(typeof value!=='string'||!value.trim()||value.trim().length>max)throw Error('Проверьте длину текстового поля (1–'+max+').');return value.trim();}
-export function openStore(path=databasePath(), {seedDemo=!process.env.SOURCE_ARCHIVE_SHA256}={}){
+export function openStore(path=databasePath()){
   if(path!==':memory:')mkdirSync(dirname(path),{recursive:true});
   const db=new DatabaseSync(path);
   db.exec(`PRAGMA busy_timeout=10000; PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL;
@@ -36,24 +35,16 @@ export function openStore(path=databasePath(), {seedDemo=!process.env.SOURCE_ARC
     db.prepare('INSERT OR IGNORE INTO versions VALUES(?,?,?,?,?,?)').run(id,dataset,digest,complete,JSON.stringify(payload),Date.now());
     return {dataset,version:id,count:payload.events.length};
   }
-  function create(input,forcedId){
+  function create(input){
     if(!one('SELECT id FROM datasets WHERE id=?',input.dataset))throw Error('Выберите набор данных.');
     const target=Number(input.target??0);
     if(!Number.isInteger(target)||target<0||target>4)throw Error('Неизвестная целевая метрика.');
-    const r={id:forcedId||'R-'+randomUUID().slice(0,8),title:name(input.title),description:name(input.description,1500),launch:instant(input.activatedAt),
+    const r={id:'R-'+randomUUID().slice(0,8),title:name(input.title),description:name(input.description,1500),launch:instant(input.activatedAt),
       audience:name(input.audience,500),question:name(input.question,500),dataset:input.dataset,target,sourceKey:input.sourceKey?.trim()||'',
       exposure:input.exposure||'checkout_started'};
     if(!kinds.includes(r.exposure))throw Error('Неизвестное событие показа.');
     db.prepare('INSERT INTO releases VALUES(?,?)').run(r.id,JSON.stringify(r));return r;
   }
-  if(seedDemo && !one('SELECT id FROM releases LIMIT 1'))tx(()=>{
-    if(one('SELECT id FROM releases LIMIT 1'))return;
-    const seed=importCSV({name:'Демонстрационные события',csv:readFileSync(join(root,'demo/events.csv'),'utf8'),completeThrough:'2026-11-16T07:00:00Z'});
-    const rows=parse(readFileSync(join(root,'demo/releases.csv'),'utf8'),{columns:true,trim:true});
-    for(const row of rows){const invoice=row.release_id==='R-002';create({title:row.title,description:invoice?'Добавили скачивание счёта на странице заказа.':'Обновили форму оформления заказа.',
-      audience:invoice?'Компании с оплатой по счёту':'Все компании, начавшие оформление',question:invoice?'Стали ли чаще оплачивать счета за семь суток?':'Почему изменилась конверсия в оплату?',
-      activatedAt:row.activated_at,sourceKey:row.release_id,exposure:row.exposure_event,target:invoice?1:0,dataset:seed.dataset},row.release_id);}
-  });
   function release(id){const r=one('SELECT body FROM releases WHERE id=?',id);if(!r)throw Error('Релиз не найден.');return JSON.parse(r.body);}
   const cache=new Map();
   function version(dataset,id){

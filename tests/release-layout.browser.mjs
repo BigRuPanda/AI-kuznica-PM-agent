@@ -7,6 +7,7 @@ import test from 'node:test';
 import { chromium } from 'playwright';
 import { createTeamApp } from '../server/team-http.mjs';
 import { getCase, importDocs } from '../server/evidence.mjs';
+import { invoiceReleaseTitle, seedReleaseMetrics } from './release-metrics-fixture.mjs';
 import { seedWatchFormats } from './watch-fixture.mjs';
 import { fixtureEnv, seedWorkspace } from './workspace-fixture.mjs';
 
@@ -50,7 +51,7 @@ test('release cards sort both sources and keep their routes and actions distinct
   assert.equal(await source.inputValue(), 'all');
   await journal.getByRole('link', { name: calendarTitle, exact: true }).waitFor();
   await page.getByRole('button', { name: 'Повторить', exact: true }).click();
-  await journal.getByRole('link', { name: 'Кнопка «Скачать счёт»' }).waitFor();
+  await journal.getByRole('link', { name: invoiceReleaseTitle, exact: true }).waitFor();
   const cards = journal.locator(':scope > li');
   assert.deepEqual(await cards.locator('.release-id').allTextContents(), ['R-001', 'R-002', 'R-001', 'DEMO-R', 'R-NODATE']);
   assert.equal(await journal.getByRole('table').count(), 0);
@@ -128,7 +129,7 @@ test('release cards sort both sources and keep their routes and actions distinct
   assert.equal(await cutHint.textContent(), '?');
   await page.goto(origin + '/#releases');
   assert.equal(await source.inputValue(), 'metrics');
-  await journal.getByRole('link', { name: 'Кнопка «Скачать счёт»' }).waitFor();
+  await journal.getByRole('link', { name: invoiceReleaseTitle, exact: true }).waitFor();
   assert.equal(await cards.count(), 2);
   await cards.first().getByRole('link').click();
   await page.getByRole('columnheader', { name: 'После выпуска' }).waitFor();
@@ -435,6 +436,7 @@ async function openWorkspace(t) {
   });
   const { caseId } = await seedWorkspace(directory);
   app = createTeamApp({ base: join(directory, 'releases.sqlite'), env: fixtureEnv, background: false });
+  seedReleaseMetrics(app.space('team'));
   await new Promise((resolve, reject) => app.server.once('error', reject).listen(0, '127.0.0.1', resolve));
   const origin = 'http://127.0.0.1:' + app.server.address().port;
   const edge = 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe';

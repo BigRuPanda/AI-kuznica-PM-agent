@@ -8,7 +8,7 @@ const assets = new Map([
   ['/web/chat.css', ['../web/chat.css', 'text/css']],
   ['/dashboard.css', ['dashboard.css', 'text/css']],
   ['/dist/report-fonts.css', ['../dist/report-fonts.css', 'text/css']],
-  ...['dashboard.js', 'metrics.js', 'data.js'].map(file=>['/'+file,[file,'text/javascript']])
+  ...['dashboard.js', 'metrics.js'].map(file=>['/'+file,[file,'text/javascript']])
 ]);
 const port = Number(process.env.PORT || 8085);
 const server = createServer(async (req,res)=>{

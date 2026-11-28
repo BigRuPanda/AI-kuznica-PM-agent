@@ -11,7 +11,7 @@ import { createTeamApp } from '../server/team-http.mjs';
 import { seedWatchFormats } from './watch-fixture.mjs';
 
 test('effect preview requires full comparable coverage and a linked rollout while watch persists the pending plan', t => {
-  const store = openStore(':memory:', { seedDemo: false });
+  const store = openStore(':memory:');
   try {
     initEvidence(store.db);
     initWorkbench(store.db);
@@ -149,7 +149,7 @@ test('both saved version 2 formats and the legacy target survive a restart and r
     rmSync(dir, { recursive: true, force: true, maxRetries: 3 });
   });
   function open() {
-    store = openStore(file, { seedDemo: false });
+    store = openStore(file);
     initEvidence(store.db);
     initWorkbench(store.db);
   }

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {mkdtemp,readFile,rm} from 'node:fs/promises';
+import {mkdtemp,rm} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {Client} from '@modelcontextprotocol/sdk/client/index.js';
@@ -12,6 +12,7 @@ import {createTeamApp} from '../server/team-http.mjs';
 import {page,runTool} from '../server/analytics.mjs';
 import {geminiCall} from '../server/gemini.mjs';
 import {apiConfigured,makeAgent,providerCall} from '../server/agent.mjs';
+import {releaseMetricsCsv,seedReleaseMetrics} from './release-metrics-fixture.mjs';
 
 test('ProxyAPI uses its own key and endpoint across tool calls', async () => {
   const env = {LLM_BACKEND:'proxyapi', LLM_MODEL:'qwen/qwen3.7-flash',
@@ -89,7 +90,8 @@ test('one company with multiple checkouts counts once and an unavailable model l
     const input=['company_id,order_id,invoice_id,event_type,event_at',
       'C1,O1,I1,checkout_started,2026-10-05T08:00:00Z','C1,O2,I2,checkout_started,2026-10-06T08:00:00Z','C1,O2,I2,payment_received,2026-10-07T08:00:00Z'].join('\n');
     const ds=s.importCSV({name:'Два заказа',csv:input,completeThrough:'2026-10-19T07:00:00Z'});
-    const ref=s.release('R-001'),r=s.create({...ref,dataset:ds.dataset,sourceKey:'',activatedAt:new Date(ref.launch).toISOString()});
+    const r=s.create({title:'Повторное оформление',description:'Два заказа одной компании',audience:'Компании',
+      question:'Сколько компаний оплатили заказ?',dataset:ds.dataset,activatedAt:'2026-10-05T07:00:00Z'});
     const c=runTool(s,'compare_metric',{releaseId:r.id,day:14,metric:0});
     assert.deepEqual([c.result.series.all.after.n,c.result.series.all.after.d],[1,1]);
     await assert.rejects(makeAgent(s,{env:{}}).ask({releaseId:r.id,day:14,author:'Анна',question:'Почему?',requestId:'failed'}),/модел/);
@@ -100,35 +102,36 @@ test('one company with multiple checkouts counts once and an unavailable model l
 test('CSV versions, shared dataset, atomic invalid import and stable old calculation',async()=>{
   const dir=await mkdtemp(join(tmpdir(),'release-db-')),path=join(dir,'db.sqlite');
   let s=openStore(path);
-  const source=await readFile(join(root,'demo/events.csv'),'utf8'), a=s.release('R-001');
+  seedReleaseMetrics(s);
+  const a=s.release('R-001');
   const calc=runTool(s,'compare_metric',{releaseId:a.id,metric:0,day:14});
-  const imported=s.importCSV({dataset:a.dataset,name:'События',csv:source,completeThrough:'2026-11-16T07:00:00Z'});
+  const imported=s.importCSV({dataset:a.dataset,name:'События',csv:releaseMetricsCsv,completeThrough:'2026-11-16T07:00:00Z'});
   assert.equal(imported.version,calc.context.version);
   const newRelease=s.create({...a,activatedAt:new Date(a.launch).toISOString(),title:'Тестовый релиз'});
   assert.equal(newRelease.dataset,a.dataset);
-  assert.throws(()=>s.importCSV({dataset:a.dataset,csv:source+'R-001,C1,O1,I1,new,purchase,bad,payment_received,,100\n'}),/Строка .*event_at/);
+  assert.throws(()=>s.importCSV({dataset:a.dataset,csv:releaseMetricsCsv+'R-001,C1,O1,I1,new,payment_received,bad,,100\n'}),/Строка .*event_at/);
   assert.equal(s.version(a.dataset).id,imported.version);
   const few='order_id,invoice_id,event_type,event_at\r\nO1,I1,invoice_issued,2026-10-05T12:00:00Z\r\n';
   const replacement=s.importCSV({dataset:a.dataset,csv:few});
   assert.notEqual(replacement.version,calc.context.version);
-  assert.equal(s.getCalc(calc.id).result.series.all.after.n,110);
+  assert.equal(s.getCalc(calc.id).result.series.all.after.n,4);
   const blank=page(s,{releaseId:newRelease.id,day:14});
   assert.equal(blank.cards[0].status,'missing');assert.equal(blank.cards[0].series.all.after.value,null);
   assert.match(blank.cards[0].reason,/company_id/);
   s.close();s=openStore(path);assert.equal(s.release(newRelease.id).title,'Тестовый релиз');
-  assert.equal(s.getCalc(calc.id).result.series.all.before.n,140);s.close();
+  assert.equal(s.getCalc(calc.id).result.series.all.before.n,5);s.close();
 });
 
-test('chart comparison readiness follows the saved source version and observation date',async()=>{
+test('chart comparison readiness follows the saved source version and observation date',()=>{
   const store=openStore(':memory:');
   try{
+    seedReleaseMetrics(store);
     const query={releaseId:'R-001',day:14,spec:{field:'duration',stat:'median',start:'invoice',end:'payment'}};
     const ready=runTool(store,'build_chart',query);
     assert.equal(ready.result.status,'ready');
-    assert.deepEqual([ready.result.before.n,ready.result.after.n],[68,123]);
+    assert.deepEqual([ready.result.before.n,ready.result.after.n],[5,4]);
     assert.equal(runTool(store,'build_chart',{...query,day:1}).result.status,'preliminary');
-    const csv=await readFile(join(root,'demo/events.csv'),'utf8');
-    store.importCSV({dataset:store.release('R-001').dataset,csv});
+    store.importCSV({dataset:store.release('R-001').dataset,csv:releaseMetricsCsv});
     const unconfirmed=runTool(store,'build_chart',query);
     assert.equal(unconfirmed.result.status,'preliminary');
     assert.equal(store.getCalc(unconfirmed.id).result.status,'preliminary');
@@ -138,6 +141,7 @@ test('chart comparison readiness follows the saved source version and observatio
 
 test('same saved comparison through API and real stdio MCP session',async()=>{
   const dir=await mkdtemp(join(tmpdir(),'release-mcp-')),file=join(dir,'test.sqlite'),s=openStore(file);
+  seedReleaseMetrics(s);
   const app=application(s,{env:{}});await new Promise(r=>app.listen(0,'127.0.0.1',r));
   const base='http://127.0.0.1:'+app.address().port;
   const client=new Client({name:'acceptance',version:'1'});
@@ -147,11 +151,11 @@ test('same saved comparison through API and real stdio MCP session',async()=>{
     const web=await (await fetch(base+'/api/compare',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(input)})).json();
     const mcp=JSON.parse((await client.callTool({name:'compare_metric',arguments:input})).content[0].text);
     assert.equal(mcp.id,web.id);assert.deepEqual(mcp.result.series.all,web.result.series.all);
-    assert.deepEqual([web.result.series.all.before.n,web.result.series.all.after.n],[140,110]);
+    assert.deepEqual([web.result.series.all.before.n,web.result.series.all.after.n],[5,4]);
     const split=runTool(s,'breakdown',input).result;
-    assert.deepEqual(['before','after'].map(p=>split.new.series.all[p].d),[400,600]);
-    const inv=page(s,{releaseId:'R-002',day:14}).cards[1];assert.equal(inv.both.length,20);
-    assert.deepEqual([inv.series.new.after.n,inv.series.new.after.d,inv.series.old.after.n,inv.series.old.after.d],[48,80,62,120]);
+    assert.deepEqual(['before','after'].map(p=>split.new.series.all[p].d),[2,4]);
+    const inv=page(s,{releaseId:'R-002',day:14}).cards[1];assert.equal(inv.both.length,2);
+    assert.deepEqual([inv.series.new.after.n,inv.series.new.after.d,inv.series.old.after.n,inv.series.old.after.d],[3,4,1,2]);
     const early=page(s,{releaseId:'R-002',day:0});
     assert.equal(early.cards[1].series.all.after.value,null);assert.equal(early.cards[1].status,'preliminary');
     assert.equal(early.days.at(-1),-1);
@@ -161,6 +165,7 @@ test('same saved comparison through API and real stdio MCP session',async()=>{
 test('connected HTTP tool loop, follow-up history, two profiles, chart publication and restart',async()=>{
   const dir=await mkdtemp(join(tmpdir(),'release-agent-')),file=join(dir,'chat.sqlite');
   let s=openStore(file),sawFollowup=false;
+  seedReleaseMetrics(s);
   const env={LLM_BASE_URL:'http://localhost/v1',LLM_MODEL:'fixture'};
   const respond=m=>Response.json({choices:[{message:m}]});
   const tool=(n,args)=>respond({tool_calls:[{id:'tool-1',type:'function',function:{name:n,arguments:JSON.stringify(args)}}]});
@@ -186,7 +191,7 @@ test('connected HTTP tool loop, follow-up history, two profiles, chart publicati
     assert(sawFollowup);assert.equal(s.messages(ctx.releaseId).length,4);
     const chart=await post('chat',{...ctx,releaseId:'R-002',question:'Сколько дней обычно проходит до оплаты?',requestId:'chart'});
     const id=chart.refs[0].id,calc=s.getCalc(id);
-    assert.deepEqual(calc.result.after,{value:3.5,n:92});assert.match(calc.result.formula,/обоими событиями/);
+    assert.deepEqual(calc.result.after,{value:3,n:4});assert.match(calc.result.formula,/обоими событиями/);
     await post('boards',{author:'Дмитрий',releaseId:'R-002',name:'Скорость оплаты',calc:id});
     await post('boards',{author:'Анна',releaseId:'R-002',name:'Скорость оплаты',calc:id});
     assert.equal(s.boards('R-002').length,1);assert.equal(s.boards('R-001').length,0);
@@ -221,6 +226,7 @@ test('release messages identify their signed-in author after rename', async t =>
   const owner = await post('team/register', {...ownerAccount, name, code: env.ADMIN_INVITE_KEY});
   const other = await post('team/register', {login: 'csv-peer', password, name, code: app.accounts.invite('team')});
   const store = app.space('team');
+  seedReleaseMetrics(store);
   const context = page(store, {releaseId: 'R-001', day: 14}).context;
   store.addMessage(context.releaseId, 'legacy/q', {
     role: 'user', author: name, text: 'Старая реплика', context, created: 1,

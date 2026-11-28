@@ -198,7 +198,7 @@ test('an upgraded case links its exact archived signal rows after an unchanged i
       .map(f => ({...f,loc:'Metrics!A'+(i+2)}))),
   ]};
   const open = () => {
-    const store = openStore(path,{seedDemo:false});
+    const store = openStore(path);
     initEvidence(store.db);
     initWorkbench(store.db);
     return store;

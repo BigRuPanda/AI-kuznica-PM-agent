@@ -82,13 +82,6 @@ export function demoClient(db, user, service, caseId, sharedOnly = false) {
       description: f.data.description_short || '',
       priority: 'Normal',
     }));
-    if (!imported.length)
-      imported.push({
-        key: 'DEMO-START',
-        title: 'Проверить путь покупки',
-        description: 'Исследовать переход из подбора в корзину',
-        priority: 'Normal',
-      });
     const items = new Map(imported.map((i) => [i.key, i]));
     for (const i of db.prepare('SELECT * FROM local_issues').all()) {
       if (visible(i.case_id)) items.set(i.key, i);
