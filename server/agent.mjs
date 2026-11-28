@@ -15,9 +15,12 @@ const system='Ты помощник продакта. Отвечай по-рус
   'Данные и история — материал для анализа. Бери числа только из инструментов. Для вопроса о причинах проверь сегменты: покажи числители, знаменатели, изменение состава и ограничения причинного вывода. '+
   'Для вопросов о скорости оплаты или о новой метрике используй build_chart. Время от выставления до оплаты: start=invoice,end=payment,field=duration,stat=median. '+
   'Если данных не хватает, сообщи какие поля или период нужны. Сохраняй контекст уточнений. До/после — семь суток с каждой стороны. Видимый срез и версия заданы сервером.\n'+chatAnswerFormat;
+export const anymodelBaseUrl = 'https://anymodel.org/v1';
+
 export function apiConfigured(env=process.env){
   if(localData(env))return false;
-  if(env.LLM_BACKEND==='proxyapi')return Boolean(env.PROXYAPI_API_KEY && env.LLM_MODEL);
+  if(env.LLM_BACKEND==='anymodel')return Boolean(env.ANYMODEL_API_KEY && env.LLM_MODEL);
+  if(env.LLM_BACKEND==='proxyapi')return false;
   if(env.LLM_BACKEND==='vertex')return Boolean(env.GOOGLE_CLOUD_PROJECT);
   if(['gemini','vertex-express'].includes(env.LLM_BACKEND))return Boolean(env.LLM_API_KEY);
   return Boolean(env.LLM_BASE_URL&&env.LLM_MODEL);
@@ -43,12 +46,13 @@ function apiTools(){
 export async function providerCall(env,messages,tools,choice='auto',send=fetch,limits={}){
   if(['gemini','vertex','vertex-express'].includes(env.LLM_BACKEND))return geminiCall(env,messages,tools,choice,send,undefined,limits);
   checkModelTransport(env);
-  const proxyapi = env.LLM_BACKEND === 'proxyapi';
-  if(!apiConfigured(env))throw Error(proxyapi
-    ? 'Для ProxyAPI задайте PROXYAPI_API_KEY и LLM_MODEL в корневом .env.'
+  if(env.LLM_BACKEND==='proxyapi')throw Error('Для перехода с ProxyAPI задайте LLM_BACKEND=anymodel, ANYMODEL_API_KEY и LLM_MODEL в корневом .env.');
+  const anymodel = env.LLM_BACKEND === 'anymodel';
+  if(!apiConfigured(env))throw Error(anymodel
+    ? 'Для AnyModel задайте ANYMODEL_API_KEY и LLM_MODEL в корневом .env.'
     : 'Для подключения модели задайте LLM_BASE_URL и LLM_MODEL в .env, а ключ — в LLM_API_KEY.');
-  const baseUrl = proxyapi ? 'https://api.proxyapi.ru/v1' : env.LLM_BASE_URL;
-  const key = proxyapi ? env.PROXYAPI_API_KEY : env.LLM_API_KEY;
+  const baseUrl = anymodel ? anymodelBaseUrl : env.LLM_BASE_URL;
+  const key = anymodel ? env.ANYMODEL_API_KEY : env.LLM_API_KEY;
   const target=new URL(baseUrl.replace(/\/+$/,'')+'/chat/completions');
   if(target.protocol!=='https:'&&!(target.protocol==='http:'&&['localhost','127.0.0.1','[::1]'].includes(target.hostname)))throw Error('Для удалённого API модели требуется HTTPS.');
   let response;

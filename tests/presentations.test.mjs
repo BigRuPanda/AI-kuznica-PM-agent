@@ -449,12 +449,12 @@ test('a presentation labels a withdrawn signal and cites each sales workbook ver
   assert.equal((await exportPptx(deck,'http://localhost')).subarray(0,2).toString(),'PK');
 });
 
-test('the presentation editor cannot send a private snapshot through ProxyAPI',async t=>{
+test('the presentation editor cannot send a private snapshot through AnyModel',async t=>{
   const store=await fixture(t), db=store.db;
   db.prepare("UPDATE cases SET body=json_set(body,'$.owner',?) WHERE id='sample'").run(author.id);
-  const version=startPresentation(store,author,'sample','proxyapi-guard');
+  const version=startPresentation(store,author,'sample','anymodel-guard');
   let calls=0;
-  await workPresentations(store,{...local,LLM_BACKEND:'proxyapi',PROXYAPI_API_KEY:'synthetic-key'},async()=>{
+  await workPresentations(store,{...local,LLM_BACKEND:'anymodel',LLM_MODEL:'qwen/qwen3.8-27b',ANYMODEL_API_KEY:'synthetic-key'},async()=>{
     calls++;
     return Response.json({choices:[{message:{content:'{"slides":[0]}'}}]});
   });

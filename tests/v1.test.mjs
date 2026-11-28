@@ -14,41 +14,60 @@ import {geminiCall} from '../server/gemini.mjs';
 import {apiConfigured,makeAgent,providerCall} from '../server/agent.mjs';
 import {releaseMetricsCsv,seedReleaseMetrics} from './release-metrics-fixture.mjs';
 
-test('ProxyAPI uses its own key and endpoint across tool calls', async () => {
-  const env = {LLM_BACKEND:'proxyapi', LLM_MODEL:'qwen/qwen3.7-flash',
-    LLM_API_KEY:'old-provider-key', LLM_BASE_URL:'https://other.invalid/v1'};
+const anymodel = {
+  DATA_PROFILE: 'configured', LLM_BACKEND: 'anymodel', LLM_MODEL: 'qwen/qwen3.8-27b',
+  ANYMODEL_API_KEY: 'fixture-anymodel-key', LLM_API_KEY: 'other-provider-key',
+  LLM_BASE_URL: 'https://other.invalid/v1', PROXYAPI_API_KEY: 'fixture-old-key',
+};
+
+test('AnyModel requires a key and model and respects the local profile', async () => {
+  const unexpected = () => assert.fail('Unexpected model request');
+  for (const field of ['ANYMODEL_API_KEY', 'LLM_MODEL']) {
+    const env = {...anymodel, [field]: ''};
+    assert.equal(apiConfigured(env), false);
+    await assert.rejects(providerCall(env, [], [], 'auto', unexpected), /ANYMODEL_API_KEY и LLM_MODEL/);
+  }
+  const local = {...anymodel, DATA_PROFILE:'local'};
+  assert.equal(apiConfigured(local), false);
+  await assert.rejects(providerCall(local, [], [], 'auto', unexpected), /локальная/);
+});
+
+test('stale ProxyAPI configuration reports migration before using the generic API', async () => {
+  const env = {...anymodel, LLM_BACKEND:'proxyapi'};
   const unexpected = () => assert.fail('Unexpected model request');
   assert.equal(apiConfigured(env), false);
-  await assert.rejects(providerCall(env, [], [], 'auto', unexpected), /PROXYAPI_API_KEY/);
-  env.PROXYAPI_API_KEY = 'fixture-proxy-key';
-  assert.equal(apiConfigured(env), true);
-  await assert.rejects(providerCall({...env, DATA_PROFILE:'local'}, [], [], 'auto', unexpected), /локальная/);
+  await assert.rejects(providerCall(env, [], [], 'auto', unexpected), /LLM_BACKEND=anymodel/);
+});
 
+test('AnyModel uses its own key and endpoint across tool calls', async () => {
+  assert.equal(apiConfigured(anymodel), true);
   const messages = [{role:'user', content:'Проверь число.'}];
   const tool = {type:'function', function:{name:'check_value', parameters:{type:'object', properties:{}}}};
   const choice = {type:'function', function:{name:'check_value'}};
   const call = {id:'test-call', type:'function', function:{name:'check_value', arguments:'{}'}};
+  const requests = [];
   const send = async (url, init) => {
-    assert.equal(String(url), 'https://api.proxyapi.ru/v1/chat/completions');
-    assert.equal(init.headers.Authorization, 'Bearer fixture-proxy-key');
-    assert.equal(init.redirect, 'error');
-    const body = JSON.parse(init.body);
-    assert.equal(body.model, env.LLM_MODEL);
-    assert.deepEqual(body.tools, [tool]);
-    if (body.messages.length === 1) {
-      assert.deepEqual(body.tool_choice, choice);
+    requests.push({url:String(url), init, body:JSON.parse(init.body)});
+    if (requests.length === 1)
       return Response.json({choices:[{message:{role:'assistant', content:null, tool_calls:[call]}}]});
-    }
-    assert.equal(body.tool_choice, 'auto');
-    assert.deepEqual(body.messages.slice(1), [
-      {role:'assistant', content:null, tool_calls:[call]},
-      {role:'tool', tool_call_id:'test-call', content:'37'},
-    ]);
     return Response.json({choices:[{message:{role:'assistant', content:'37'}}], usage:{prompt_tokens:9, completion_tokens:2}});
   };
-  const first = await providerCall(env, messages, [tool], choice, send);
+  const first = await providerCall(anymodel, messages, [tool], choice, send);
   messages.push(first, {role:'tool', tool_call_id:first.tool_calls[0].id, content:'37'});
-  const final = await providerCall(env, messages, [tool], 'auto', send);
+  const final = await providerCall(anymodel, messages, [tool], 'auto', send);
+  assert.equal(requests.length, 2);
+  for (const {url, init, body} of requests) {
+    assert.equal(url, 'https://anymodel.org/v1/chat/completions');
+    assert.equal(init.headers.Authorization, 'Bearer fixture-anymodel-key');
+    assert.equal(init.redirect, 'error');
+    assert.equal(body.model, 'qwen/qwen3.8-27b');
+    assert.deepEqual(body.tools, [tool]);
+  }
+  assert.deepEqual(requests.map(({body}) => body.tool_choice), [choice, 'auto']);
+  assert.deepEqual(requests[1].body.messages.slice(1), [
+    {role:'assistant', content:null, tool_calls:[call]},
+    {role:'tool', tool_call_id:'test-call', content:'37'},
+  ]);
   assert.equal(final.content, '37');
   assert.deepEqual(final.usage, {input:9, output:2});
 });
