@@ -36,7 +36,7 @@ async function checkAnyModelCatalog(env,send){
 
 export async function checkModel(env=process.env,send=fetch){
   const anymodel=env.LLM_BACKEND==='anymodel';
-  const messages=[{role:'user',content:'Вызови check_value, затем верни полученное число.'}];
+  const messages=[{role:'user',content:'Вызови check_value, затем верни полученное число цифрами без пояснений.'}];
   if(anymodel && apiConfigured(env)){
     await checkAnyModelCatalog(env,send);
     valueCall(await providerCall(env,messages,[tool],'required',send));
@@ -45,7 +45,7 @@ export async function checkModel(env=process.env,send=fetch){
   const call=valueCall(first);
   messages.push({...first,role:'assistant'},{role:'tool',tool_call_id:call.id,content:'{"value":37}'});
   const final=await providerCall(env,messages,[tool],'auto',send);
-  if(typeof final.content!=='string' || !final.content.includes('37') || final.tool_calls?.length)
+  if(typeof final.content!=='string' || final.content.trim()!=='37' || final.tool_calls?.length)
     throw Error('Модель не подтвердила результат инструмента.');
 
   if(anymodel){

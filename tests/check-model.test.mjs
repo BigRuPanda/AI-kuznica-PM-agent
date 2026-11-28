@@ -5,7 +5,7 @@ import { checkModel } from '../scripts/check-model.mjs';
 const env = { DATA_PROFILE: 'configured', LLM_BACKEND: 'anymodel', LLM_MODEL: 'qwen/qwen3.8-27b',
   ANYMODEL_API_KEY: 'fixture-anymodel-key' };
 
-test('the AnyModel check verifies the catalog, tool choices, and short JSON output', async () => {
+function anymodelFixture(toolResult='37') {
   const requests = [];
   const call = { id: 'check-1', type: 'function', function: { name: 'check_value', arguments: '{}' } };
   const send = async (url, init) => {
@@ -13,10 +13,14 @@ test('the AnyModel check verifies the catalog, tool choices, and short JSON outp
     requests.push({ url: String(url), init, body });
     if (!body) return Response.json({ object: 'list', data: [{ id: 'qwen/qwen3.8-27b', object: 'model' }] });
     if (!body.tools) return Response.json({ choices: [{ message: { role: 'assistant', content: '{"value":37}' } }] });
-    if (body.tool_choice === 'auto') return Response.json({ choices: [{ message: { role: 'assistant', content: '37' } }] });
+    if (body.tool_choice === 'auto') return Response.json({ choices: [{ message: { role: 'assistant', content: toolResult } }] });
     return Response.json({ choices: [{ message: { role: 'assistant', content: null, tool_calls: [call] } }] });
   };
+  return { call, requests, send };
+}
 
+test('the AnyModel check verifies the catalog, tool choices, and short JSON output', async () => {
+  const { call, requests, send } = anymodelFixture();
   await checkModel(env, send);
   const [catalog, ...completions] = requests;
   assert.equal(catalog.url, 'https://anymodel.org/v1/models');
@@ -33,6 +37,11 @@ test('the AnyModel check verifies the catalog, tool choices, and short JSON outp
   assert.equal(completions[3].body.max_tokens, 56);
   assert.equal(completions[3].body.temperature, 0);
   assert.equal(completions[3].body.tools, undefined);
+});
+
+test('the AnyModel check rejects a different number containing the expected digits', async () => {
+  const { send } = anymodelFixture('137');
+  await assert.rejects(checkModel(env, send), /не подтвердила результат инструмента/);
 });
 
 test('the AnyModel check stops before a completion if the selected model is absent', async () => {
