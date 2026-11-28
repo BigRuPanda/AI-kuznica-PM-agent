@@ -2,14 +2,15 @@
   container: release-journal / inline-size;
   --release-control-border: color-mix(in srgb, var(--control-border) 72%, var(--fg));
   --release-control-size: 3rem;
+  --release-toolbar-control-size: 2.125rem;
   --release-actions-width: 24rem;
 }
-.release-journal :is(.release-journal-toolbar, .release-card-actions, .release-list-status) :is(button, summary) {
+.release-journal :is(.release-management, .release-card-actions, .release-list-status) :is(button, summary) {
   min-block-size: var(--release-control-size);
   border-color: var(--release-control-border);
   background-color: var(--surface-subtle);
 }
-.release-journal :is(.release-journal-toolbar, .release-card-actions, .release-list-status) :is(button, summary):is(:hover, :focus-visible) {
+.release-journal :is(.release-management, .release-card-actions, .release-list-status) :is(button, summary):is(:hover, :focus-visible) {
   border-color: var(--fg-muted);
   background-color: var(--surface-hover);
 }
@@ -51,21 +52,23 @@
 .release-journal-toolbar label { gap: 8px; color: var(--fg); font-weight: 550; }
 .release-journal-toolbar select {
   inline-size: 8rem;
-  min-block-size: var(--release-control-size);
+  min-block-size: var(--release-toolbar-control-size);
+  padding-block: 4px;
   border-color: var(--release-control-border);
 }
 .release-management { position: relative; }
-.release-management > summary {
+.release-journal .release-management > summary {
   display: flex;
   align-items: center;
-  padding: 9px 12px 9px 30px;
+  min-block-size: var(--release-toolbar-control-size);
+  padding: 5px 10px 5px 26px;
   border: 1px solid var(--release-control-border);
   border-radius: var(--button-radius);
   color: var(--fg);
   font-size: .9rem;
   font-weight: 600;
 }
-.release-management > summary::before { inset-inline-start: 12px; }
+.release-management > summary::before { inset-inline-start: 10px; }
 .release-management-actions {
   position: absolute;
   z-index: 2;
